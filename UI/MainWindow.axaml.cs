@@ -74,7 +74,8 @@ namespace EDes.UI
         private bool _previewFocused;
 
         // Right-drag model rotation state.
-        private bool  _rotating;
+        private bool  _rotating;      // right-drag: rotate the model / scene content
+        private bool  _orbiting;      // left-drag: orbit the simulator camera
         private Point _lastPtr;
 
         // For the Profiles tab's demo-score button.
@@ -161,8 +162,15 @@ namespace EDes.UI
             PreviewBorder.LostFocus += (_, _) => _previewFocused = false;
             AddHandler(KeyDownEvent, OnGlobalKeyDown, RoutingStrategies.Tunnel);
 
-            // ── Model test controls ───────────────────────────────────────────
-            // Right-drag = rotate (yaw/pitch); wheel = scale; arrow keys move XY.
+            // ── Preview mouse controls ────────────────────────────────────────
+            //   LEFT-drag   orbit the SIMULATOR camera (EmuHAng / EmuVAng) — i.e.
+            //               walk around the volume, exactly as if you moved around
+            //               the physical display.
+            //   RIGHT-drag  rotate the model / scene content (ModelYaw / ModelPitch).
+            //   Wheel       scale the model; Ctrl+wheel pulls the simulator camera
+            //               in and out (EmuDist).
+            // The two drags are deliberately separate: conflating "move the viewer"
+            // with "move the thing" makes it impossible to line a scene up.
             PreviewBorder.PointerPressed += (_, e) =>
             {
                 PreviewBorder.Focus();
@@ -173,23 +181,46 @@ namespace EDes.UI
                     _lastPtr  = pt.Position;
                     e.Pointer.Capture(PreviewBorder);
                 }
+                else if (pt.Properties.IsLeftButtonPressed)
+                {
+                    _orbiting = true;
+                    _lastPtr  = pt.Position;
+                    e.Pointer.Capture(PreviewBorder);
+                }
             };
             PreviewBorder.PointerMoved += (_, e) =>
             {
-                if (!_rotating) return;
+                if (!_rotating && !_orbiting) return;
                 var pos = e.GetPosition(PreviewBorder);
-                _s.ModelYaw   += (float)((pos.X - _lastPtr.X) * 0.01);
-                _s.ModelPitch  = Math.Clamp(_s.ModelPitch + (float)((pos.Y - _lastPtr.Y) * 0.01), -1.55f, 1.55f);
+                double dx = pos.X - _lastPtr.X, dy = pos.Y - _lastPtr.Y;
+
+                if (_rotating)
+                {
+                    _s.ModelYaw   += (float)(dx * 0.01);
+                    _s.ModelPitch  = Math.Clamp(_s.ModelPitch + (float)(dy * 0.01), -1.55f, 1.55f);
+                }
+                else
+                {
+                    // Drag right = camera walks right around the volume.
+                    float h = _s.EmuHAng + (float)(dx * 0.01);
+                    _s.EmuHAng = (h % (2f * MathF.PI) + 2f * MathF.PI) % (2f * MathF.PI);
+                    _s.EmuVAng = Math.Clamp(_s.EmuVAng + (float)(dy * 0.01), -1.4f, 1.4f);
+                }
                 _lastPtr = pos;
             };
             PreviewBorder.PointerReleased += (_, e) =>
             {
                 _rotating = false;
+                _orbiting = false;
                 e.Pointer.Capture(null);
             };
             PreviewBorder.PointerWheelChanged += (_, e) =>
             {
-                _s.ModelScale = Math.Clamp(_s.ModelScale * (float)(1.0 + e.Delta.Y * 0.1), 0.1f, 10f);
+                bool ctrl = (e.KeyModifiers & KeyModifiers.Control) != 0;
+                if (ctrl)
+                    _s.EmuDist = Math.Clamp(_s.EmuDist * (float)(1.0 - e.Delta.Y * 0.1), 0.5f, 40f);
+                else
+                    _s.ModelScale = Math.Clamp(_s.ModelScale * (float)(1.0 + e.Delta.Y * 0.1), 0.1f, 10f);
             };
 
             // Enable game input and focus the preview on open so keys drive the

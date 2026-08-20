@@ -14,6 +14,13 @@
     <AssemblyName>EDes</AssemblyName>
   </PropertyGroup>
 
+  <!-- ── Tests build separately (tests/PcbParserTests) — keep them out of the app ── -->
+  <ItemGroup>
+    <Compile Remove="tests\**" />
+    <Content Remove="tests\**" />
+    <None Include="tests\**" />
+  </ItemGroup>
+
   <!-- ── Assets: copy to output directory so the game can find them at runtime ── -->
   <ItemGroup>
     <Content Include="Assets\**\*">
@@ -44,6 +51,9 @@
     <!-- Required by ComputeSharp / System.Drawing interop -->
     <PackageReference Include="System.Drawing.Common"    Version="10.0.5" />
     <PackageReference Include="System.Windows.Extensions" Version="10.0.3" />
+
+    <!-- USB / serial oscilloscope input (ScopeSource) -->
+    <PackageReference Include="System.IO.Ports" Version="9.0.0" />
 
     <!-- WMI device enumeration for VoxonHardwareCheck's pre-init USB scan -->
     <PackageReference Include="System.Management" Version="9.0.0" />

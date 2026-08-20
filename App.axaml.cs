@@ -64,7 +64,7 @@ namespace EDes
             if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
             {
                 // Create the game module (lightweight — Init() runs on the game thread).
-                Game = new YourGame(Settings);
+                Game = new EDesApp(Settings);
 
                 // Create the settings/preview window (shows the game's tab + branding)
                 var window = new MainWindow(Settings, Game);

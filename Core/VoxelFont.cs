@@ -72,8 +72,42 @@ namespace EDes
         }
 
         // ── Voxel bitmap rendering ────────────────────────────────────────────
+        // The glyph walk lives in EmitGlyphs and hands every voxel to a sink, so
+        // the same code serves two callers: Draw() (fills the local batch and
+        // flushes it with one DrawVox_Batch) and Emit() (lets an app route HUD
+        // text through its own bounds-clipping / budget-limited batch instead).
+        private static int _emitN;
+        private static int _emitCol;
+
+        private static readonly System.Func<float, float, float, bool> LocalSink = (x, y, z) =>
+        {
+            if (_emitN >= MAX_VOX) return false;
+            _bx[_emitN] = x; _by[_emitN] = y; _bz[_emitN] = z; _bc[_emitN] = _emitCol;
+            _emitN++;
+            return true;
+        };
+
         private static void DrawVoxelText(LedHostCS ledHost, ref vxl_state_t vs,
                                           HudFont font, point3d pos, float size, int col, string text)
+        {
+            _emitN   = 0;
+            _emitCol = col;
+            EmitGlyphs(font, pos, size, text, LocalSink);
+            if (_emitN > 0)
+                ledHost.DrawVox_Batch(ref vs, ref _bx[0], ref _by[0], ref _bz[0], ref _bc[0], _emitN, 0);
+        }
+
+        /// <summary>Emit the voxels of a string through a caller-supplied sink instead
+        /// of drawing it, so an app can route HUD text through its own batch (bounds
+        /// clipping, voxel budget, one native call for the whole frame). Return false
+        /// from <paramref name="add"/> to stop early. Classic is the SDK's own vector
+        /// font and cannot be routed this way — it falls back to the Blocky glyphs.</summary>
+        public static void Emit(HudFont font, point3d pos, float size, string text,
+                                System.Func<float, float, float, bool> add)
+            => EmitGlyphs(font == HudFont.Classic ? HudFont.Blocky : font, pos, size, text, add);
+
+        private static void EmitGlyphs(HudFont font, point3d pos, float size, string text,
+                                       System.Func<float, float, float, bool> add)
         {
             float cellW   = size * 0.15f;          // width of one glyph cell (5 across)
             float cellH   = size * 0.18f;          // height of one glyph cell (7 down)
@@ -85,7 +119,6 @@ namespace EDes
             float subW    = cellW / nsub;
             float subH    = cellH / nsub;
 
-            int n = 0;
             float x0 = pos.x;
             for (int ci = 0; ci < text.Length; ci++)
             {
@@ -106,19 +139,11 @@ namespace EDes
                         for (int sx = 0; sx < nsub; sx++)
                         for (int sz = 0; sz < nsub; sz++)
                         {
-                            if (n >= MAX_VOX) goto flush;
-                            _bx[n] = cx + sx * subW;
-                            _by[n] = pos.y;
-                            _bz[n] = cz + sz * subH;
-                            _bc[n] = col;
-                            n++;
+                            if (!add(cx + sx * subW, pos.y, cz + sz * subH)) return;
                         }
                     }
                 }
             }
-        flush:
-            if (n > 0)
-                ledHost.DrawVox_Batch(ref vs, ref _bx[0], ref _by[0], ref _bz[0], ref _bc[0], n, 0);
         }
 
         /// <summary>Approximate rendered width of a string in world units (for centring

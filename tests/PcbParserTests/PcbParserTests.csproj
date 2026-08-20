@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Parser checks for the PCB importers, as a plain console exe:
+        dotnet run project tests/PcbParserTests
+    Exit code 0 means every check passed. It compiles the parser sources
+    directly (no project reference) so it stays runnable without the
+    Avalonia/Voxon dependency chain, and so it can never drift from the
+    files that actually ship.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>PcbParserTests</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <PcbSrc>$(MSBuildThisFileDirectory)..\..\Core\Pcb</PcbSrc>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="$(PcbSrc)\PcbBoard.cs" />
+    <Compile Include="$(PcbSrc)\GerberParser.cs" />
+    <Compile Include="$(PcbSrc)\ExcellonParser.cs" />
+  </ItemGroup>
+
+</Project>

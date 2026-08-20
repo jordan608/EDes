@@ -28,19 +28,43 @@ namespace EDes
         MenuUp = 6, MenuDown = 7, MenuLeft = 8, MenuRight = 9,
     }
 
+    /// <summary>One frame of 6-DOF SpaceNavigator (SpaceMouse) motion, read from
+    /// LedWin's nav API. All axes are normalised roughly to -1..1 and are already
+    /// dead-zoned by the SDK. Present is false when no puck is plugged in, so
+    /// consumers can skip nav handling entirely.</summary>
+    public readonly struct NavState
+    {
+        public readonly bool  Present;
+        public readonly float Dx, Dy, Dz;   // translation: right, lift, forward
+        public readonly float Ax, Ay, Az;   // rotation: pitch, yaw, roll
+        public readonly int   Buttons;      // bit 0 = left, bit 1 = right
+
+        public NavState(bool present, float dx, float dy, float dz,
+                        float ax, float ay, float az, int buttons)
+        {
+            Present = present;
+            Dx = dx; Dy = dy; Dz = dz;
+            Ax = ax; Ay = ay; Az = az;
+            Buttons = buttons;
+        }
+
+        public bool ButtonDown(VX_NAV_BUTTON_CODES b) => (Buttons & (1 << (int)b)) != 0;
+    }
+
     // Immutable per-frame snapshot handed to the game.
     public readonly struct InputState
     {
         public readonly float MoveX, MoveY, MoveZ;   // primary movement (−1..1)
         public readonly float LookX, LookY;          // right stick (−1..1)
+        public readonly NavState Nav;                // SpaceNavigator (Present=false if absent)
         private readonly uint _held;
         private readonly uint _pressed;
 
         public InputState(float mx, float my, float mz, float lx, float ly,
-                          uint held, uint pressed)
+                          uint held, uint pressed, NavState nav = default)
         {
             MoveX = mx; MoveY = my; MoveZ = mz; LookX = lx; LookY = ly;
-            _held = held; _pressed = pressed;
+            _held = held; _pressed = pressed; Nav = nav;
         }
 
         /// <summary>True while the action is held (keyboard or controller).</summary>
@@ -116,7 +140,34 @@ namespace EDes
 
             uint pressed = held & ~_prevHeld;
             _prevHeld = held;
-            return new InputState(mx, my, mz, lx, ly, held, pressed);
+            return new InputState(mx, my, mz, lx, ly, held, pressed, PollNav(ledWin));
+        }
+
+        // ── SpaceNavigator (SpaceMouse) ────────────────────────────────────────
+        // LedWin only fills the nav struct once it has been told to track at least
+        // one device, so SetNavCount(1) is issued once on the first poll. Everything
+        // is wrapped in try/catch: a build or machine without the nav API must still
+        // run on keyboard alone.
+        private bool _navInit;
+
+        private NavState PollNav(LedWinCS ledWin)
+        {
+            if (ledWin == null) return default;
+            try
+            {
+                if (!_navInit) { ledWin.SetNavCount(1); _navInit = true; }
+                if (ledWin.GetNavCount() <= 0) return default;
+
+                float dx = ledWin.GetNavAxisValue(0, VX_NAV_AXIS_CODES.NAV_X_AXIS_DIRECTION);
+                float dy = ledWin.GetNavAxisValue(0, VX_NAV_AXIS_CODES.NAV_Y_AXIS_DIRECTION);
+                float dz = ledWin.GetNavAxisValue(0, VX_NAV_AXIS_CODES.NAV_Z_AXIS_DIRECTION);
+                float ax = ledWin.GetNavAxisValue(0, VX_NAV_AXIS_CODES.NAV_PITCH_AXIS_ANGLE);
+                float ay = ledWin.GetNavAxisValue(0, VX_NAV_AXIS_CODES.NAV_YAW_AXIS_ANGLE);
+                float az = ledWin.GetNavAxisValue(0, VX_NAV_AXIS_CODES.NAV_ROLL_AXIS_ANGLE);
+                int   bt = ledWin.GetNavButtonState(0);
+                return new NavState(true, dx, dy, dz, ax, ay, az, bt);
+            }
+            catch { return default; }   // nav API unavailable — keyboard/mouse only
         }
 
         /// <summary>Rumble controller 0 (0..1 per motor). Safe if no controller.</summary>

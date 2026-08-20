@@ -4,10 +4,22 @@ Guidance for AI agents working in this repo. Read this before editing.
 
 ## What this is
 
-A .NET 9 (Windows) template for **Voxon volumetric display** games/apps. An **Avalonia** window
-provides a settings UI + live 2D preview of the 3D volume. A background thread drives the **Voxon
-SDK** (`LedHost.dll` / `LedWin.dll`) which renders voxels into the display (or a simulator when no
+**EDes - Electronics Design Explorer**: an electronics workbench for the **Voxon VX2 / VX2-XL
+volumetric display**, built on the VoxonStarter engine. An **Avalonia** window provides a settings
+UI + live 2D preview of the 3D volume. A background thread drives the **Voxon SDK**
+(`LedHost.dll` / `LedWin.dll`) which renders voxels into the display (or a simulator when no
 hardware is present).
+
+The app (`Core/EDesApp.cs`, an `IVoxonGame`) has three modes, cycled with `Tab`:
+
+| Mode | Contents |
+|---|---|
+| **Education** | 4 built-in circuits solved from Ohm law: heat-coloured/raised resistors, animated current flow, parallel branches in separate Y lanes, per-component R/V/I/P readouts, plus the scope strip. |
+| **Oscilloscope** | Up to 4 channels from USB serial (or synthetic), software trigger, graticule, measurement row - on the `y = PlaneY` plane (default 0.1). |
+| **PCB** | Imported Gerber + Excellon + meshes: layers spread along Z, drills bored through the stack, measurement cursor, fab/DRC-lite readout. |
+
+`DemoGame`/`YourGame` remain as engine reference examples; they are not wired up.
+See `README.md` (user-facing), `docs/PCB_IMPORT.md` and `docs/SCOPE_USB.md` (formats).
 
 ## Build & verify
 
@@ -23,6 +35,11 @@ dotnet build -t:Compile      # compile ONLY — use this to type-check while the
 - Do **not** pass ad-hoc MSBuild output-path props on the command line — a past mishap mangled
   `obj/.../*.FileListAbsolute.txt` and broke incremental builds. If you see
   "given path's format is not supported", delete that file and rebuild.
+- **Parser tests**: `dotnet run --project tests/PcbParserTests` (exit 0 = all checks pass). It
+  compiles `Core/Pcb/{PcbBoard,GerberParser,ExcellonParser}.cs` directly, so it runs without the
+  Avalonia/Voxon dependency chain and can never drift from the shipping files. `tests/**` is
+  excluded from `EDes.csproj`. Run it after ANY change to a parser - the coordinate-format code is
+  the part that silently corrupts boards.
 - Pre-existing warnings (~260) live in the SDK wrapper files (`VoxonTypes.cs`, `LedHostCS.cs`,
   `LedWinCS.cs`). New code should add none. Filter with `grep -iE ": error"`.
 
@@ -47,6 +64,22 @@ Program.cs (STAThread)
             │            shell-cull → CPU QueryColor or GpuLighting → DrawVox_Batch
             └─ Rend2D → preview buffer → settings.OnPreviewFrame → UI WriteableBitmap
 ```
+
+### EDesApp own frame (inside game.Update / game.Draw)
+
+```
+Update: HandleKeys (per-mode)  → DriveCamera (keys + controller + SpaceNav)
+        → Sync (settings → CircuitScene / ScopeSource / VoxelFont)
+        → PCB import request?  → ScopeSource.Poll (open/close port, synth fill)
+Draw:   ReadBounds (from the SDK, every frame)
+        → VoxelBatch.BeginFrame(MaxVoxels, radius, zHalf, spacing)
+        → mode content → HUD text → backdrop        (draw order = priority order)
+        → VoxelBatch.Flush  = ONE DrawVox_Batch     → settings.LiveVoxelCount
+```
+
+Solve/layout sits behind a dirty flag in `CircuitScene`; the renderers only ever read the flat
+`WireSegment` list. PCB import runs on the game thread (never the UI thread) when the UI sets
+`EDesSettings.PcbImportRequested`.
 
 ## File map (`Core/` unless noted)
 
@@ -82,6 +115,30 @@ Program.cs (STAThread)
 | `UI/MainWindow.axaml(.cs)` | Settings window: accordion tabs, preview, status bar, mouse model controls, validated inputs. |
 | `LedHostCS.cs`, `LedWinCS.cs`, `VoxonTypes.cs` (root) | SDK P/Invoke wrappers. **Don't edit casually**; they mirror native signatures. |
 
+### The EDes app (`Core/`, `Core/Sim/`, `Core/Pcb/`)
+
+| File | Role |
+|------|------|
+| `EDesApp.cs` | The `IVoxonGame`: modes, per-mode input, camera driving, bounds reading, budget setup, HUD, backdrop, and the whole settings tab. Start here. |
+| `EDesSettings.cs` | Persisted app state to `%AppData%/EDes/edes.json` (`IGameSettings`). All scalars `volatile`; `PcbImportRequested` is the UI-to-game-thread request flag. |
+| `Sim/VoxelBatch.cs` | **The choke point.** Budget-limited, bounds-clipping voxel accumulator + line/blob/ring/rect primitives; one `DrawVox_Batch` per frame. Everything drawn goes through it. |
+| `Sim/SceneCamera.cs` | pan, scale, yaw, pitch, roll `Transform()` + SpaceNav application. Every scene point passes through it exactly once. `HORIZONTAL_IS_X` is the one switch that swaps the layout horizontal/depth axes. |
+| `Sim/Hud.cs` | Text in the volume, routed through `VoxelBatch` (so text obeys the budget + bounds), scene-space or panel-space, plus engineering-notation formatting. |
+| `Sim/Palette.cs` | Packed 0xRRGGBB colours, clamped `Scale`/`Mix`, and the power `Heat` ramp. |
+| `Sim/Ohm.cs` | `Resistor`/`SeriesGroup`/`ParallelGroup` recursive solver + the 4 `CircuitPresets`. |
+| `Sim/CircuitScene.cs` | Solve + layout behind a dirty flag into a flat `List<WireSegment>`; extents derived from live display bounds. |
+| `Sim/CircuitRenderer.cs` | Draws the segment list: zigzags, heat colour + power bulge, battery, flow dots, labels. |
+| `Sim/ScopeSource.cs` | Serial (USB) reader thread + synthetic generator into per-channel ring buffers; auto channel count, 2 s reconnect, `Snapshot()` for the renderer. |
+| `Sim/ScopeMath.cs` | `ScopeStats.Compute`: Vpp/Vrms/mean/min/max, frequency + period from zero-crossings, duty. |
+| `Sim/ScopeRenderer.cs` | The scope face on a constant-Y plane: graticule, software trigger window, traces (one sample per voxel column), clip warning, readouts. |
+| `Pcb/PcbBoard.cs` | Board model in **mm** (layers, segs, pads, regions, holes, mesh clouds) + bounds + analysis (drill table, min track/drill, copper layer count). |
+| `Pcb/GerberParser.cs` | RS-274X subset: `%FS/%MO/%AD/%LP`, `D01/02/03`, `G01/02/03` (+`G74/75` arcs), `G36/37` regions. Unsupported constructs add a note, never silently drop. |
+| `Pcb/ExcellonParser.cs` | Drill/route: units, **zero suppression**, tool table, modal hits, `G85` slots. |
+| `Pcb/MeshLoader.cs` | Assimp to a deterministic area-weighted surface point cloud (STL/OBJ/PLY/GLB/...). Detects STEP and reports the conversion path instead of failing. |
+| `Pcb/PcbImporter.cs` | Folder/file dispatch + layer-kind classification (KiCad AND Altium/Eagle naming) + stack ordering. |
+| `Pcb/PcbRenderer.cs` | Fits the board to the cylinder (bounding **circle**), spreads layers along Z, draws tracks/pads/pours(hatched)/drills/meshes/cursor. |
+| `tests/PcbParserTests/` | Console check harness for the two parsers (30 assertions incl. inch/metric, legacy 2.4, arc sweep direction, slots). |
+
 ## Critical invariants (don't break these)
 
 1. **Threading**: ALL Voxon SDK calls happen on the game thread (STA). Never call the SDK from
@@ -101,6 +158,21 @@ Program.cs (STAThread)
    `[MethodImpl(NoOptimization|NoInlining)]`): the SDK init zeroes managed stack frames. Keep them.
 7. **Drawing**: prefer `ledHost.DrawVox_Batch` for many voxels (one native call). Colors are packed
    `0xRRGGBB` ints. World coords: X=left/right, Y=depth, Z=vertical (asymmetric; see `DisplayVolume`).
+8. **EDes: everything draws through `VoxelBatch`.** Do not call `DrawVox`/`DrawLine`/`DrawSphere`
+   or `VoxelFont.Draw` directly from app code - that bypasses the max-voxel limit AND the
+   display-bounds clipping, the two guarantees the app is built on. Use
+   `batch.Line/Blob/Ring/RectXZ/Add` and `Hud.Text` (which routes `VoxelFont.Emit` into the batch).
+   `HudFont.Classic` is the SDK own vector font and cannot be routed - it is the one exception,
+   and it is unbudgeted.
+9. **EDes: bounds are read from the SDK every frame** in `EDesApp.ReadBounds`
+   (`GetAspectRatioX`, `vs.boundr`, `vs.boundz`) and handed to `VoxelBatch.BeginFrame`. Never
+   hardcode 4.0/2.0 in app code, and do not widen the 6% safety margin without checking on
+   hardware.
+10. **EDes: -Z is up.** "Raise it" means SUBTRACT from z (resistor power bulge, layer stacking,
+    scope volts). Readout panels sit on the constant-Y `PlaneY` plane and are deliberately NOT
+    camera-transformed, so they stay legible while the scene rotates.
+11. **EDes: draw order is priority order** - mode content, then HUD text, then backdrop. When the
+    budget runs out, the tail of that order is what disappears. Keep new decoration last.
 
 ## Rendering best practices
 

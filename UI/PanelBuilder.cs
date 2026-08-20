@@ -18,6 +18,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
+using Avalonia.VisualTree;
 using System;
 using System.Collections.Generic;
 
@@ -149,6 +150,57 @@ namespace EDes.UI
 
             p.Children.Add(new TextBlock { Text = label, FontSize = 11, Margin = new Thickness(10, 4, 10, 0) });
             p.Children.Add(new Border    { Margin = new Thickness(10, 0, 10, 2), Child = row });
+        }
+
+        // ── AddTextBox — free-text row (paths, port names) ────────────────────
+        // Commits on Enter or focus loss, never per keystroke. Game input is already
+        // suspended while any TextBox has focus (MainWindow wires GotFocus), so typing
+        // a path can never drive the simulator.
+        public void AddTextBox(StackPanel p, string label, string initial, Action<string> onCommit)
+        {
+            var box = new TextBox
+            {
+                Text     = initial,
+                FontSize = 10,
+                Padding  = new Thickness(4, 2),
+                Margin   = new Thickness(10, 0, 10, 2),
+            };
+
+            void Commit() { onCommit(box.Text ?? ""); _onChanged(); }
+            box.KeyDown   += (_, e) => { if (e.Key == Key.Enter) { Commit(); e.Handled = true; } };
+            box.LostFocus += (_, _) => Commit();
+
+            p.Children.Add(new TextBlock { Text = label, FontSize = 11, Margin = new Thickness(10, 4, 10, 0) });
+            p.Children.Add(box);
+        }
+
+        // ── AddLiveInfo — dim text that refreshes itself ──────────────────────
+        // For readouts the game thread owns (board stats, scope status): the panel is
+        // built once, so a static AddInfo would show whatever was true at build time.
+        // Polled at 1 Hz on the UI thread; the supplied func must only read volatile
+        // or atomically-assigned state.
+        public void AddLiveInfo(StackPanel p, Func<string> text, double intervalSeconds = 1.0)
+        {
+            var tb = new TextBlock
+            {
+                Text         = text(),
+                FontSize     = 10,
+                Opacity      = 0.65,
+                Margin       = new Thickness(10, 1, 10, 1),
+                TextWrapping = TextWrapping.Wrap,
+                FontFamily   = new FontFamily("Consolas,Menlo,monospace"),
+            };
+            var timer = new Avalonia.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(intervalSeconds),
+            };
+            timer.Tick += (_, _) =>
+            {
+                if (tb.GetVisualRoot() == null) { timer.Stop(); return; }   // panel replaced
+                tb.Text = text();
+            };
+            timer.Start();
+            p.Children.Add(tb);
         }
 
         // ── AddToggle — checkbox with label ───────────────────────────────────

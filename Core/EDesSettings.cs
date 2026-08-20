@@ -1,0 +1,121 @@
+// ═══════════════════════════════════════════════════════════════════════════
+//  EDesSettings.cs — the app's own persisted state (%AppData%/EDes/edes.json)
+//
+//  Same threading discipline as GameSettings: the UI thread writes, the game
+//  thread reads, scalars are volatile and a one-frame torn read is acceptable.
+//  Strings are reference-assigned (atomic) and never mutated in place.
+//
+//  The engine saves this automatically (IGameSettings) on the debounced settings
+//  save, so nothing here needs an explicit Save() call from the UI.
+// ═══════════════════════════════════════════════════════════════════════════
+
+using System;
+using System.IO;
+using System.Text.Json;
+
+namespace EDes
+{
+    public enum EDesMode { Education = 0, Scope = 1, Pcb = 2 }
+
+    public sealed class EDesSettings : IGameSettings
+    {
+        // ── Mode ──────────────────────────────────────────────────────────────
+        public volatile int Mode = (int)EDesMode.Education;
+
+        // ── Global render budget / style ───────────────────────────────────────
+        /// <summary>Hard per-frame voxel ceiling. Everything the app draws is counted
+        /// against this, HUD text included.</summary>
+        public volatile int   MaxVoxels   = 150_000;
+        public volatile float TextSize    = 0.20f;
+        public volatile int   FontIndex   = 2;      // 0 Classic, 1 Blocky, 2 Bold
+        public volatile float TextWeight  = 1.0f;
+        public volatile bool  ShowLabels  = true;
+        public volatile bool  ShowBackdrop = true;  // grid floor + orientation rings
+        public volatile bool  ShowHudPanel = true;  // title / totals / voxel readout
+        public volatile float PlaneY       = 0.1f;  // the HUD + scope plane
+
+        // ── Camera / SpaceNavigator ───────────────────────────────────────────
+        public volatile bool  NavEnabled  = true;
+        public volatile float NavPanRate  = 2.5f;
+        public volatile float NavRotRate  = 1.5f;
+        public volatile float NavZoomRate = 1.2f;
+
+        // ── Education mode: the circuit ───────────────────────────────────────
+        public volatile int    PresetIndex = 0;
+        // float, not double: volatile requires a 32-bit type, and 24-bit float
+        // precision is far beyond what a resistor value needs.
+        public volatile float  SourceVolts = 12.0f;
+        public volatile float  R1 = 100f, R2 = 220f, R3 = 470f;
+        public volatile float  FlowSpeed  = 1.0f;
+        public volatile bool   FlowPaused = false;
+
+        // ── Scope ─────────────────────────────────────────────────────────────
+        public volatile bool   ScopeUsb          = false;         // false = synthetic
+        public          string ScopePort         = "";            // e.g. "COM4"
+        public volatile int    ScopeBaud         = 115200;
+        public volatile float  ScopeVoltsPerDiv  = 1.0f;
+        public volatile int    ScopeChannelMask  = 0xF;
+        public volatile int    ScopeTriggerCh    = 0;             // -1 = free run
+        public volatile float  ScopeTriggerLevel = 0f;
+        public volatile bool   ScopeTriggerRising = true;
+        public volatile bool   ScopeFrozen       = false;
+        public volatile bool   ScopeMeasurements = true;
+        public volatile float  SynthFreqHz       = 50f;
+
+        // ── PCB ───────────────────────────────────────────────────────────────
+        public          string PcbPath       = "";     // file or fabrication folder
+        public volatile float  LayerSpacing  = 0.35f;
+        public volatile float  TrackScale    = 1.0f;
+        public volatile bool   PcbPads       = true;
+        public volatile bool   PcbRegions    = true;
+        public volatile bool   PcbFillRegions = false;
+        public volatile bool   PcbHoles      = true;
+        public volatile bool   PcbMeshes     = true;
+        public volatile bool   PcbCursor     = false;
+        public volatile float  PcbCursorX    = 0f;     // mm, board coordinates
+        public volatile float  PcbCursorY    = 0f;
+        public volatile float  PcbBrightness = 1.0f;
+        public volatile int    PcbIsolate    = -1;     // -1 = show all layers
+        public volatile int    MeshPointBudget = 80_000;
+
+        /// <summary>Set by the UI to ask the game thread to (re)import PcbPath.
+        /// The game thread clears it — imports never run on the UI thread.</summary>
+        public volatile bool PcbImportRequested = false;
+
+        // ── Persistence ───────────────────────────────────────────────────────
+
+        private static readonly string Dir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "EDes");
+        private static readonly string PathName = Path.Combine(Dir, "edes.json");
+        private static readonly JsonSerializerOptions Opts =
+            new() { WriteIndented = true, IncludeFields = true };
+
+        public static EDesSettings Load()
+        {
+            try
+            {
+                if (File.Exists(PathName))
+                {
+                    var s = JsonSerializer.Deserialize<EDesSettings>(File.ReadAllText(PathName), Opts);
+                    if (s != null)
+                    {
+                        s.PcbImportRequested = s.PcbPath.Length > 0;   // reload the last board
+                        return s;
+                    }
+                }
+            }
+            catch (Exception ex) { App.Log($"[EDesSettings.Load] {ex.Message}"); }
+            return new EDesSettings();
+        }
+
+        public void Save()
+        {
+            try
+            {
+                Directory.CreateDirectory(Dir);
+                File.WriteAllText(PathName, JsonSerializer.Serialize(this, Opts));
+            }
+            catch (Exception ex) { App.Log($"[EDesSettings.Save] {ex.Message}"); }
+        }
+    }
+}
