@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!--
+      AllowUnsafeBlocks is required for pinning the preview buffer (GCHandle.Alloc).
+      ComputeSharp also needs it for GPU compute shaders.
+    -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>EDes</RootNamespace>
+    <AssemblyName>EDes</AssemblyName>
+  </PropertyGroup>
+
+  <!-- ── Assets: copy to output directory so the game can find them at runtime ── -->
+  <ItemGroup>
+    <Content Include="Assets\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Sounds\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!-- ── NuGet packages ── -->
+  <ItemGroup>
+    <!-- Avalonia UI (settings window, preview image) -->
+    <PackageReference Include="Avalonia"                      Version="11.3.0" />
+    <PackageReference Include="Avalonia.Desktop"              Version="11.3.0" />
+    <PackageReference Include="Avalonia.Themes.Fluent"        Version="11.3.0" />
+    <PackageReference Include="Avalonia.Controls.ColorPicker" Version="11.3.0" />
+
+    <!-- 3D model loading (GLB/FBX/OBJ via Assimp) -->
+    <PackageReference Include="AssimpNet"    Version="5.0.0-beta1" />
+
+    <!-- Audio: WASAPI loopback capture + playback -->
+    <PackageReference Include="NAudio"       Version="2.2.1" />
+
+    <!-- GPU compute (optional — disable if no compatible GPU) -->
+    <PackageReference Include="ComputeSharp" Version="3.0.0" />
+
+    <!-- Required by ComputeSharp / System.Drawing interop -->
+    <PackageReference Include="System.Drawing.Common"    Version="10.0.5" />
+    <PackageReference Include="System.Windows.Extensions" Version="10.0.3" />
+
+    <!-- WMI device enumeration for VoxonHardwareCheck's pre-init USB scan -->
+    <PackageReference Include="System.Management" Version="9.0.0" />
+  </ItemGroup>
+
+  <!--
+    NOTE: The Voxon SDK (LedHost.dll, LedWin.dll, vxl_cs.dll) is NOT a NuGet package.
+    Install the Voxon SDK from https://voxon.co/downloads and ensure the DLLs are
+    either in PATH or in the same directory as the built executable.
+    The SDK DLLs are located at runtime via VLED_CS_Utils.GetVLEDFilePath().
+  -->
+
+</Project>

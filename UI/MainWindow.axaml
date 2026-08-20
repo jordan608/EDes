@@ -1,0 +1,201 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="EDes.UI.MainWindow"
+        Title="EDes"
+        Width="1100" Height="680"
+        MinWidth="640" MinHeight="420"
+        CanResize="True"
+        WindowState="Normal"
+        RequestedThemeVariant="Dark">
+
+    <!--
+        3-row layout (VLEDStudio pattern):
+          Row 0 — Top bar   : app title | motor controls | save/load/reset
+          Row 1 — Content   : sidebar (nav + settings) | splitter | preview
+          Row 2 — Status bar: hardware info | live stats | VPS readout
+    -->
+    <Grid RowDefinitions="Auto,*,Auto">
+
+        <!-- ══════════════════════════════════════════════════════════════════
+             Row 0 — Top bar
+             ══════════════════════════════════════════════════════════════ -->
+        <Border Grid.Row="0"
+                BorderBrush="#22FFFFFF" BorderThickness="0,0,0,1"
+                Padding="10,6,10,6">
+            <Grid ColumnDefinitions="*,Auto,Auto">
+
+                <!-- App name (left) -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal"
+                            Spacing="10" VerticalAlignment="Center">
+                    <TextBlock Text="EDes"
+                               FontSize="15" FontWeight="Bold"
+                               Foreground="#FF00CCFF"
+                               VerticalAlignment="Center"/>
+                    <TextBlock Text="Voxon Template"
+                               FontSize="10" Opacity="0.40"
+                               VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- Motor controls (centre-right, hardware only) -->
+                <StackPanel x:Name="MotorPanel"
+                            Grid.Column="1"
+                            Orientation="Horizontal"
+                            Spacing="4" VerticalAlignment="Center"
+                            Margin="0,0,12,0"
+                            IsVisible="False">
+                    <Button x:Name="BtnMotorStart"
+                            Padding="10,4" FontSize="11"
+                            Background="#1A4A1A" Foreground="#88FF88"
+                            BorderBrush="#336633" BorderThickness="1"
+                            ToolTip.Tip="Start the spinning platter motor">
+                        <StackPanel Orientation="Horizontal" Spacing="5">
+                            <TextBlock Text="▶" FontSize="10" VerticalAlignment="Center"/>
+                            <TextBlock Text="Motor On"  VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="BtnMotorStop"
+                            Padding="10,4" FontSize="11"
+                            Background="#4A1A1A" Foreground="#FF8888"
+                            BorderBrush="#663333" BorderThickness="1"
+                            ToolTip.Tip="Stop the spinning platter motor">
+                        <StackPanel Orientation="Horizontal" Spacing="5">
+                            <TextBlock Text="⬛" FontSize="9" VerticalAlignment="Center"/>
+                            <TextBlock Text="Motor Off" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+
+                <!-- Save / Load / Reset (right) -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal"
+                            Spacing="4" VerticalAlignment="Center">
+                    <Button x:Name="SaveBtn"  Content="Save"  Padding="10,4"
+                            FontSize="11" Click="OnSaveClick"
+                            ToolTip.Tip="Save all settings to disk"/>
+                    <Button x:Name="LoadBtn"  Content="Load"  Padding="10,4"
+                            FontSize="11" Click="OnLoadClick"
+                            ToolTip.Tip="Reload settings from disk"/>
+                    <Button x:Name="ResetBtn" Content="Reset" Padding="10,4"
+                            FontSize="11" Click="OnResetClick"
+                            ToolTip.Tip="Restore all settings to defaults"/>
+                </StackPanel>
+
+            </Grid>
+        </Border>
+
+        <!-- ══════════════════════════════════════════════════════════════════
+             Row 1 — Main content (sidebar | splitter | preview)
+             ══════════════════════════════════════════════════════════════ -->
+        <Grid Grid.Row="1" ColumnDefinitions="280,4,*">
+
+            <!-- ── Left sidebar (nav + settings panel area) ─────────────── -->
+            <Grid Grid.Column="0"
+                  MinWidth="200" MaxWidth="480"
+                  RowDefinitions="Auto,1,*"
+                  Background="#0A0A12">
+
+                <!-- Nav button list (populated by code) -->
+                <StackPanel Grid.Row="0"
+                            x:Name="NavPanel"
+                            Margin="6,8,6,4" Spacing="1"/>
+
+                <Border Grid.Row="1" Background="#22FFFFFF" Margin="8,0"/>
+
+                <!-- Active settings panel (swapped by nav).
+                     Camera controls now live inside the Simulator panel. -->
+                <ContentControl Grid.Row="2"
+                                x:Name="SettingsPanelArea"/>
+
+            </Grid>
+
+            <!-- ── Drag splitter ─────────────────────────────────────────── -->
+            <GridSplitter Grid.Column="1"
+                          ResizeDirection="Columns"
+                          Background="#22FFFFFF"
+                          HorizontalAlignment="Stretch"/>
+
+            <!-- ── Right: 3D preview ──────────────────────────────────────── -->
+            <!-- Focusable so clicking it pulls keyboard focus off the settings
+                 controls; game keys are then routed to the game, not sliders. -->
+            <Border x:Name="PreviewBorder" Grid.Column="2"
+                    Background="#000000" Focusable="True">
+                <Image x:Name="PreviewImage"
+                       Stretch="Uniform"
+                       HorizontalAlignment="Stretch"
+                       VerticalAlignment="Stretch"/>
+            </Border>
+
+        </Grid>
+
+        <!-- ══════════════════════════════════════════════════════════════════
+             Row 2 — Status bar
+             ══════════════════════════════════════════════════════════════ -->
+        <Border Grid.Row="2"
+                BorderBrush="#22FFFFFF" BorderThickness="0,1,0,0"
+                Padding="10,4,10,4">
+            <Grid ColumnDefinitions="*,Auto">
+
+                <!-- Left: diagnostics -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="16">
+                    <TextBlock x:Name="DeviceText"
+                               Text="Connecting..." FontSize="10" Opacity="0.80"
+                               VerticalAlignment="Center"/>
+                    <TextBlock x:Name="ModelText"
+                               Text="" FontSize="10" Opacity="0.60"
+                               VerticalAlignment="Center"/>
+                    <TextBlock x:Name="VoxelText"
+                               Text="" FontSize="10" Opacity="0.60"
+                               VerticalAlignment="Center"/>
+                    <TextBlock x:Name="LatencyText"
+                               Text="" FontSize="10" Opacity="0.60"
+                               VerticalAlignment="Center"/>
+                    <TextBlock x:Name="MotorText"
+                               Text="" FontSize="10" Opacity="0.60"
+                               VerticalAlignment="Center"/>
+                    <TextBlock x:Name="BoundsText"
+                               Text="" FontSize="10" Opacity="0.60"
+                               VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- Right: VPS readout -->
+                <TextBlock x:Name="VpsText"
+                           Grid.Column="1"
+                           Text="VPS: –" FontSize="10" Opacity="0.80"
+                           VerticalAlignment="Center"/>
+
+            </Grid>
+        </Border>
+
+        <!-- ══════════════════════════════════════════════════════════════════
+             Splash overlay — covers all rows, shown until the game loop runs.
+             ══════════════════════════════════════════════════════════════ -->
+        <Border x:Name="SplashOverlay"
+                Grid.Row="0" Grid.RowSpan="3"
+                Background="#0A0A12"
+                IsVisible="True">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="14">
+                <Image x:Name="SplashImage"
+                       MaxWidth="360" MaxHeight="360"
+                       HorizontalAlignment="Center"/>
+                <TextBlock x:Name="SplashTitle"
+                           Text="EDes"
+                           FontSize="28" FontWeight="Bold"
+                           HorizontalAlignment="Center"/>
+                <TextBlock x:Name="SplashStatusText"
+                           Text="Starting…"
+                           FontSize="12" Opacity="0.75"
+                           HorizontalAlignment="Center"
+                           TextWrapping="Wrap" TextAlignment="Center"
+                           MaxWidth="380"/>
+                <StackPanel x:Name="SplashButtons"
+                            Orientation="Horizontal" Spacing="10"
+                            HorizontalAlignment="Center"
+                            IsVisible="False">
+                    <Button x:Name="SplashRetryBtn"     Content="Retry"/>
+                    <Button x:Name="SplashSimulatorBtn"  Content="Continue in Simulator"/>
+                    <Button x:Name="SplashQuitBtn"       Content="Quit"/>
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+    </Grid>
+</Window>
