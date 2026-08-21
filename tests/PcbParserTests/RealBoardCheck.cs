@@ -32,7 +32,13 @@ public static class RealBoardCheck
         var board = new PcbBoard();
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var seenProgress = new List<string>();
-        bool ok = PcbImporter.Import(Root, board, 60_000, f => seenProgress.Add(f));
+        bool ok = PcbImporter.Import(Root, board, 60_000, f => seenProgress.Add(f),
+                                     new PcbImporter.StepOptions
+                                     {
+                                         Tessellate  = true,
+                                         ToleranceMm = 1.0f,
+                                         Command     = "",
+                                     });
         sw.Stop();
 
         // The per-file inventory — printed in full, because its whole purpose is to be

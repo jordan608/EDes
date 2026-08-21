@@ -413,6 +413,8 @@ namespace EDes
             _cam.LockRotX = _s.LockRotX;
             _cam.LockRotY = _s.LockRotY;
             _cam.LockRotZ = _s.LockRotZ;
+
+            _cam.InvertTranslation = _s.NavInvertTranslation;
         }
 
         // ── Pick list ─────────────────────────────────────────────────────────
@@ -570,6 +572,43 @@ namespace EDes
             _s.InspectX = x; _s.InspectY = y; _s.InspectZ = z;
         }
 
+        /// <summary>Left edge of the HUD plane, for text.
+        ///
+        /// Not simply -radius: the volume is a CYLINDER, so at the HUD plane's y the
+        /// leftmost point is sqrt(r^2 - y^2), which is inside -radius. Using -radius puts
+        /// the first glyph column outside the volume where VoxelBatch clips it, so the
+        /// text silently loses its first character.</summary>
+        private float TextLeftX
+        {
+            get
+            {
+                float y = _s.PlaneY;
+                float inside = _radius * _radius - y * y;
+                float edge = inside > 0f ? MathF.Sqrt(inside) : _radius;
+                return -edge * 0.995f;
+            }
+        }
+
+        /// <summary>Row one: which board, and which mode. Always drawn, because "what am I
+        /// looking at and what mode am I in" is the one thing that is never not worth a
+        /// line — and it is the anchor everything below it reads relative to.</summary>
+        private void DrawStatusHeader()
+        {
+            string mode = ((EDesInspect)_s.InspectStage) switch
+            {
+                EDesInspect.Signal    => "INSPECTOR MODE: SIGNALS",
+                EDesInspect.Component => "INSPECTOR MODE: COMPONENTS",
+                _                     => "CAMERA MODE",
+            };
+
+            string board = _board.HasGeometry || _board.Solids.Count > 0
+                           ? _board.SourceName
+                           : "(no board)";
+
+            _hud.Text(new point3d(TextLeftX, _s.PlaneY, _topText.Row()), _textSize,
+                      Palette.TextHilite, board.ToUpperInvariant() + "   " + mode);
+        }
+
         /// <summary>True when an inspector is active AND the probe is actually on
         /// something. Both halves matter: with nothing selected the normal readouts are
         /// still the most useful thing on the display.</summary>
@@ -613,20 +652,21 @@ namespace EDes
             var probe = _pcb.Probe;
 
             float size = _textSize * 0.85f;
-            float x    = -_radius * 0.95f;
+            float x    = TextLeftX;
 
             // Shares the frame's single top-of-display cursor rather than picking its own
             // fraction of the height — a hand-picked -0.92 * zHalf is exactly how two
             // blocks end up in the same voxels once one of them grows a line.
             ref TextStack st = ref _topText;
 
+            // The mode name already occupies the top row (DrawStatusHeader), so repeating
+            // it here would spend one of very few rows saying the same thing twice.
             string title = ((EDesInspect)_s.InspectStage) switch
             {
                 EDesInspect.Signal    => "SIGNAL INSPECTOR",
                 EDesInspect.Component => "COMPONENT INSPECTOR",
                 _                     => "INSPECTION MODE",
             };
-            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.TextHilite, title);
 
             if (!probe.Hit)
             {
@@ -669,6 +709,10 @@ namespace EDes
             // what keeps two blocks from writing into the same rows now that they all
             // share the top band instead of being split between the two ends.
             _topText = _layout.Readout();
+
+            // FIRST, so it owns the top row of the display and everything else stacks
+            // beneath it.
+            if ((EDesMode)_s.Mode == EDesMode.Pcb) DrawStatusHeader();
 
             switch ((EDesMode)_s.Mode)
             {
@@ -1043,7 +1087,7 @@ namespace EDes
         private void DrawNavReadout()
         {
             float size = _textSize * 0.8f;
-            float x    = -_radius * 0.92f;
+            float x    = TextLeftX;
             ref TextStack st = ref _topText;   // shared top-of-display cursor
 
             bool detected = _nav.Present || _navHostUsable || _nav.Devices > 0;
@@ -1720,6 +1764,14 @@ namespace EDes
                 return "locked: " + (_s.LockRotX ? "X " : "") + (_s.LockRotY ? "Y " : "")
                                   + (_s.LockRotZ ? "Z" : "");
             }, 0.3);
+
+            ui.AddToggle(sec, "Invert all XYZ translation (not rotation)",
+                         _s.NavInvertTranslation, v => _s.NavInvertTranslation = v);
+            ui.AddInfo(sec, "Flips all three translation axes together. Which way feels " +
+                            "right depends on whether you read the puck as moving the MODEL " +
+                            "or as moving your VIEWPOINT — those are opposite on every axis, " +
+                            "so it is a preference rather than something to get 'correct'. " +
+                            "Rotation is deliberately unaffected.");
 
             ui.AddButton(sec, "Rotate about: LOCAL / GLOBAL axes", () =>
             {

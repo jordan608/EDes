@@ -62,6 +62,13 @@ namespace EDes.Pcb
             string? gmsh = OnPath("gmsh");
             if (gmsh != null) { how = "gmsh found on PATH"; return gmsh; }
 
+            // pip installs the launcher into Python's Scripts directory, which is NOT on
+            // PATH on a default Windows Python. Finding it there is the difference between
+            // "pip install gmsh" being sufficient and the user also having to edit their
+            // environment for a tool they just installed.
+            string? pipGmsh = InPythonScripts("gmsh");
+            if (pipGmsh != null) { how = "gmsh found in a Python Scripts directory"; return pipGmsh; }
+
             string? freecad = OnPath("freecadcmd") ?? OnPath("FreeCADCmd");
             if (freecad != null) { how = "FreeCAD found on PATH"; return freecad; }
 
@@ -149,10 +156,17 @@ namespace EDes.Pcb
         private static bool RunGmsh(string tool, string stepPath, string outPath,
                                     float tolMm, List<string> notes)
         {
-            // -2 surface mesh only (a 3D volume mesh would be wasted work for a shell),
-            // -clmax caps element size so the tolerance knob has an effect, -v 0 keeps the
-            // banner out of the captured output.
-            string args = $"\"{stepPath}\" -2 -format stl -o \"{outPath}\" " +
+            // -2 surface mesh only (a 3D volume mesh is wasted work for a shell), -bin
+            // for binary STL, -clmax to cap element size so the tolerance knob bites, -v 0
+            // to keep the banner out of the captured output.
+            //
+            // -bin matters more than it looks: on a real board gmsh's ASCII output was
+            // 10.9 MB against 2.2 MB binary for the identical mesh, and ASCII has to be
+            // parsed a line at a time where binary is a fixed-stride blit.
+            //
+            // Measured on that same board, so the tolerance is not a guess:
+            //     clmax 0.4 -> 44,158 triangles     clmax 1.0 -> 11,978     clmax 2.0 -> 6,414
+            string args = $"\"{stepPath}\" -2 -format stl -bin -o \"{outPath}\" " +
                           $"-clmax {tolMm.ToString("0.####", CultureInfo.InvariantCulture)} -v 0";
             return Run(tool, args, stepPath, notes);
         }
@@ -189,13 +203,11 @@ namespace EDes.Pcb
         {
             try
             {
-                var psi = new ProcessStartInfo(tool, args)
-                {
-                    UseShellExecute        = false,
-                    CreateNoWindow         = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError  = true,
-                };
+                var psi = BuildStart(tool, args);
+                psi.UseShellExecute        = false;
+                psi.CreateNoWindow         = true;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError  = true;
 
                 using var proc = Process.Start(psi);
                 if (proc == null)
@@ -236,9 +248,121 @@ namespace EDes.Pcb
             }
         }
 
+        /// <summary>How to actually launch the discovered tool.
+        ///
+        /// Three cases, because "the tessellator" is not always an executable:
+        ///   • a real .exe runs directly;
+        ///   • an extensionless pip console script is a PYTHON file, so it runs under
+        ///     python — no shell, no extra quoting;
+        ///   • a .bat/.cmd is not an executable image at all and has to go through cmd.
+        ///
+        /// The middle case exists because pip on Windows ships both forms, and the batch
+        /// one is the trap: CreateProcess cannot execute it, and wrapping it in cmd added a
+        /// quoting layer that swallowed the command entirely — cmd exited zero having done
+        /// nothing, so the failure read as "the tessellator produced no mesh" and pointed
+        /// at the wrong component.</summary>
+        private static ProcessStartInfo BuildStart(string tool, string args)
+        {
+            string ext = Path.GetExtension(tool).ToLowerInvariant();
+
+            if (ext == ".bat" || ext == ".cmd")
+                return new ProcessStartInfo("cmd.exe", $"/c \"\"{tool}\" {args}\"");
+
+            if (ext.Length == 0 && LooksLikePythonScript(tool))
+            {
+                string py = PythonFor(tool);
+                return new ProcessStartInfo(py, $"\"{tool}\" {args}");
+            }
+
+            return new ProcessStartInfo(tool, args);
+        }
+
+        /// <summary>Does this extensionless file start like a Python script? Checked rather
+        /// than assumed, so a genuine extensionless BINARY is not handed to python.</summary>
+        private static bool LooksLikePythonScript(string path)
+        {
+            try
+            {
+                using var fs = File.OpenRead(path);
+                var buf = new byte[2];
+                if (fs.Read(buf, 0, 2) != 2) return false;
+                return buf[0] == (byte)'#' && buf[1] == (byte)'!';   // shebang
+            }
+            catch { return false; }
+        }
+
+        /// <summary>The python that owns a Scripts directory, so the interpreter matches
+        /// the environment the package was installed into rather than whichever python
+        /// happens to be first on PATH.</summary>
+        private static string PythonFor(string scriptPath)
+        {
+            try
+            {
+                string? scripts = Path.GetDirectoryName(scriptPath);
+                string? root    = scripts != null ? Path.GetDirectoryName(scripts) : null;
+                if (root != null)
+                {
+                    string sameEnv = Path.Combine(root, "python.exe");
+                    if (File.Exists(sameEnv)) return sameEnv;
+                }
+            }
+            catch { }
+            return "python";
+        }
+
         /// <summary>Two minutes. Long enough for a real assembly, short enough that a
         /// tessellator waiting on a prompt cannot hang the game thread indefinitely.</summary>
         private const int TIMEOUT_MS = 120_000;
+
+        /// <summary>Look for a pip-installed console script in the usual Python Scripts
+        /// directories. Checked in addition to PATH rather than instead of it, so a
+        /// system-wide install still wins.</summary>
+        private static string? InPythonScripts(string exe)
+        {
+            var roots = new List<string>();
+            foreach (var v in new[] { "LOCALAPPDATA", "APPDATA" })
+            {
+                string? bas = Environment.GetEnvironmentVariable(v);
+                if (bas != null) roots.Add(bas);
+            }
+
+            foreach (string root in roots)
+            {
+                // Path segments rather than a literal separator: "Programs\\Python" is a
+                // backslash escape waiting to be got wrong, and Path.Combine is what
+                // knows the separator anyway.
+                string[][] layouts = { new[] { "Python" }, new[] { "Programs", "Python" } };
+
+                foreach (string[] segs in layouts)
+                {
+                    string dir = root;
+                    foreach (string seg in segs) dir = Path.Combine(dir, seg);
+                    if (!Directory.Exists(dir)) continue;
+                    try
+                    {
+                        // Any Python version; sorted so the highest-named wins.
+                        var subs = Directory.GetDirectories(dir);
+                        Array.Sort(subs, StringComparer.OrdinalIgnoreCase);
+                        for (int i = subs.Length - 1; i >= 0; i--)
+                            // "" FIRST, deliberately. pip ships both `gmsh` (a plain
+                            // Python script) and `gmsh.bat` (which is only
+                            // `python "%~f0\\..\\gmsh" %*`). The .bat cannot be launched by
+                            // CreateProcess at all, and routing it through cmd adds a
+                            // quoting layer that silently swallowed the whole command —
+                            // cmd exited zero having run nothing, which surfaced as "the
+                            // tessellator produced no mesh" and looked like gmsh failing.
+                            // Running the script under python directly skips both problems.
+                            foreach (string ext in new[] { "", ".exe", ".bat", ".cmd" })
+                            {
+                                string cand = Path.Combine(subs[i], "Scripts", exe + ext);
+                                if (File.Exists(cand)) return cand;
+                            }
+                    }
+                    catch { }
+                }
+            }
+            return null;
+        }
 
         private static string? OnPath(string exe)
         {

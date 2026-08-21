@@ -107,6 +107,14 @@ namespace EDes
         /// global is easier when lining the board up with the volume itself.</summary>
         public volatile bool  NavLocalAxes = true;
 
+        /// <summary>Flip all three puck translation axes at once, rotation untouched.
+        ///
+        /// Exists because which direction feels right depends on whether you read the puck
+        /// as moving the MODEL or as moving your VIEWPOINT, and those two readings are
+        /// opposite on every translation axis. That is a preference, not a fact, so it is a
+        /// switch rather than a default someone has to live with.</summary>
+        public volatile bool  NavInvertTranslation = false;
+
         /// <summary>Lock rotation about an individual axis during normal camera mode.
         /// The axes are whichever frame NavLocalAxes selects, so a lock always means the
         /// axis it is named after. Inspection mode locks all three regardless.</summary>
@@ -240,7 +248,11 @@ namespace EDes
 
         /// <summary>Max element size for the tessellator, mm. Smaller is smoother and costs
         /// triangles; this is the knob for a model that arrives too coarse or too heavy.</summary>
-        public volatile float  PcbTessellateTol = 0.4f;
+        /// Default 1.0, chosen from measurement rather than taste: on a real 2-layer
+        /// export clmax 0.4 gives 44,158 triangles (~132,000 voxels, which is most of the
+        /// 150,000 default budget spent on surfaces alone), 1.0 gives 11,978 (~36,000) and
+        /// 2.0 gives 6,414. 1.0 leaves room for the board underneath it.
+        public volatile float  PcbTessellateTol = 1.0f;
 
         /// <summary>Explicit tessellator command, or empty to auto-discover (gmsh, then
         /// FreeCAD). Present so an unusual or commercial toolchain can be used without a

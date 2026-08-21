@@ -83,8 +83,12 @@ namespace EDes.Sim
             HeaderZ    = TopZ;
             SubHeaderZ = TopZ + step;
 
-            // Header, then readouts, then geometry — all text contiguous at the top.
-            ReadoutTopZ = TopZ + step * (headerRows + 0.25f);
+            // The text band starts at TopZ EXACTLY, i.e. z = -zHalf, the top of the
+            // volume. It used to start below a reserved header block, which left the top
+            // few rows of the display empty and made the first line of text look
+            // mis-anchored. Header rows are now simply the first rows taken from the same
+            // cursor, so whatever draws first lands on the top row.
+            ReadoutTopZ = TopZ;
 
             // The text band is CAPPED to the top half. Without this it can swallow the
             // whole volume: inspection mode alone asks for nine rows, and on a shallow
@@ -93,7 +97,8 @@ namespace EDes.Sim
             // geometry wins and the surplus text runs over it — overlapping text is
             // ugly, no geometry is useless.
             float textFloor = TopZ + (BottomZ - TopZ) * 0.5f;
-            float wanted    = ReadoutTopZ + step * (Math.Max(0, readoutRows) + 0.5f);
+            float wanted    = ReadoutTopZ
+                            + step * (Math.Max(0, headerRows) + Math.Max(0, readoutRows) + 0.5f);
 
             ContentTopZ    = MathF.Min(wanted, textFloor);
             ContentBottomZ = BottomZ;
