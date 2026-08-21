@@ -156,5 +156,9 @@ Console.WriteLine("=== design folder tree ===");
 failures += PcbParserTests.DesignTreeChecks.Run();
 
 Console.WriteLine();
+Console.WriteLine("=== real Altium project outputs ===");
+failures += PcbParserTests.RealBoardCheck.Run();
+
+Console.WriteLine();
 Console.WriteLine(failures == 0 ? "ALL CHECKS PASSED" : $"{failures} CHECK(S) FAILED");
 return failures == 0 ? 0 : 1;

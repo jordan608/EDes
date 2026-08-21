@@ -11,13 +11,17 @@
 //    ZEROES     Without decimal points, coordinates are integers with an
 //               implied format. "INCH,TZ" means trailing zeros kept / leading
 //               suppressed and vice-versa. Getting this backwards scales the
-//               whole drill map by 10x or 100x — so when the header does not
-//               say, the format is inferred from the digit count (2.4 inch,
-//               3.3 metric are the conventional defaults).
+//               whole drill map by 10x or 100x.
+//    DIGITS     Altium states the split explicitly in a comment,
+//               ";FILE_FORMAT=4:4", and DOES NOT use the conventional default.
+//               That comment is authoritative when present; only without it does
+//               the conventional 2.4 inch / 3.3 metric split apply. Ignoring it
+//               reads X0008128 as 0.812 mm instead of 8.128 mm.
 //
-//  Supported: M48 header, INCH/METRIC[,LZ|TZ], Tn C<dia> tool definitions,
-//  tool selection, X/Y hits (modal), G85 slots, plated/non-plated hints from
-//  the file name, M30/M00 end.
+//  Supported: M48 header, INCH/METRIC[,LZ|TZ], ";FILE_FORMAT=i:d", Tn C<dia>
+//  tool definitions (with Altium F/S feed fields), tool selection, X/Y hits
+//  (modal), G85 slots, ";TYPE=PLATED" / ";TYPE=NON_PLATED" sections as well as
+//  NPTH filename hints, M30/M00 end.
 // ═══════════════════════════════════════════════════════════════════════════
 
 using System;
@@ -43,6 +47,7 @@ namespace EDes.Pcb
             }
 
             var   toolDia   = new float[MAX_TOOLS];
+            var   toolPlated = new bool[MAX_TOOLS];
             bool  metric    = false, unitsStated = false;
             bool  leadingZerosOmitted = true;      // "LZ" means leading kept; default: suppressed
             bool  inHeader  = false;
@@ -52,10 +57,45 @@ namespace EDes.Pcb
             bool  plated    = !Path.GetFileNameWithoutExtension(path)
                                    .Contains("NPTH", StringComparison.OrdinalIgnoreCase);
 
+            // -1 = not stated, so the conventional per-unit default is used.
+            int intDigits = -1, decDigits = -1;
+
             foreach (string raw in lines)
             {
                 string line = raw.Trim();
-                if (line.Length == 0 || line.StartsWith(";")) continue;
+                if (line.Length == 0) continue;
+
+                // Comments carry two things we must not ignore: the coordinate format
+                // and the plated/non-plated section marker.
+                if (line.StartsWith(";"))
+                {
+                    int fmt = line.IndexOf("FILE_FORMAT", StringComparison.OrdinalIgnoreCase);
+                    if (fmt >= 0)
+                    {
+                        int eq = line.IndexOf('=', fmt);
+                        if (eq > 0)
+                        {
+                            string spec = line[(eq + 1)..].Trim();
+                            char[] seps = { ':', '.', ',' };
+                            int at = spec.IndexOfAny(seps);
+                            if (at > 0 &&
+                                int.TryParse(spec[..at], out int i2) &&
+                                int.TryParse(spec[(at + 1)..].Trim(), out int d2) &&
+                                i2 is > 0 and < 9 && d2 is > 0 and < 9)
+                            {
+                                intDigits = i2;
+                                decDigits = d2;
+                            }
+                        }
+                    }
+
+                    if (line.Contains("NON_PLATED", StringComparison.OrdinalIgnoreCase))
+                        plated = false;
+                    else if (line.Contains("TYPE=PLATED", StringComparison.OrdinalIgnoreCase))
+                        plated = true;
+
+                    continue;
+                }
 
                 if (line.StartsWith("M48")) { inHeader = true;  continue; }
                 if (line == "%" || line.StartsWith("M95")) { inHeader = false; continue; }
@@ -81,7 +121,8 @@ namespace EDes.Pcb
                                            CultureInfo.InvariantCulture, out float toolSize))
                             toolDia[tnum] = metric ? toolSize : toolSize * 25.4f;
                     }
-                    if (!inHeader) tool = tnum;      // body: this is a tool change
+                    if (inHeader) toolPlated[tnum] = plated;   // section in force here
+                    else          tool = tnum;                 // body: a tool change
                     continue;
                 }
 
@@ -94,15 +135,22 @@ namespace EDes.Pcb
                 string first = slotAt >= 0 ? line.Substring(0, slotAt) : line;
                 string? second = slotAt >= 0 ? line.Substring(slotAt + 3) : null;
 
-                if (!ReadXY(first, metric, leadingZerosOmitted, ref x, ref y)) continue;
+                if (!ReadXY(first, metric, leadingZerosOmitted, intDigits, decDigits,
+                            ref x, ref y)) continue;
 
                 float dia = tool >= 0 ? toolDia[tool] : 0.3f;
-                var hole = new PcbHole { X = x, Y = y, Dia = dia > 0 ? dia : 0.3f, Plated = plated };
+                var hole = new PcbHole
+                {
+                    X = x, Y = y,
+                    Dia = dia > 0 ? dia : 0.3f,
+                    Plated = tool >= 0 ? toolPlated[tool] : plated,
+                };
 
                 if (second != null)
                 {
                     float sx = x, sy = y;
-                    if (ReadXY(second, metric, leadingZerosOmitted, ref sx, ref sy))
+                    if (ReadXY(second, metric, leadingZerosOmitted, intDigits, decDigits,
+                               ref sx, ref sy))
                     {
                         hole.Slot = true;
                         hole.X1   = sx;
@@ -117,6 +165,9 @@ namespace EDes.Pcb
 
             if (!unitsStated)
                 board.Notes.Add($"{Path.GetFileName(path)}: no INCH/METRIC header — assumed inch");
+            if (intDigits < 0 && added > 0)
+                board.Notes.Add($"{Path.GetFileName(path)}: no FILE_FORMAT — assumed " +
+                                (metric ? "3:3 metric" : "2:4 inch"));
             return added;
         }
 
@@ -127,7 +178,7 @@ namespace EDes.Pcb
         }
 
         private static bool ReadXY(string token, bool metric, bool leadingZerosOmitted,
-                                   ref float x, ref float y)
+                                   int intDigits, int decDigits, ref float x, ref float y)
         {
             bool got = false;
             int i = 0;
@@ -142,7 +193,7 @@ namespace EDes.Pcb
                 var span = token.AsSpan(s, i - s);
                 if (span.Length == 0) continue;
 
-                float v = Decode(span, metric, leadingZerosOmitted);
+                float v = Decode(span, metric, leadingZerosOmitted, intDigits, decDigits);
                 if (c == 'X') x = v; else y = v;
                 got = true;
             }
@@ -152,7 +203,8 @@ namespace EDes.Pcb
         /// <summary>Decode one coordinate to mm. Explicit decimal points win; otherwise
         /// the conventional implied format for the unit is applied (2.4 inch / 3.3 mm),
         /// padding according to which end of the number was suppressed.</summary>
-        private static float Decode(ReadOnlySpan<char> span, bool metric, bool leadingZerosOmitted)
+        private static float Decode(ReadOnlySpan<char> span, bool metric, bool leadingZerosOmitted,
+                                    int statedInt = -1, int statedDec = -1)
         {
             if (span.IndexOf('.') >= 0)
                 return float.TryParse(span, NumberStyles.Float, CultureInfo.InvariantCulture, out float d)
@@ -161,8 +213,9 @@ namespace EDes.Pcb
             bool neg = span[0] == '-';
             if (neg || span[0] == '+') span = span[1..];
 
-            int intDigits = metric ? 3 : 2;
-            int decDigits = metric ? 3 : 4;
+            // A stated FILE_FORMAT wins over the conventional default.
+            int intDigits = statedInt > 0 ? statedInt : (metric ? 3 : 2);
+            int decDigits = statedDec > 0 ? statedDec : (metric ? 3 : 4);
             int total     = intDigits + decDigits;
 
             // Pad the suppressed end back out to the full width before scaling.

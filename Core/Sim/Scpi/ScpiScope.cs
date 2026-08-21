@@ -56,6 +56,13 @@ namespace EDes.Sim.Scpi
         public string Identity { get; private set; } = "";
         public string Describe => _t.Describe;
 
+        /// <summary>How many ANALOG channels this instrument has, inferred from the model
+        /// in *IDN?. This matters more than it looks: querying :CHAN3:DISP? on a 2-channel
+        /// scope gets no reply at all, and the resulting read timeout leaves the socket
+        /// unusable — the next waveform read then fails. So we never ask about channels
+        /// the instrument does not have.</summary>
+        public int AnalogChannels { get; private set; } = 4;
+
         public ScpiScope(IScpiTransport transport) { _t = transport; }
 
         /// <summary>Open the link and read *IDN?. Throws if either fails.</summary>
@@ -65,23 +72,44 @@ namespace EDes.Sim.Scpi
             _t.Write("*IDN?");
             Identity = _t.ReadLine().Trim();
             if (Identity.Length == 0) throw new InvalidOperationException("No response to *IDN?");
+            AnalogChannels = InferAnalogChannels(Identity);
+        }
+
+        /// <summary>Rigol and Siglent both encode the channel count as the LAST digit of
+        /// the model number: MSO2302A and DS2072A are 2-channel, DS1054Z and SDS1104X-E
+        /// are 4-channel. Anything unrecognised falls back to 2, the safe minimum — an
+        /// extra channel that exists but is not polled is a missing trace, whereas
+        /// polling one that does not exist breaks the link.</summary>
+        public static int InferAnalogChannels(string idn)
+        {
+            // "RIGOL TECHNOLOGIES,MSO2302A,DS2F252400118,00.03.06" -> "MSO2302A"
+            var parts = idn.Split(',');
+            string model = parts.Length > 1 ? parts[1].Trim() : idn.Trim();
+
+            int lastDigit = -1;
+            foreach (char c in model)
+                if (char.IsDigit(c)) lastDigit = c - '0';
+                else if (lastDigit >= 0) break;      // letters after the number end it
+
+            return lastDigit is >= 1 and <= 4 ? lastDigit : 2;
         }
 
         /// <summary>Which analog channels are switched on, as a bit mask (bit 0 = CH1).
         /// Channels the instrument does not have simply answer nothing and are skipped.</summary>
         public uint QueryEnabledChannels(int maxChannels = 4)
         {
+            int limit = Math.Min(maxChannels, Math.Max(1, AnalogChannels));
             uint mask = 0;
-            for (int ch = 1; ch <= maxChannels; ch++)
+
+            for (int ch = 1; ch <= limit; ch++)
             {
-                try
-                {
-                    _t.Write($":CHAN{ch}:DISP?");
-                    string reply = _t.ReadLine().Trim();
-                    if (reply == "1" || reply.Equals("ON", StringComparison.OrdinalIgnoreCase))
-                        mask |= 1u << (ch - 1);
-                }
-                catch { break; }        // no such channel / link trouble
+                // Deliberately NOT wrapped in a swallow-everything catch: a timeout here
+                // means the link is in trouble, and carrying on would issue reads against
+                // a broken socket. Let it propagate so the caller reconnects.
+                _t.Write($":CHAN{ch}:DISP?");
+                string reply = _t.ReadLine().Trim();
+                if (reply == "1" || reply.Equals("ON", StringComparison.OrdinalIgnoreCase))
+                    mask |= 1u << (ch - 1);
             }
             return mask;
         }

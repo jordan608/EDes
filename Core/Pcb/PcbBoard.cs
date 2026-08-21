@@ -22,8 +22,8 @@ namespace EDes.Pcb
     public enum PcbLayerKind
     {
         CopperTop, CopperInner, CopperBottom,
-        SolderMask, Silkscreen, Paste,
-        Outline, Drill, Mesh, Unknown,
+        SolderMask, Silkscreen, Paste, PadMaster,
+        Outline, Mechanical, Drill, Mesh, Unknown,
     }
 
     /// <summary>A drawn track or line: a segment with a width (mm).</summary>
@@ -90,7 +90,9 @@ namespace EDes.Pcb
             PcbLayerKind.Silkscreen   => 0xF0F0F0,
             PcbLayerKind.SolderMask   => 0x2C7A4B,
             PcbLayerKind.Paste        => 0x9AA0A6,
+            PcbLayerKind.PadMaster    => 0xD08A5A,
             PcbLayerKind.Outline      => 0xFFE066,
+            PcbLayerKind.Mechanical   => 0x7A6ACF,
             PcbLayerKind.Drill        => 0x808080,
             PcbLayerKind.Mesh         => 0x66D9C0,
             _                         => 0x8899AA,
@@ -128,9 +130,14 @@ namespace EDes.Pcb
     {
         public string  Path;
         public string  Name;
+        public string  Folder;     // parent folder — in a fixed export tree this IS the meaning
         public DocKind Kind;
         public long    Bytes;
         public int     Pages;      // PDF page count when cheaply known, else 0
+
+        /// <summary>"Schematic Prints/board.PDF" — every PDF in an Altium output tree is
+        /// named after the project, so the folder is what tells them apart.</summary>
+        public string Display => Folder.Length > 0 ? Folder + "/" + Name : Name;
     }
 
     /// <summary>A sampled point cloud from a mesh file (STL / OBJ / GLB / PLY).</summary>
@@ -145,6 +152,20 @@ namespace EDes.Pcb
         public int     Colour  = 0x66D9C0;
         /// <summary>Model bounds in its own units (mm assumed for STL/STEP exports).</summary>
         public float MinX, MinY, MinZ, MaxX, MaxY, MaxZ;
+    }
+
+    /// <summary>Summary of a design-rule-check report. Parsed rather than merely
+    /// catalogued, because "0 violations across 17 rules" is exactly the kind of
+    /// fact this display should be able to state about a board.</summary>
+    public sealed class DrcSummary
+    {
+        public string       File       = "";
+        public int          Rules;
+        public int          Violations;
+        /// <summary>Rules that actually failed, "name: n" — usually empty, and the
+        /// only part worth reading when it is not.</summary>
+        public readonly List<string> Failing = new();
+        public bool Parsed;
     }
 
     public sealed class PcbBoard
@@ -162,6 +183,9 @@ namespace EDes.Pcb
         /// <summary>Folders walked during the last import, deepest paths first — shown
         /// so it is obvious which parts of a design tree contributed.</summary>
         public readonly List<string> SourceFolders = new();
+
+        /// <summary>The design-rule-check report, if the tree contained one.</summary>
+        public DrcSummary Drc { get; set; } = new DrcSummary();
 
         public string SourceName = "(no board loaded)";
         /// <summary>Import warnings/notes — surfaced in the settings panel.</summary>
@@ -197,13 +221,21 @@ namespace EDes.Pcb
             BomLines.Clear();
             Documents.Clear();
             SourceFolders.Clear();
+            Drc = new DrcSummary();
             Notes.Clear();
             SourceName = "(no board loaded)";
             MinX = MinY = float.MaxValue;
             MaxX = MaxY = float.MinValue;
         }
 
-        /// <summary>Recompute the 2D bounding box over everything imported.</summary>
+        /// <summary>Recompute the 2D bounding box.
+        ///
+        /// What counts is deliberate: if the design has a board OUTLINE layer, the
+        /// outline IS the board and nothing else may enlarge it. Mechanical layers
+        /// carry dimension lines, title blocks and notes that sit well outside the
+        /// board — on a real Altium export they made a 15 x 30 mm board measure
+        /// 140 x 61 mm, which then scaled the whole thing down to a speck on the
+        /// display. Hidden layers never contribute either.</summary>
         public void ComputeBounds()
         {
             MinX = MinY = float.MaxValue;
@@ -217,8 +249,16 @@ namespace EDes.Pcb
                 if (y > MaxY) MaxY = y;
             }
 
+            bool haveOutline = false;
+            foreach (var l in Layers)
+                if (l.Kind == PcbLayerKind.Outline && l.ObjectCount > 0) { haveOutline = true; break; }
+
             foreach (var l in Layers)
             {
+                if (!l.Visible) continue;
+                if (haveOutline && l.Kind != PcbLayerKind.Outline) continue;
+                if (!haveOutline && l.Kind == PcbLayerKind.Mechanical) continue;
+
                 foreach (var s in l.Segs)
                 {
                     float h = s.W * 0.5f;
@@ -234,22 +274,28 @@ namespace EDes.Pcb
                     for (int i = 0; i < r.Count; i++) Hit(r.X[i], r.Y[i]);
             }
 
-            foreach (var h in Holes)
+            // Drills and parts are inside the outline by definition; only fold them in
+            // when there is no outline to trust.
+            if (!haveOutline)
             {
-                Hit(h.X - h.Dia * 0.5f, h.Y - h.Dia * 0.5f);
-                Hit(h.X + h.Dia * 0.5f, h.Y + h.Dia * 0.5f);
-                if (h.Slot) Hit(h.X1, h.Y1);
-            }
+                foreach (var h in Holes)
+                {
+                    Hit(h.X - h.Dia * 0.5f, h.Y - h.Dia * 0.5f);
+                    Hit(h.X + h.Dia * 0.5f, h.Y + h.Dia * 0.5f);
+                    if (h.Slot) Hit(h.X1, h.Y1);
+                }
 
-            foreach (var c in Components) Hit(c.X, c.Y);
+                foreach (var c in Components) Hit(c.X, c.Y);
+            }
 
             // Meshes carry their own 3D bounds; fold their XY footprint in so a
             // mesh-only import still fits the display.
-            foreach (var m in Meshes)
-            {
-                Hit(m.MinX, m.MinY);
-                Hit(m.MaxX, m.MaxY);
-            }
+            if (!haveOutline)
+                foreach (var m in Meshes)
+                {
+                    Hit(m.MinX, m.MinY);
+                    Hit(m.MaxX, m.MaxY);
+                }
         }
 
         // ── Analysis ──────────────────────────────────────────────────────────
@@ -283,11 +329,19 @@ namespace EDes.Pcb
             return groups;
         }
 
+        /// <summary>Narrowest track on a COPPER layer. Silk, mask and mechanical layers
+        /// routinely use a 1-mil aperture to draw outlines, which is not a track and must
+        /// not be reported as the board's minimum trace width.</summary>
         public float MinTrackWidth()
         {
             float min = float.MaxValue;
             foreach (var l in Layers)
+            {
+                if (l.Kind is not (PcbLayerKind.CopperTop or PcbLayerKind.CopperInner
+                                   or PcbLayerKind.CopperBottom)) continue;
+                if (l.Segs.Count == 0) continue;      // pads only: no tracks to measure
                 if (l.MinWidth < min) min = l.MinWidth;
+            }
             return min == float.MaxValue ? 0f : min;
         }
 
@@ -299,13 +353,23 @@ namespace EDes.Pcb
             return min == float.MaxValue ? 0f : min;
         }
 
+        /// <summary>Copper layers in the stack. Pad-master layers (Altium .GPT/.GPB) are
+        /// composites of the pads already on the copper layers, not extra layers — counting
+        /// them reports a 2-layer board as 4-layer.</summary>
         public int CopperLayerCount()
         {
-            int n = 0;
+            bool top = false, bottom = false;
+            int inner = 0;
             foreach (var l in Layers)
-                if (l.Kind is PcbLayerKind.CopperTop or PcbLayerKind.CopperInner
-                           or PcbLayerKind.CopperBottom) n++;
-            return n;
+            {
+                switch (l.Kind)
+                {
+                    case PcbLayerKind.CopperTop:    top = true; break;
+                    case PcbLayerKind.CopperBottom: bottom = true; break;
+                    case PcbLayerKind.CopperInner:  inner++; break;
+                }
+            }
+            return (top ? 1 : 0) + (bottom ? 1 : 0) + inner;
         }
 
         public int ComponentsOnSide(bool bottom)

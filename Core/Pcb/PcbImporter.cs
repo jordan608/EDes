@@ -45,8 +45,20 @@ namespace EDes.Pcb
         {
             ".gbr", ".ger", ".gb", ".art", ".pho",
             ".gtl", ".gbl", ".gto", ".gbo", ".gts", ".gbs", ".gtp", ".gbp",
-            ".gm1", ".gm2", ".gko", ".g1", ".g2", ".g3", ".g4",
+            ".gpt", ".gpb",                              // Altium pad master top/bottom
+            ".gm", ".gm1", ".gm2", ".gm3", ".gm4", ".gm5", ".gm6",   // mechanical
+            ".gko", ".gd1", ".gg1",                      // keep-out, drill drawing/guide
+            ".g1", ".g2", ".g3", ".g4",
             ".cmp", ".sol", ".plc", ".pls", ".stc", ".sts",
+        };
+
+        /// <summary>Files that sit right next to the Gerbers and are NOT geometry.
+        /// Altium's aperture library and its report files would otherwise be fed to the
+        /// Gerber parser, which produces either nothing or nonsense.</summary>
+        private static readonly string[] NeverGeometry =
+        {
+            ".apr", ".apr_lib", ".extrep", ".rep", ".drr", ".ldp", ".html", ".htm",
+            ".xls", ".xlsx", ".xlsm", ".ods", ".pdf", ".doc", ".docx", ".rtf",
         };
 
         private static readonly string[] DrillExtensions =
@@ -154,6 +166,35 @@ namespace EDes.Pcb
                     continue;
                 }
 
+                // Reports and workbooks are inventory, never geometry — check this
+                // BEFORE the Gerber/drill sniffing, which would otherwise be handed
+                // an aperture library or a DRC report.
+                if (Array.IndexOf(NeverGeometry, ext) >= 0)
+                {
+                    if (LooksLikeBom(file)) { bomFiles.Add(file); continue; }
+
+                    if (ext == ".drc" || name.Contains("Design Rule Check",
+                                                       StringComparison.OrdinalIgnoreCase))
+                    {
+                        ParseDrc(file, board);
+                        AddDocument(board, file, DocKind.Other);
+                        docs++;
+                        continue;
+                    }
+
+                    var k = ClassifyDocument(file);
+                    if (k.HasValue) { AddDocument(board, file, k.Value); docs++; }
+                    continue;
+                }
+
+                if (ext == ".drc")
+                {
+                    ParseDrc(file, board);
+                    AddDocument(board, file, DocKind.Other);
+                    docs++;
+                    continue;
+                }
+
                 if (LooksLikePlacement(file)) { placementFiles.Add(file); continue; }
                 if (LooksLikeBom(file))       { bomFiles.Add(file);       continue; }
 
@@ -169,8 +210,19 @@ namespace EDes.Pcb
                 {
                     var kind  = ClassifyLayer(file);
                     var layer = board.GetOrAddLayer(name, kind);
-                    if (GerberParser.Parse(file, layer, board)) gerbers++;
-                    else board.Layers.Remove(layer);
+
+                    // Mechanical/drawing layers are dimension art — often the largest
+                    // file in the set. They load, but start hidden so they cannot eat
+                    // the voxel budget before the copper is drawn.
+                    if (kind == PcbLayerKind.Mechanical) layer.Visible = false;
+                    // Pad masters duplicate the copper pads; hidden by default so pads
+                    // are not drawn twice on the same plane.
+                    if (kind == PcbLayerKind.PadMaster) layer.Visible = false;
+
+                    if (GerberParser.Parse(file, layer, board) && layer.ObjectCount > 0)
+                        gerbers++;
+                    else
+                        board.Layers.Remove(layer);      // unparseable, or drew nothing
                     continue;
                 }
 
@@ -179,10 +231,24 @@ namespace EDes.Pcb
                 if (docKind.HasValue) { AddDocument(board, file, docKind.Value); docs++; }
             }
 
+            // Altium writes the SAME placement data as both .csv and .txt, so the second
+            // file must not double the part list. Parse each, then drop designators that
+            // are already present — cheaper and safer than trying to guess which file to
+            // prefer, and it also handles a top/bottom pair split across two files.
             foreach (string f in placementFiles)
             {
+                int before = board.Components.Count;
                 int n = PlacementParser.Parse(f, board);
-                if (n > 0) { parts += n; AddDocument(board, f, DocKind.Placement); }
+                if (n <= 0) { AddDocument(board, f, DocKind.Other); continue; }
+
+                int removed = DedupeComponents(board, before);
+                int kept    = board.Components.Count - before;
+                parts += kept;
+                AddDocument(board, f, DocKind.Placement);
+                if (kept == 0)
+                    board.Notes.Add($"{Path.GetFileName(f)}: duplicate placement data ignored");
+                else if (removed > 0)
+                    board.Notes.Add($"{Path.GetFileName(f)}: {removed} already-placed part(s) skipped");
             }
             foreach (string f in bomFiles)
             {
@@ -205,6 +271,8 @@ namespace EDes.Pcb
 
             var summary = $"{gerbers} gerber layer(s), {holes} hole(s) from {drills} drill file(s), " +
                           $"{meshes} mesh(es), {parts} part(s), {bomRows} BOM row(s), {docs} document(s)";
+            if (board.Drc.Parsed)
+                summary += $", DRC {board.Drc.Violations} violation(s) over {board.Drc.Rules} rule(s)";
             if (skippedDuplicates > 0) summary += $", {skippedDuplicates} duplicate(s) skipped";
             board.Notes.Insert(0, summary);
             return true;
@@ -260,6 +328,82 @@ namespace EDes.Pcb
             return n;
         }
 
+        // ── Design rule check ─────────────────────────────────────────────────
+
+        /// <summary>Parse a Protel/Altium DRC report. The format is a run of
+        ///     Processing Rule : &lt;name&gt;
+        ///     Rule Violations :&lt;n&gt;
+        /// pairs, which gives a rule count, a total violation count, and the names of
+        /// any rules that actually failed.</summary>
+        private static void ParseDrc(string file, PcbBoard board)
+        {
+            try
+            {
+                var drc = new DrcSummary { File = Path.GetFileName(file) };
+                string? pendingRule = null;
+
+                foreach (string raw in File.ReadLines(file))
+                {
+                    string line = raw.Trim();
+
+                    if (line.StartsWith("Processing Rule", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int colon = line.IndexOf(':');
+                        pendingRule = colon >= 0 ? line[(colon + 1)..].Trim() : line;
+                        drc.Rules++;
+                        continue;
+                    }
+
+                    if (!line.StartsWith("Rule Violations", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    int c = line.IndexOf(':');
+                    if (c < 0 || !int.TryParse(line[(c + 1)..].Trim(), out int n)) continue;
+
+                    drc.Violations += n;
+                    if (n > 0 && pendingRule != null)
+                        drc.Failing.Add($"{Shorten(pendingRule)}: {n}");
+                    pendingRule = null;
+                }
+
+                drc.Parsed = drc.Rules > 0;
+                if (drc.Parsed) board.Drc = drc;
+            }
+            catch (Exception ex)
+            {
+                board.Notes.Add($"{Path.GetFileName(file)}: DRC parse failed ({ex.GetType().Name})");
+            }
+        }
+
+        /// <summary>Rule names carry their whole parameter list; keep the leading name.</summary>
+        private static string Shorten(string rule)
+        {
+            int paren = rule.IndexOf('(');
+            string name = paren > 0 ? rule[..paren] : rule;
+            name = name.Trim();
+            return name.Length > 40 ? name[..40] : name;
+        }
+
+        // ── Component de-duplication ──────────────────────────────────────────
+
+        /// <summary>Remove components added at or after `from` whose designator was
+        /// already present before that point. Returns how many were dropped.</summary>
+        private static int DedupeComponents(PcbBoard board, int from)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < from && i < board.Components.Count; i++)
+                seen.Add(board.Components[i].Designator);
+
+            int removed = 0;
+            for (int i = board.Components.Count - 1; i >= from; i--)
+            {
+                string d = board.Components[i].Designator;
+                if (seen.Contains(d)) { board.Components.RemoveAt(i); removed++; }
+                else seen.Add(d);
+            }
+            return removed;
+        }
+
         // ── Document inventory ────────────────────────────────────────────────
 
         private static void AddDocument(PcbBoard board, string file, DocKind kind)
@@ -267,14 +411,43 @@ namespace EDes.Pcb
             long bytes = 0;
             try { bytes = new FileInfo(file).Length; } catch { }
 
+            string folder = "";
+            try { folder = Path.GetFileName(Path.GetDirectoryName(file) ?? "") ?? ""; } catch { }
+
+            // The folder refines the kind: in a fixed export tree every PDF carries the
+            // project name, so "Schematic Prints/" is the only thing that says schematic.
+            kind = RefineByFolder(kind, folder);
+
             board.Documents.Add(new PcbDocument
             {
-                Path  = file,
-                Name  = Path.GetFileName(file),
-                Kind  = kind,
-                Bytes = bytes,
-                Pages = kind is DocKind.Schematic or DocKind.Drawing ? PdfPageCount(file) : 0,
+                Path   = file,
+                Name   = Path.GetFileName(file),
+                Folder = folder,
+                Kind   = kind,
+                Bytes  = bytes,
+                Pages  = kind is DocKind.Schematic or DocKind.Drawing ? PdfPageCount(file) : 0,
             });
+        }
+
+        /// <summary>Fold the containing folder's meaning into a document's kind. Matches
+        /// the Altium "Project Outputs" layout (Schematic Prints, Assembly Drawings, BOM,
+        /// Pick Place, ExportSTEP, PDF3D, PCB Prints, Design Rules Check, Report Board
+        /// Stack) and anything else that names itself as plainly.</summary>
+        private static DocKind RefineByFolder(DocKind kind, string folder)
+        {
+            if (folder.Length == 0) return kind;
+            string f = folder.ToLowerInvariant();
+
+            if (f.Contains("schematic"))                       return DocKind.Schematic;
+            if (f.Contains("bill of material") || f == "bom")  return DocKind.Bom;
+            if (f.Contains("pick place") || f.Contains("pick and place")) return DocKind.Placement;
+            if (f.Contains("step") || f.Contains("pdf3d") ||
+                f.Contains("3d print") || f.Contains("3d"))    return DocKind.Cad3D;
+            if (f.Contains("assembly") || f.Contains("drawing") ||
+                f.Contains("pcb print") || f.Contains("print")) return DocKind.Drawing;
+            if (f.Contains("netlist"))                         return DocKind.Netlist;
+
+            return kind;
         }
 
         /// <summary>Approximate PDF page count by counting page objects. Cheap, no PDF
@@ -370,9 +543,10 @@ namespace EDes.Pcb
         {
             string ext  = Path.GetExtension(file).ToLowerInvariant();
             string name = Path.GetFileNameWithoutExtension(file).ToLowerInvariant();
-            if (ext is not (".csv" or ".txt" or ".tsv")) return false;
+            if (ext is not (".csv" or ".txt" or ".tsv" or ".xlsx" or ".xlsm")) return false;
             return name.Contains("bom") || name.Contains("billofmaterial") ||
-                   name.Contains("bill_of_material") || name.Contains("parts");
+                   name.Contains("bill of material") || name.Contains("bill_of_material") ||
+                   name.Contains("parts");
         }
 
         /// <summary>Render order within the stack — lower is drawn nearer the top of
@@ -382,12 +556,14 @@ namespace EDes.Pcb
             PcbLayerKind.Silkscreen   => 0,
             PcbLayerKind.Paste        => 1,
             PcbLayerKind.SolderMask   => 2,
+            PcbLayerKind.PadMaster    => 3,
             PcbLayerKind.CopperTop    => 3,
             PcbLayerKind.CopperInner  => 4,
             PcbLayerKind.CopperBottom => 5,
             PcbLayerKind.Outline      => 6,
-            PcbLayerKind.Drill        => 7,
-            _                         => 8,
+            PcbLayerKind.Mechanical   => 7,
+            PcbLayerKind.Drill        => 8,
+            _                         => 9,
         };
 
         // ── Classification ────────────────────────────────────────────────────
@@ -406,8 +582,14 @@ namespace EDes.Pcb
             // Outline first: "edge_cuts" also contains no copper hint but must not
             // fall through to Unknown.
             if (Has("edge_cuts", "edge.cuts", "outline", "boardoutline", "profile", "contour") ||
-                ext is ".gm1" or ".gm2" or ".gko")
+                ext is ".gm1" or ".gko")
                 return PcbLayerKind.Outline;
+
+            // GM2 and up are Altium mechanical layers: dimensions, notes, assembly art.
+            if (ext is ".gm" or ".gm2" or ".gm3" or ".gm4" or ".gm5" or ".gm6"
+                     or ".gd1" or ".gg1" ||
+                Has("mechanical", "assembly", "drill_drawing", "drillguide"))
+                return PcbLayerKind.Mechanical;
 
             if (Has("f_silks", "f.silks", "silkscreen_top", "topsilk", "silktop") || ext is ".gto" or ".plc")
                 return PcbLayerKind.Silkscreen;
@@ -421,6 +603,10 @@ namespace EDes.Pcb
 
             if (Has("paste", "f_paste", "b_paste") || ext is ".gtp" or ".gbp")
                 return PcbLayerKind.Paste;
+
+            // Pad master = a composite of the pads already present on the copper layer.
+            if (ext is ".gpt" or ".gpb" || Has("padmaster", "pad_master"))
+                return PcbLayerKind.PadMaster;
 
             if (Has("f_cu", "f.cu", "topcopper", "top_copper", "toplayer", "gtl") ||
                 ext is ".gtl" or ".cmp")

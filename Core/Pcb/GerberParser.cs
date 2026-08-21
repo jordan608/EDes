@@ -142,6 +142,12 @@ namespace EDes.Pcb
                     string token = tokenRaw.Trim();
                     if (token.Length == 0) continue;
 
+                    // G04 is a comment to end of block. Altium fills files with
+                    // "G04 #@! TF.GenerationSoftware,Altium Designer,25.8.1" style
+                    // attributes; scanning those for coordinates finds stray D/X/Y
+                    // letters and injects phantom geometry, so skip them outright.
+                    if (token.StartsWith("G04")) continue;
+
                     if (token.StartsWith("M02") || token.StartsWith("M0")) { }   // end / stop
 
                     // G-codes may prefix a coordinate in the same token.

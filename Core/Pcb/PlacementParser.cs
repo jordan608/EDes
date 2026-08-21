@@ -35,8 +35,10 @@ namespace EDes.Pcb
         private static readonly string[] RefNames   = { "ref", "reference", "designator", "refdes", "component", "part" };
         private static readonly string[] ValNames   = { "val", "value", "comment", "partvalue" };
         private static readonly string[] PkgNames   = { "package", "footprint", "pattern", "footprintname" };
-        private static readonly string[] XNames     = { "posx", "midx", "x", "refx", "centerx", "centrex" };
-        private static readonly string[] YNames     = { "posy", "midy", "y", "refy", "centery", "centrey" };
+        // Specific names first. The bare "x"/"y" entries are matched EXACTLY only
+        // (see IndexOfAny) so a column like "Description" can never win them.
+        private static readonly string[] XNames     = { "centerx", "centrex", "posx", "midx", "refx", "x" };
+        private static readonly string[] YNames     = { "centery", "centrey", "posy", "midy", "refy", "y" };
         private static readonly string[] RotNames   = { "rot", "rotation", "angle" };
         private static readonly string[] SideNames  = { "side", "layer", "tb" };
 
@@ -52,8 +54,8 @@ namespace EDes.Pcb
                 return 0;
             }
 
-            bool fileIsInch = LooksLikeInchFile(lines);
-            int  added      = 0;
+            float fileScale = FileUnitScale(lines);   // mm per file unit
+            int   added     = 0;
 
             // Find the header row: the first line that names both a designator column
             // and an X column once split.
@@ -78,6 +80,11 @@ namespace EDes.Pcb
                 board.Notes.Add($"{Path.GetFileName(path)}: no recognisable placement header");
                 return 0;
             }
+
+            // Altium names the unit in the column itself: "Center-X(mil)". That beats
+            // any file-level "Units used:" line, so it is checked first.
+            int  cxProbe = IndexOfAny(header, XNames);
+            float scale  = cxProbe >= 0 ? HeaderUnitScale(header[cxProbe], fileScale) : fileScale;
 
             int ci  = IndexOfAny(header, RefNames);
             int cv  = IndexOfAny(header, ValNames);
@@ -104,8 +111,8 @@ namespace EDes.Pcb
                 string designator = Get(cols, ci);
                 if (designator.Length == 0) continue;
 
-                if (!TryLength(Get(cols, cx), fileIsInch, out float x)) continue;
-                if (!TryLength(Get(cols, cy), fileIsInch, out float y)) continue;
+                if (!TryLength(Get(cols, cx), scale, out float x)) continue;
+                if (!TryLength(Get(cols, cy), scale, out float y)) continue;
 
                 float rot = 0;
                 float.TryParse(Get(cols, cr).TrimEnd('d', 'e', 'g', 'D', 'E', 'G', ' '),
@@ -136,15 +143,36 @@ namespace EDes.Pcb
         /// and counting distinct parts. Returns the number of BOM rows understood.</summary>
         public static int ParseBom(string path, PcbBoard board)
         {
+            // Altium ships the BOM as .xlsx, so both paths funnel into ParseBomRows.
+            if (path.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".xlsm", StringComparison.OrdinalIgnoreCase))
+            {
+                var sheet = XlsxReader.ReadRows(path);
+                if (sheet.Count == 0)
+                {
+                    board.Notes.Add($"{Path.GetFileName(path)}: could not read the workbook");
+                    return 0;
+                }
+                return ParseBomRows(sheet, board);
+            }
+
             string[] lines;
             try { lines = File.ReadAllLines(path); }
             catch { return 0; }
 
+            var rows = new List<string[]>(lines.Length);
+            foreach (string line in lines) rows.Add(SplitRow(line.TrimStart('#', ' ')));
+            return ParseBomRows(rows, board);
+        }
+
+        /// <summary>BOM logic shared by the CSV and xlsx readers.</summary>
+        public static int ParseBomRows(IReadOnlyList<string[]> rows, PcbBoard board)
+        {
             string[]? header = null;
             int headerAt = -1;
-            for (int i = 0; i < lines.Length && i < 100; i++)
+            for (int i = 0; i < rows.Count && i < 100; i++)
             {
-                var cols = SplitRow(lines[i].TrimStart('#', ' '));
+                var cols = rows[i];
                 if (cols.Length < 2) continue;
                 // A BOM must name designators (possibly plural) and usually a value.
                 if (IndexOfAny(cols, RefNames) >= 0 || IndexOfAny(cols, new[] { "designators", "refs" }) >= 0)
@@ -162,14 +190,14 @@ namespace EDes.Pcb
             int cPkg = IndexOfAny(header, PkgNames);
             int cQty = IndexOfAny(header, new[] { "qty", "quantity", "count" });
 
-            int rows = 0;
+            int parsed = 0;
             var byDesignator = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < board.Components.Count; i++)
                 byDesignator[board.Components[i].Designator] = i;
 
-            for (int i = headerAt + 1; i < lines.Length; i++)
+            for (int i = headerAt + 1; i < rows.Count; i++)
             {
-                var cols = SplitRow(lines[i]);
+                var cols = rows[i];
                 if (cols.Length <= cRef) continue;
 
                 string refCell = Get(cols, cRef);
@@ -204,9 +232,9 @@ namespace EDes.Pcb
                                 : refCell.Split(new[] { ',', ' ', ';' },
                                                 StringSplitOptions.RemoveEmptyEntries).Length,
                 });
-                rows++;
+                parsed++;
             }
-            return rows;
+            return parsed;
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────
@@ -245,12 +273,15 @@ namespace EDes.Pcb
                 foreach (string n in names)
                     if (h == n) return i;
             }
-            // Second pass: allow "mid x" style headers to match by containment.
+            // Second pass: allow "Center-X(mil)" style headers to match by containment.
+            // Single-letter names are deliberately excluded here — "x" would otherwise
+            // match any column that merely contains an x.
             for (int i = 0; i < header.Length; i++)
             {
                 string h = Normalise(header[i]);
+                if (h.Length == 0) continue;
                 foreach (string n in names)
-                    if (h.Length > 0 && h.Contains(n)) return i;
+                    if (n.Length > 1 && h.Contains(n)) return i;
             }
             return -1;
         }
@@ -263,15 +294,27 @@ namespace EDes.Pcb
             return sb.ToString();
         }
 
+        /// <summary>mm per unit for a header cell like "Center-X(mil)". Falls back to
+        /// the file-level scale when the header says nothing.</summary>
+        public static float HeaderUnitScale(string headerCell, float fallback)
+        {
+            string h = headerCell.ToLowerInvariant();
+            if (h.Contains("(mil") || h.Contains("[mil")) return 0.0254f;
+            if (h.Contains("(mm")  || h.Contains("[mm"))  return 1f;
+            if (h.Contains("(in")  || h.Contains("[in") ||
+                h.Contains("inch")) return 25.4f;
+            return fallback;
+        }
+
         /// <summary>A length cell to millimetres. A per-value unit suffix (mm / mil / in)
-        /// beats the file-level unit, because Altium writes suffixes and KiCad does not.</summary>
-        public static bool TryLength(string cell, bool fileIsInch, out float mm)
+        /// beats the column/file unit, because Altium writes suffixes in some exports.</summary>
+        public static bool TryLength(string cell, float unitScale, out float mm)
         {
             mm = 0;
             if (string.IsNullOrWhiteSpace(cell)) return false;
 
             string s = cell.Trim();
-            float scale = fileIsInch ? 25.4f : 1f;
+            float scale = unitScale;
 
             if (s.EndsWith("mm", StringComparison.OrdinalIgnoreCase))
             { s = s[..^2]; scale = 1f; }
@@ -288,18 +331,22 @@ namespace EDes.Pcb
             return true;
         }
 
-        private static bool LooksLikeInchFile(string[] lines)
+        /// <summary>mm per file unit, from a "Units used: mil" style line. Altium writes
+        /// "mil" SINGULAR — matching only "mils" silently produced a board 25x too big.</summary>
+        private static float FileUnitScale(string[] lines)
         {
-            for (int i = 0; i < lines.Length && i < 40; i++)
+            for (int i = 0; i < lines.Length && i < 60; i++)
             {
                 string l = lines[i].ToLowerInvariant();
-                if (l.Contains("unit") || l.StartsWith("#") || l.StartsWith("##"))
-                {
-                    if (l.Contains("inch") || l.Contains("mils") || l.Contains("in\"")) return true;
-                    if (l.Contains("mm") || l.Contains("millimet")) return false;
-                }
+                if (!l.Contains("unit") && !l.StartsWith("#")) continue;
+
+                if (l.Contains("mil"))      return 0.0254f;    // covers "mil" and "mils"
+                if (l.Contains("inch") ||
+                    l.Contains("\""))       return 25.4f;
+                if (l.Contains("mm") ||
+                    l.Contains("millimet")) return 1f;
             }
-            return false;      // mm is the modern default
+            return 1f;         // mm is the modern default
         }
     }
 }

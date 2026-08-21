@@ -641,6 +641,9 @@ namespace EDes
             if (cad > 0) sb.Append("3D ").Append(cad).Append("  ");
             if (net > 0) sb.Append("NET ").Append(net).Append("  ");
             if (bom > 0) sb.Append("BOM ").Append(_board.BomLines.Count).Append("  ");
+            if (_board.Drc.Parsed)
+                sb.Append("DRC ").Append(_board.Drc.Violations)
+                  .Append('/').Append(_board.Drc.Rules).Append("  ");
             if (sb.Length == 0) sb.Append(_board.Documents.Count).Append(" DOCS");
             return sb.ToString().TrimEnd();
         }
@@ -916,8 +919,14 @@ namespace EDes
                 if (_board.BomLines.Count > 0)
                     sb.Append($"bom rows: {_board.BomLines.Count}\n");
                 foreach (var d in _board.Documents)
-                    sb.Append($"{d.Kind,-10} {d.Name}" +
+                    sb.Append($"{d.Kind,-10} {d.Display}" +
                               (d.Pages > 0 ? $"  ({d.Pages} pages)" : "") + "\n");
+                if (_board.Drc.Parsed)
+                {
+                    sb.Append($"drc: {_board.Drc.Violations} violation(s) over " +
+                              $"{_board.Drc.Rules} rule(s)\n");
+                    foreach (var fail in _board.Drc.Failing) sb.Append("  ! ").Append(fail).Append('\n');
+                }
                 if (_board.SourceFolders.Count > 0)
                     sb.Append($"folders walked: {_board.SourceFolders.Count}\n");
                 return sb.ToString().TrimEnd();
