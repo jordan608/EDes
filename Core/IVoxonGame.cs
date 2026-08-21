@@ -38,6 +38,32 @@ namespace EDes
 
     /// <summary>One row of the legend the shell overlays on the preview: a swatch and
     /// what it means. Colour is packed 0xRRGGBB, matching everything else drawn.</summary>
+    /// <summary>A single scalar the shell shows as a big vertical slider over the
+    /// preview: what it is called, where it is now, and the range worth sweeping.
+    ///
+    /// Min/Max bound the SLIDER, not the setting. A slider has to have ends, but the
+    /// underlying value often should not -- layer spacing is legitimately anything,
+    /// including negative -- so a value outside the range is clamped for display only
+    /// and typing it into the settings box still works. Reporting that honestly is the
+    /// alternative to quietly narrowing what the setting accepts.</summary>
+    public readonly struct PreviewSlider
+    {
+        public readonly string Label;
+        public readonly float  Value, Min, Max;
+        /// <summary>Numeric format for the readout, e.g. "0.000".</summary>
+        public readonly string Format;
+
+        public PreviewSlider(string label, float value, float min, float max,
+                             string format = "0.000")
+        {
+            Label  = label ?? "";
+            Value  = value;
+            Min    = min;
+            Max    = max;
+            Format = string.IsNullOrEmpty(format) ? "0.000" : format;
+        }
+    }
+
     public readonly struct LegendRow
     {
         public readonly string Label;
@@ -157,5 +183,20 @@ namespace EDes
 
         /// <summary>Recolour what a legend row stands for (packed 0xRRGGBB).</summary>
         void SetLegendColour(string key, int colour) { }
+
+        /// <summary>One value the shell offers as a large vertical slider beside the
+        /// preview, or null (the default) for none.
+        ///
+        /// One, not a list, deliberately: it exists for the single value you adjust while
+        /// WATCHING the volume rather than while reading the settings panel, and a column
+        /// of sliders over the preview would just be the settings panel again, in the
+        /// place where the picture is supposed to be. The same value stays in the settings
+        /// panel as a typed box, which is where an out-of-range figure gets entered --
+        /// the slider is for sweeping, the box is for precision.</summary>
+        PreviewSlider? Slider => null;
+
+        /// <summary>Called on the UI thread as the slider moves. Implementations write to
+        /// a volatile field; the game thread picks it up next frame.</summary>
+        void SetSlider(float value) { }
     }
 }

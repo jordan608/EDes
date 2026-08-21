@@ -337,6 +337,7 @@ namespace EDes.UI
             if (_game != null && _game.ActiveMode != _shownMode) RefreshModePanel();
 
             RefreshLegend();
+            RefreshSlider();
             RefreshProbe();
             RefreshControls();
             RefreshPickList();
@@ -574,6 +575,78 @@ namespace EDes.UI
                 ProbeBody.Text  = info.Substring(nl + 1).TrimEnd('\n');
             }
             ProbePanel.IsVisible = true;
+        }
+
+        // ── The big vertical slider over the preview ───────────────────────────
+        //
+        // Two-way, which is the whole difficulty: the shell pushes the game's value in on
+        // every tick AND pushes the user's drag out. Without the guard flag the inbound
+        // write raises ValueChanged, which writes back to the game, which is read on the
+        // next tick -- a loop that fights the user's own drag and makes the slider feel
+        // sticky. _sliderSyncing marks writes that came FROM the game so they are not
+        // echoed back to it.
+        private bool  _sliderSyncing;
+        private bool  _sliderWired;
+
+        private void RefreshSlider()
+        {
+            var d = _game?.Slider;
+            if (d == null)
+            {
+                if (SliderPanel.IsVisible) SliderPanel.IsVisible = false;
+                return;
+            }
+
+            var dial = d.Value;
+
+            if (!_sliderWired)
+            {
+                _sliderWired = true;
+                PreviewSliderCtl.PropertyChanged += (_, e) =>
+                {
+                    if (e.Property != Slider.ValueProperty) return;
+                    if (_sliderSyncing) return;
+                    _game?.SetSlider((float)PreviewSliderCtl.Value);
+                    DebounceSave();
+                };
+            }
+
+            _sliderSyncing = true;
+            try
+            {
+                if (Math.Abs(PreviewSliderCtl.Minimum - dial.Min) > 1e-6 ||
+                    Math.Abs(PreviewSliderCtl.Maximum - dial.Max) > 1e-6)
+                {
+                    PreviewSliderCtl.Minimum = dial.Min;
+                    PreviewSliderCtl.Maximum = dial.Max;
+                    // A step fine enough to sweep with, coarse enough that the readout
+                    // does not jitter in the last digit while the mouse is still.
+                    PreviewSliderCtl.SmallChange = (dial.Max - dial.Min) / 200.0;
+                    PreviewSliderCtl.LargeChange = (dial.Max - dial.Min) / 20.0;
+                }
+
+                // Clamped for the THUMB only. The underlying setting is deliberately
+                // unbounded -- layer spacing can be anything, including negative -- so a
+                // value past the end of the slider is shown at the end and called out in
+                // the note, rather than being silently pulled into range the moment the
+                // panel refreshes. Quietly rewriting the user's number would be worse
+                // than admitting the slider cannot reach it.
+                double shown = Math.Clamp(dial.Value, dial.Min, dial.Max);
+                if (Math.Abs(PreviewSliderCtl.Value - shown) > 1e-6)
+                    PreviewSliderCtl.Value = shown;
+
+                SliderLabel.Text = dial.Label.ToUpperInvariant();
+                SliderValue.Text = dial.Value.ToString(dial.Format);
+                SliderNote.Text  = Math.Abs(dial.Value - shown) > 1e-6
+                                   ? "past the slider's range - set it in the panel"
+                                   : "";
+                SliderValue.Foreground = new SolidColorBrush(
+                    Math.Abs(dial.Value - shown) > 1e-6
+                    ? Color.Parse("#FFFFAA55") : Color.Parse("#FFDDDDDD"));
+            }
+            finally { _sliderSyncing = false; }
+
+            SliderPanel.IsVisible = true;
         }
 
         // ── Legend overlay ────────────────────────────────────────────────────

@@ -224,19 +224,64 @@
                          a drag starting on the panel goes to its controls instead of
                          orbiting the volume. That is the intended trade, and it is why the
                          panel stays small and cornered. -->
-                    <Border x:Name="LegendPanel"
-                            HorizontalAlignment="Right" VerticalAlignment="Bottom"
-                            Margin="0,0,10,10" Padding="8,6"
-                            Background="#D0000000"
-                            BorderBrush="#30FFFFFF" BorderThickness="1"
-                            CornerRadius="3"
-                            MaxHeight="320"
-                            IsVisible="False">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto"
-                                      HorizontalScrollBarVisibility="Disabled">
-                            <StackPanel x:Name="LegendItems" Spacing="1"/>
-                        </ScrollViewer>
-                    </Border>
+                    <!-- The right-hand column of the preview: the big slider, then the
+                         legend under it. A StackPanel rather than two separately-anchored
+                         panels so the slider sits directly above the legend whatever
+                         height the legend happens to be — anchoring it with a hardcoded
+                         bottom margin would drift the moment a board had a different
+                         number of layers. -->
+                    <StackPanel HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                Margin="0,0,10,10" Spacing="8">
+
+                        <!-- Vertical, and deliberately tall: this is the control you use
+                             while watching the VOLUME rather than the screen, so it has to
+                             be findable and draggable without looking at it. Vertical
+                             because layer spacing IS a vertical quantity — up is a taller
+                             stack — and a horizontal slider for it reads backwards. -->
+                        <Border x:Name="SliderPanel"
+                                Padding="8,8"
+                                Background="#D0000000"
+                                BorderBrush="#30FFFFFF" BorderThickness="1"
+                                CornerRadius="3"
+                                IsVisible="False">
+                            <StackPanel Spacing="4" HorizontalAlignment="Center">
+                                <TextBlock x:Name="SliderLabel"
+                                           Text=""
+                                           FontSize="9" FontWeight="Bold"
+                                           Opacity="0.65"
+                                           HorizontalAlignment="Center"/>
+                                <Slider x:Name="PreviewSliderCtl"
+                                        Orientation="Vertical"
+                                        Height="260" Width="28"
+                                        HorizontalAlignment="Center"/>
+                                <TextBlock x:Name="SliderValue"
+                                           Text=""
+                                           FontSize="11"
+                                           FontFamily="Consolas,Menlo,monospace"
+                                           HorizontalAlignment="Center"/>
+                                <TextBlock x:Name="SliderNote"
+                                           Text=""
+                                           FontSize="8"
+                                           Opacity="0.55"
+                                           MaxWidth="90"
+                                           TextWrapping="Wrap"
+                                           HorizontalAlignment="Center"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border x:Name="LegendPanel"
+                                Padding="8,6"
+                                Background="#D0000000"
+                                BorderBrush="#30FFFFFF" BorderThickness="1"
+                                CornerRadius="3"
+                                MaxHeight="320"
+                                IsVisible="False">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <StackPanel x:Name="LegendItems" Spacing="1"/>
+                            </ScrollViewer>
+                        </Border>
+                    </StackPanel>
                 </Grid>
             </Border>
 

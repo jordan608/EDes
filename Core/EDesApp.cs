@@ -1291,6 +1291,27 @@ namespace EDes
             SaveLayerPrefs();
         }
 
+        /// <summary>The one value worth a big slider beside the preview: layer spacing.
+        ///
+        /// It earns the spot because it is the setting you sweep while looking AT the
+        /// volume -- pulling the stack apart to see which layer a track is on, then
+        /// closing it back to zero to read the board as fabricated. Doing that from a
+        /// typed box means looking away from the display for every step.
+        ///
+        /// Only in PCB mode: there is no layer stack in the other two, and a slider
+        /// labelled for something not on screen is worse than no slider.
+        ///
+        /// The range is narrower than the setting allows, on purpose. +/-1.5 covers every
+        /// spacing that is legible; beyond that the stack leaves the volume. The typed box
+        /// in the panel stays unbounded for the cases that need it, and the shell says so
+        /// when the value is off the end of the slider rather than dragging it back.</summary>
+        public PreviewSlider? Slider
+            => (EDesMode)_s.Mode == EDesMode.Pcb
+               ? new PreviewSlider("Layer spacing", _s.LayerSpacing, -1.5f, 1.5f, "0.000")
+               : null;
+
+        public void SetSlider(float value) => _s.LayerSpacing = value;
+
         public void SetLegendColour(string key, int colour)
         {
             var layer = FindLayer(key);
