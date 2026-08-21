@@ -174,7 +174,7 @@ unknown device (status **Error**) until a VISA runtime is installed. Install **o
 
 Then: Oscilloscope tab → **Source: SCPI over USBTMC**. Leave **VISA resource** blank to take
 the first USB instrument, or press **Next VISA resource** to cycle what the runtime can see
-(e.g. `USB0::0x1AB1::0x04B0::DS2F252400118::INSTR`). The panel reports
+(e.g. `USB0::0x1AB1::0x04B0::DS2Axxxxxxxx::INSTR`). The panel reports
 `VISA runtime: present / NOT installed`, so you can tell a missing runtime from a missing
 instrument.
 

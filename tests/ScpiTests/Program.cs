@@ -74,7 +74,7 @@ Console.WriteLine("=== :WAV:PRE? parsing and scaling ===");
     Check("raw 255 -> volts", ScpiScope.RawToVolts(255, pre), 1.824, 1e-6);
 
     Check("MSO2302A -> 2 analog channels",
-          ScpiScope.InferAnalogChannels("RIGOL TECHNOLOGIES,MSO2302A,DS2F252400118,00.03.06"), 2);
+          ScpiScope.InferAnalogChannels("RIGOL TECHNOLOGIES,MSO2302A,DS2Axxxxxxxx,00.03.06"), 2);
     Check("DS1054Z -> 4 analog channels",
           ScpiScope.InferAnalogChannels("RIGOL TECHNOLOGIES,DS1054Z,DS1ZA1,00.04.04"), 4);
     Check("DS2072A -> 2 analog channels",
@@ -89,7 +89,7 @@ Console.WriteLine("=== :WAV:PRE? parsing and scaling ===");
 Console.WriteLine();
 Console.WriteLine("=== fake instrument over TCP ===");
 
-const string IDN = "RIGOL TECHNOLOGIES,MSO2302A,DS2F252400118,00.03.05";
+const string IDN = "RIGOL TECHNOLOGIES,MSO2302A,DS2Axxxxxxxx,00.03.05";
 const int POINTS = 1400;
 
 var listener = new TcpListener(IPAddress.Loopback, 0);

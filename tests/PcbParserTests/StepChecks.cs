@@ -308,11 +308,13 @@ END-ISO-10303-21;
             Ok("garbage input reports rather than throws", m == null && notes.Count > 0);
         }
 
-        // ── The real Altium export, when present ─────────────────────────────
-        const string real = @"C:\Users\VoxelUser\Downloads\Project Outputs for VLED_IRSensor_V1.0-20260821T004235Z-1-001\Project Outputs for VLED_IRSensor_V1.0\ExportSTEP\VLED_IRSensor_V1.0.step";
-        if (!File.Exists(real))
+        // ── The real Altium export, when configured ──────────────────────────
+        // Found by searching the configured fixture folder, so neither the machine's
+        // paths nor the project's name appear in this repository.
+        string? real = TestData.BoardStepFile;
+        if (real == null)
         {
-            Console.WriteLine("SKIP  real STEP export not on this machine");
+            Console.WriteLine($"SKIP  no real STEP export configured — {TestData.SkipReason}");
             return _failures;
         }
 

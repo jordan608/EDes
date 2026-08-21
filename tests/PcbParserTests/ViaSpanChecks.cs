@@ -92,11 +92,29 @@ M30
                $"({k.Holes[0].SpanFrom}-{k.Holes[0].SpanTo})",
                k.Holes.Count == 2 && k.Holes[0].SpanFrom == 2 && k.Holes[0].SpanTo == 3);
 
-            // A plain through-drill name must NOT acquire a span.
+            // A plain through-drill name must NOT acquire a span. The "V1.0" matters:
+            // a digit-dot-digit run must not read as a layer pair.
             var t = new PcbBoard();
-            ExcellonParser.Parse(Write("VLED_IRSensor_V1.0.TXT", Drill), t);
+            ExcellonParser.Parse(Write("Widget_V1.0.TXT", Drill), t);
             Ok($"a plain drill name stays unstated ({t.Holes[0].SpanFrom}-{t.Holes[0].SpanTo})",
                t.Holes.Count == 2 && t.Holes[0].SpanFrom == 0 && t.Holes[0].SpanTo == 0);
+
+            // The adversarial case claimed in the commit message but never actually
+            // tested: a part number that CONTAINS a digit-dash-digit run. If this fails,
+            // the conservative filename parser is not conservative enough and every
+            // through via on such a board silently becomes blind.
+            var adv = new PcbBoard();
+            ExcellonParser.Parse(Write("RS485-2-4_V1.0.TXT", Drill), adv);
+            Ok($"a part number containing a digit-dash-digit run is NOT a layer pair " +
+               $"({adv.Holes[0].SpanFrom}-{adv.Holes[0].SpanTo})",
+               adv.Holes[0].SpanFrom == 0 && adv.Holes[0].SpanTo == 0);
+
+            // But a name that genuinely IS a layer pair must still be read, or the
+            // conservatism above would have cost the feature.
+            var pair = new PcbBoard();
+            ExcellonParser.Parse(Write("Board2-4.TXT", Drill), pair);
+            Ok($"a real layer pair is still read ({pair.Holes[0].SpanFrom}-{pair.Holes[0].SpanTo})",
+               pair.Holes[0].SpanFrom == 2 && pair.Holes[0].SpanTo == 4);
         }
 
         // ── Span from a Gerber X2 attribute in the header ────────────────────

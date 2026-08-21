@@ -1,7 +1,11 @@
-// Import of a REAL Altium "Project Outputs" folder, if one is present on this
-// machine. Skipped (not failed) when the folder is absent, so the suite still
-// runs anywhere — but when it is there, this is the only check that exercises
-// genuine fab output rather than hand-written fixtures.
+// Import of a REAL Altium "Project Outputs" folder, if one is configured on this
+// machine. Skipped (not failed) when it is not, so the suite still runs anywhere —
+// but when it is there, this is the only check that exercises genuine fab output
+// rather than hand-written fixtures.
+//
+// The location comes from TestData, never from a literal here: a hardcoded absolute
+// path pins the suite to one machine and publishes a username, a folder layout and a
+// customer project name into the repository.
 
 using EDes.Pcb;
 
@@ -9,14 +13,12 @@ namespace PcbParserTests;
 
 public static class RealBoardCheck
 {
-    private const string Root =
-        @"C:\Users\VoxelUser\Downloads\Project Outputs for VLED_IRSensor_V1.0-20260821T004235Z-1-001\Project Outputs for VLED_IRSensor_V1.0";
-
     public static int Run()
     {
-        if (!Directory.Exists(Root))
+        string? Root = TestData.BoardFolder;
+        if (Root == null)
         {
-            Console.WriteLine("SKIP  real board folder not present on this machine");
+            Console.WriteLine($"SKIP  no real board folder configured — {TestData.SkipReason}");
             return 0;
         }
 
