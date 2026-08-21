@@ -414,7 +414,10 @@ namespace EDes
 
             if (_s.ShowNavDiag)   DrawNavReadout();
             if (_s.ShowHudPanel)  DrawHudPanel();
-            if (_s.ShowBackdrop)  DrawBackdrop();     // last: decoration is dropped first
+            // Scope mode fills the volume with the face itself (see README) — the grid
+            // floor/globe backdrop is orientation chrome for flying a circuit or board
+            // around, and only competes with a trace that is meant to fill the display.
+            if (_s.ShowBackdrop && (EDesMode)_s.Mode != EDesMode.Scope) DrawBackdrop();
 
             _batch.Flush(ledHost, ref vs);
 
@@ -521,10 +524,14 @@ namespace EDes
         }
 
         // ── Mode: scope ───────────────────────────────────────────────────────
-        // The scope owns the whole content band here: full width, full height.
+        // The scope owns the whole content band here: full width, full height. No
+        // backdrop competes with it (see Draw), so the face can run right out to the
+        // display wall instead of leaving a ring of empty volume around it.
+        private const float ScopeModeHalfWidth = 0.97f;
+
         private void DrawScopeMode()
         {
-            DrawScopePanel(_layout.ContentTopZ, _layout.ContentBottomZ, _radius * 0.88f);
+            DrawScopePanel(_layout.ContentTopZ, _layout.ContentBottomZ, _radius * ScopeModeHalfWidth);
 
             if (!_s.ShowLabels) return;
             var f = _layout.Footer();
@@ -562,7 +569,7 @@ namespace EDes
             {
                 if ((_s.ScopeChannelMask & (1 << ch)) == 0) continue;
                 var st = _scopeRenderer.Stats[ch];
-                _hud.Text(new point3d(-_radius * 0.88f, _s.PlaneY, f.Row()), _textSize,
+                _hud.Text(new point3d(-_radius * ScopeModeHalfWidth, _s.PlaneY, f.Row()), _textSize,
                           ScopeRenderer.ChannelColour(ch),
                           "CH" + (ch + 1) +
                           "  VPP " + Hud.Eng(st.Vpp, "V") +
