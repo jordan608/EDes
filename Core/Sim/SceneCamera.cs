@@ -146,9 +146,15 @@ namespace EDes.Sim
             // One rate for all three, and NavState.Condition has already put the three
             // translation axes on a common scale, so pushing the puck the same distance
             // in X, Y or Z moves the scene the same distance.
-            PanX += nav.Dx * panRate * dt;
-            PanY += nav.Dz * panRate * dt;   // nav "forward/back" → scene depth
-            PanZ += nav.Dy * panRate * dt;   // nav "lift" → vertical (-Z is up)
+            //
+            // Which raw axis is which is EMPIRICAL, like the rotations below. The SDK's
+            // NAV_Y_AXIS_DIRECTION / NAV_Z_AXIS_DIRECTION names suggest Y is depth and Z
+            // is lift; on this puck they are the other way round, so binding them by name
+            // made lifting the cap move the model in depth and pushing it forward move it
+            // vertically. Bound by measured behaviour instead.
+            PanX += nav.Dx * panRate * dt;   // slide left / right  → scene left / right
+            PanY += nav.Dy * panRate * dt;   // push fore / aft     → scene depth
+            PanZ += nav.Dz * panRate * dt;   // lift up / down      → scene vertical
 
             // All three rotations share rotRate, so the puck feels isotropic in rotation
             // exactly as translation does above. The Y term is negated: this axis reports
