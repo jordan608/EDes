@@ -112,6 +112,10 @@ namespace EDes.UI
             // Pre-flight splash buttons — see VoxonPreflight.cs / GameLoop.cs.
             // Just write the choice; the game thread's IPreflightUi.PollChoice()
             // picks it up and clears it back to PreflightChoice.None.
+            // Typing in the filter rebuilds the list. Not debounced: the list is tens of
+            // rows, and a delay between keystroke and result feels broken at that size.
+            PickSearch.TextChanged += (_, _) => { _pickKeyShown = "\u0001"; RefreshPickList(); };
+
             SplashRetryBtn.Click     += (_, _) => _s.SplashChoice = PreflightChoice.Retry;
             SplashSimulatorBtn.Click += (_, _) => _s.SplashChoice = PreflightChoice.Simulator;
             SplashQuitBtn.Click      += (_, _) => _s.SplashChoice = PreflightChoice.Quit;
@@ -395,6 +399,7 @@ namespace EDes.UI
 
             var sb = new StringBuilder(rows.Count * 20);
             foreach (var r in rows) sb.Append(r.Key).Append('\u001f');
+            sb.Append('\u001e').Append(PickSearch.Text ?? "");   // filter is part of identity
             string key = sb.ToString();
 
             if (key != _pickKeyShown)
@@ -422,25 +427,57 @@ namespace EDes.UI
             PickItems.Children.Clear();
             _pickRows.Clear();
 
-            string lastGroup = "\u0001";
-            int nets = 0, comps = 0;
+            string filter = (PickSearch.Text ?? "").Trim();
+
+            // Group in FIRST-SEEN order, not alphabetically: the game already orders nets
+            // biggest-first and parts by source, and re-sorting here would throw that away.
+            var groups = new List<string>();
+            var byGroup = new Dictionary<string, List<PickRow>>();
+            int kept = 0, total = 0;
+
             foreach (var r in rows)
             {
-                if (r.Group == "Nets") nets++; else comps++;
+                total++;
+                if (filter.Length > 0 &&
+                    r.Label.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0 &&
+                    r.Detail.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
 
-                if (r.Group != lastGroup)
+                if (!byGroup.TryGetValue(r.Group, out var list))
                 {
-                    lastGroup = r.Group;
-                    PickItems.Children.Add(new TextBlock
-                    {
-                        Text       = r.Group.ToUpperInvariant(),
-                        FontSize   = 9,
-                        FontWeight = FontWeight.Bold,
-                        Opacity    = 0.4,
-                        Margin     = new Thickness(2, 6, 0, 2),
-                    });
+                    byGroup[r.Group] = list = new List<PickRow>();
+                    groups.Add(r.Group);
                 }
+                list.Add(r);
+                kept++;
+            }
 
+            foreach (string group in groups)
+            {
+                var content = new StackPanel { Spacing = 1 };
+                var exp = new Expander
+                {
+                    Header     = $"{group}  ({byGroup[group].Count})",
+                    Content    = content,
+                    FontSize   = 10,
+                    Padding    = new Thickness(0),
+                    Margin     = new Thickness(0, 1, 0, 1),
+                    // Open when filtering: a search that hides its own results behind a
+                    // collapsed header looks like it found nothing.
+                    IsExpanded = filter.Length > 0 || groups.Count <= 2,
+                };
+                PickItems.Children.Add(exp);
+                foreach (var r in byGroup[group]) AddPickRow(content, r);
+            }
+
+            PickTitle.Text = filter.Length > 0
+                ? $"SELECT — {kept} of {total} match \"{filter}\""
+                : $"SELECT — {total} item(s)   (click again to clear)";
+        }
+
+        private void AddPickRow(StackPanel into, PickRow r)
+        {
+            {
                 string key = r.Key;
 
                 var swatch = new Border
@@ -484,11 +521,9 @@ namespace EDes.UI
                 };
                 row.PointerPressed += (_, _) => { _game?.Pick(key); DebounceSave(); };
 
-                PickItems.Children.Add(row);
+                into.Children.Add(row);
                 _pickRows.Add((key, row));
             }
-
-            PickTitle.Text = $"SELECT — {nets} NET(S), {comps} PART(S)   (click again to clear)";
         }
 
         // ── Controls reference ────────────────────────────────────────────────

@@ -55,8 +55,6 @@ namespace EDes.Sim
         public const int TextDim    = Blue;
         public const int TextHilite = Yellow;
         public const int Graticule  = Blue;
-        public const int GridFloor  = Blue;
-        public const int Globe      = Blue;
         public const int Trace      = Green;
         public const int TraceEdge  = Green;
         public const int Warning    = Red;

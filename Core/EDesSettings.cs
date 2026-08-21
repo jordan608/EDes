@@ -67,12 +67,10 @@ namespace EDes
         public volatile int   FontIndex   = 2;      // 0 Classic, 1 Blocky, 2 Bold
         public volatile float TextWeight  = 1.0f;
         public volatile bool  ShowLabels  = true;
-        public volatile bool  ShowBackdrop = true;  // grid floor + orientation rings
         public volatile bool  ShowHudPanel = true;  // title / totals / voxel readout
         public volatile float PlaneY       = 0.1f;  // the HUD + scope plane
 
         // ── Camera / SpaceNavigator ───────────────────────────────────────────
-        public volatile bool  NavEnabled  = true;
         public volatile bool  ShowNavDiag = false;   // SpaceNav readout in the volume (key V)
         /// <summary>One sensitivity for ALL THREE translation axes, one for ALL THREE
         /// rotation axes, one for the button zoom. Deliberately not per-axis: the puck
@@ -108,6 +106,14 @@ namespace EDes
         /// Local is what "turn the board over" means once the board is already tilted;
         /// global is easier when lining the board up with the volume itself.</summary>
         public volatile bool  NavLocalAxes = true;
+
+        /// <summary>Flip all three puck translation axes at once, rotation untouched.
+        ///
+        /// Exists because which direction feels right depends on whether you read the puck
+        /// as moving the MODEL or as moving your VIEWPOINT, and those two readings are
+        /// opposite on every translation axis. That is a preference, not a fact, so it is a
+        /// switch rather than a default someone has to live with.</summary>
+        public volatile bool  NavInvertTranslation = false;
 
         /// <summary>Lock rotation about an individual axis during normal camera mode.
         /// The axes are whichever frame NavLocalAxes selects, so a lock always means the
@@ -195,7 +201,14 @@ namespace EDes
         public volatile float  TrackScale    = 1.0f;
         public volatile bool   PcbPads       = true;
         public volatile bool   PcbRegions    = true;
-        public volatile bool   PcbFillRegions = false;
+        /// <summary>Cross-hatch copper pours. ON by default, because outline-only made
+        /// them effectively invisible: the full-board ground pour's outline runs 0.58 mm
+        /// inside the board edge -- about three voxels -- so it lands on top of the outline
+        /// layer and reads as the board perimeter rather than as a plane of copper. The
+        /// hatch costs about 7,100 voxels for the 965 mm2 of pour on a real 2-layer board,
+        /// roughly 5% of the default budget, which is a cheap price for the largest
+        /// feature on the board being visible at all.</summary>
+        public volatile bool   PcbFillRegions = true;
         /// <summary>Sampling density for pour OUTLINES (1 = the frame voxel spacing) and
         /// for the HATCH inside a filled pour (1 = a line every 6 voxels). Both are
         /// multipliers where higher means denser, and both are clamped in the renderer —
@@ -242,7 +255,11 @@ namespace EDes
 
         /// <summary>Max element size for the tessellator, mm. Smaller is smoother and costs
         /// triangles; this is the knob for a model that arrives too coarse or too heavy.</summary>
-        public volatile float  PcbTessellateTol = 0.4f;
+        /// Default 1.0, chosen from measurement rather than taste: on a real 2-layer
+        /// export clmax 0.4 gives 44,158 triangles (~132,000 voxels, which is most of the
+        /// 150,000 default budget spent on surfaces alone), 1.0 gives 11,978 (~36,000) and
+        /// 2.0 gives 6,414. 1.0 leaves room for the board underneath it.
+        public volatile float  PcbTessellateTol = 1.0f;
 
         /// <summary>Explicit tessellator command, or empty to auto-discover (gmsh, then
         /// FreeCAD). Present so an unusual or commercial toolchain can be used without a

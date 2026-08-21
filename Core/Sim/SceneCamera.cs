@@ -93,6 +93,15 @@ namespace EDes.Sim
         /// referring to the other frame.</summary>
         public bool LockRotX, LockRotY, LockRotZ;
 
+        /// <summary>Flip all three TRANSLATION axes together, leaving rotation alone.
+        ///
+        /// All three rather than one: which way "correct" feels depends on whether you
+        /// read the puck as moving the model or as moving your viewpoint, and those two
+        /// readings disagree on every translation axis at once. A per-axis set of
+        /// inversions would let someone end up with a mixed frame that is wrong in a way
+        /// no single mental model explains.</summary>
+        public bool InvertTranslation;
+
         /// <summary>Rotate by three small angles, about whichever frame LocalAxes selects.
         ///
         /// This is the ONLY funnel every input path uses — ApplyNav, Orbit and RollBy all
@@ -264,9 +273,10 @@ namespace EDes.Sim
             // together, so the probe could never actually reach anything.
             if (allowPan)
             {
-                PanX += nav.Dx * panRate * dt;   // slide left / right  → scene left / right
-                PanY += nav.Dy * panRate * dt;   // push fore / aft     → scene depth
-                PanZ += nav.Dz * panRate * dt;   // lift up / down      → scene vertical
+                float inv = InvertTranslation ? -1f : 1f;
+                PanX += nav.Dx * panRate * dt * inv;   // slide left / right → scene L/R
+                PanY += nav.Dy * panRate * dt * inv;   // push fore / aft    → scene depth
+                PanZ += nav.Dz * panRate * dt * inv;   // lift up / down     → scene vertical
             }
 
             // All three rotations share rotRate, so the puck feels isotropic in rotation

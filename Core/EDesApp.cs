@@ -22,7 +22,7 @@
 //      SpaceNavigator, the keyboard, the controller, and the preview window's
 //      left-drag — so all four feel like the same control.
 //    • Draw order IS priority order: mode content, then HUD text, then the
-//      backdrop. When the budget runs out the decoration is what disappears.
+//      HUD text. When the budget runs out the text is what disappears.
 //
 //  Axes: -Z is up, X is the layout's left/right, Y is depth. The HUD and scope
 //  live on the constant-Y plane PlaneY (default 0.1) and are NOT camera-
@@ -211,7 +211,6 @@ namespace EDes
 
             if (Down(VX_KEYS.KB_V)) _s.ShowNavDiag  = !_s.ShowNavDiag;
             if (Down(VX_KEYS.KB_L)) _s.ShowLabels   = !_s.ShowLabels;
-            if (Down(VX_KEYS.KB_G)) _s.ShowBackdrop = !_s.ShowBackdrop;
             if (Down(VX_KEYS.KB_R)) _cam.Reset();
 
             switch ((EDesMode)_s.Mode)
@@ -351,8 +350,6 @@ namespace EDes
             }
             catch { _navHostRc = -2; }
 
-            if (!_s.NavEnabled) { _navSource = "disabled"; return; }
-
             if (_navHostUsable)
             {
                 _navSource = "LedHost vxl_nav_read";
@@ -416,6 +413,8 @@ namespace EDes
             _cam.LockRotX = _s.LockRotX;
             _cam.LockRotY = _s.LockRotY;
             _cam.LockRotZ = _s.LockRotZ;
+
+            _cam.InvertTranslation = _s.NavInvertTranslation;
         }
 
         // ── Pick list ─────────────────────────────────────────────────────────
@@ -485,17 +484,43 @@ namespace EDes
             {
                 string d = sol.Designator.Length > 0 ? sol.Designator : sol.Name;
                 if (d.Length == 0 || !seen.Add(d)) continue;
-                rows.Add(new PickRow("Components", d, "3D", "comp:" + d, sol.Colour));
+                rows.Add(new PickRow(GroupFor(d), d, "3D", "comp:" + d, sol.Colour));
             }
             foreach (var c in _board.Components)
             {
                 if (c.Designator.Length == 0 || !seen.Add(c.Designator)) continue;
-                rows.Add(new PickRow("Components", c.Designator,
+                rows.Add(new PickRow(GroupFor(c.Designator), c.Designator,
                                      c.Value.Length > 0 ? c.Value : "placed",
-                                     "comp:" + c.Designator, 0xC8C8D0));
+                                     "comp:" + c.Designator, Palette.White));
             }
 
             _picks = rows.ToArray();
+        }
+
+        /// <summary>Which group a designator belongs in.
+        ///
+        /// By reference-designator prefix, which is the one naming convention every EDA
+        /// tool follows — TP for test points, J/P for connectors, U/IC for devices. Split
+        /// out because a flat list of every part on a board is a list nobody reads: when
+        /// you want a test point you want the test points, not to scroll past forty
+        /// resistors to find them.</summary>
+        private static string GroupFor(string designator)
+        {
+            if (designator.Length == 0) return "Components";
+
+            // Letters only, so R12 and R are the same prefix.
+            int i = 0;
+            while (i < designator.Length && char.IsLetter(designator[i])) i++;
+            string prefix = designator.Substring(0, i).ToUpperInvariant();
+
+            return prefix switch
+            {
+                "TP" or "TSTPNT" or "MP" => "Test points",
+                "J" or "P" or "CN" or "CON" or "X" => "Connectors",
+                "U" or "IC" or "Q" or "D" or "LED" => "Devices",
+                "R" or "C" or "L" or "FB" or "RN" => "Passives",
+                _ => "Components",
+            };
         }
 
         /// <summary>Advance the inspection stage: camera, signal, component, camera...
@@ -547,6 +572,43 @@ namespace EDes
             _s.InspectX = x; _s.InspectY = y; _s.InspectZ = z;
         }
 
+        /// <summary>Left edge of the HUD plane, for text.
+        ///
+        /// Not simply -radius: the volume is a CYLINDER, so at the HUD plane's y the
+        /// leftmost point is sqrt(r^2 - y^2), which is inside -radius. Using -radius puts
+        /// the first glyph column outside the volume where VoxelBatch clips it, so the
+        /// text silently loses its first character.</summary>
+        private float TextLeftX
+        {
+            get
+            {
+                float y = _s.PlaneY;
+                float inside = _radius * _radius - y * y;
+                float edge = inside > 0f ? MathF.Sqrt(inside) : _radius;
+                return -edge * 0.995f;
+            }
+        }
+
+        /// <summary>Row one: which board, and which mode. Always drawn, because "what am I
+        /// looking at and what mode am I in" is the one thing that is never not worth a
+        /// line — and it is the anchor everything below it reads relative to.</summary>
+        private void DrawStatusHeader()
+        {
+            string mode = ((EDesInspect)_s.InspectStage) switch
+            {
+                EDesInspect.Signal    => "INSPECTOR MODE: SIGNALS",
+                EDesInspect.Component => "INSPECTOR MODE: COMPONENTS",
+                _                     => "CAMERA MODE",
+            };
+
+            string board = _board.HasGeometry || _board.Solids.Count > 0
+                           ? _board.SourceName
+                           : "(no board)";
+
+            _hud.Text(new point3d(TextLeftX, _s.PlaneY, _topText.Row()), _textSize,
+                      Palette.TextHilite, board.ToUpperInvariant() + "   " + mode);
+        }
+
         /// <summary>True when an inspector is active AND the probe is actually on
         /// something. Both halves matter: with nothing selected the normal readouts are
         /// still the most useful thing on the display.</summary>
@@ -590,20 +652,21 @@ namespace EDes
             var probe = _pcb.Probe;
 
             float size = _textSize * 0.85f;
-            float x    = -_radius * 0.95f;
+            float x    = TextLeftX;
 
             // Shares the frame's single top-of-display cursor rather than picking its own
             // fraction of the height — a hand-picked -0.92 * zHalf is exactly how two
             // blocks end up in the same voxels once one of them grows a line.
             ref TextStack st = ref _topText;
 
+            // The mode name already occupies the top row (DrawStatusHeader), so repeating
+            // it here would spend one of very few rows saying the same thing twice.
             string title = ((EDesInspect)_s.InspectStage) switch
             {
                 EDesInspect.Signal    => "SIGNAL INSPECTOR",
                 EDesInspect.Component => "COMPONENT INSPECTOR",
                 _                     => "INSPECTION MODE",
             };
-            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.TextHilite, title);
 
             if (!probe.Hit)
             {
@@ -647,6 +710,10 @@ namespace EDes
             // share the top band instead of being split between the two ends.
             _topText = _layout.Readout();
 
+            // FIRST, so it owns the top row of the display and everything else stacks
+            // beneath it.
+            if ((EDesMode)_s.Mode == EDesMode.Pcb) DrawStatusHeader();
+
             switch ((EDesMode)_s.Mode)
             {
                 case EDesMode.Education: DrawEducation(); break;
@@ -654,9 +721,9 @@ namespace EDes
                 case EDesMode.Pcb:       DrawPcbMode();   break;
             }
 
-            // Probe and its readout come BEFORE the HUD panel and the backdrop: when the
-            // probe is what you are driving, it is the last thing that should disappear
-            // to a tight budget, not the first.
+            // Probe and its readout come BEFORE the HUD panel: when the probe is what you
+            // are driving, it is the last thing that should disappear to a tight budget,
+            // not the first.
             if (_s.InspectMode)
             {
                 DrawProbeLeader();
@@ -671,10 +738,6 @@ namespace EDes
             // information nobody is reading at that moment. The text band is only a few
             // rows tall, so anything kept is something else lost.
             if (_s.ShowHudPanel && !ProbeHasSelection) DrawHudPanel();
-            // Scope mode fills the volume with the face itself (see README) — the grid
-            // floor/globe backdrop is orientation chrome for flying a circuit or board
-            // around, and only competes with a trace that is meant to fill the display.
-            if (_s.ShowBackdrop && (EDesMode)_s.Mode != EDesMode.Scope) DrawBackdrop();
 
             _batch.Flush(ledHost, ref vs);
 
@@ -856,9 +919,9 @@ namespace EDes
         }
 
         // ── Mode: scope ───────────────────────────────────────────────────────
-        // The scope owns the whole content band here: full width, full height. No
-        // backdrop competes with it (see Draw), so the face can run right out to the
-        // display wall instead of leaving a ring of empty volume around it.
+        // The scope owns the whole content band here: full width, full height, and
+        // nothing else drawn in the volume competes with it, so the face runs almost
+        // to the display wall instead of leaving a ring of empty volume around it.
         private const float ScopeModeHalfWidth = 0.97f;
 
         private void DrawScopeMode()
@@ -1028,7 +1091,7 @@ namespace EDes
         private void DrawNavReadout()
         {
             float size = _textSize * 0.8f;
-            float x    = -_radius * 0.92f;
+            float x    = TextLeftX;
             ref TextStack st = ref _topText;   // shared top-of-display cursor
 
             bool detected = _nav.Present || _navHostUsable || _nav.Devices > 0;
@@ -1055,33 +1118,6 @@ namespace EDes
         }
 
         private static string F(float v) => v.ToString("0.00");
-
-        /// <summary>Grid floor + three orthogonal rings: cheap orientation cues that
-        /// stop the scene reading as objects floating in a void.</summary>
-        private void DrawBackdrop()
-        {
-            float r = _radius * 0.96f;
-            float floorZ = _zHalf * 0.99f;      // the actual floor of the volume
-            var up = new point3d(1, 0, 0);
-            var rt = new point3d(0, 1, 0);
-
-            for (int i = 1; i <= 3; i++)
-                _batch.Ring(_cam.Transform(0, 0, floorZ), r * i / 3f, up, rt, Palette.GridFloor, 4f);
-
-            for (int i = 0; i < 8; i++)
-            {
-                float a = i * MathF.PI / 4f;
-                _batch.Line(_cam.Transform(0, 0, floorZ),
-                            _cam.Transform(MathF.Cos(a) * r, MathF.Sin(a) * r, floorZ),
-                            Palette.GridFloor, 4f);
-            }
-
-            // Three great circles at the volume wall, one per plane.
-            float gr = MathF.Min(r, _zHalf * 0.95f);
-            _batch.Ring(_cam.Transform(0, 0, 0), gr, new point3d(1, 0, 0), new point3d(0, 1, 0), Palette.Globe, 4f);
-            _batch.Ring(_cam.Transform(0, 0, 0), gr, new point3d(1, 0, 0), new point3d(0, 0, 1), Palette.Globe, 4f);
-            _batch.Ring(_cam.Transform(0, 0, 0), gr, new point3d(0, 1, 0), new point3d(0, 0, 1), Palette.Globe, 4f);
-        }
 
         // ── Settings tab ──────────────────────────────────────────────────────
 
@@ -1420,7 +1456,14 @@ namespace EDes
                             "that appears nowhere was never enumerated at all.");
             ui.AddLiveInfo(sec, ImportInventory, 0.5);
 
-            ui.AddSlider(sec, "Layer spacing", 0.02, 1.5, _s.LayerSpacing, v => _s.LayerSpacing = (float)v, "F2");
+            ui.AddNumber(sec, "Layer spacing (0 = coplanar, negative = flipped)",
+                         _s.LayerSpacing, v => _s.LayerSpacing = (float)v, "F3");
+            ui.AddInfo(sec, "0 collapses the stack into a single plane -- the board as " +
+                            "fabricated rather than exploded. Negative reverses the order, " +
+                            "so the bottom layer draws on top, which is what you want when " +
+                            "reading the board from underneath. Drills, vias, the cursor and " +
+                            "component markers keep a minimum height either way, or they " +
+                            "would collapse to nothing at exactly 0.");
             ui.AddSlider(sec, "Track width scale", 0.1, 6, _s.TrackScale, v => _s.TrackScale = (float)v, "F2");
             ui.AddSlider(sec, "Brightness (voxel density)", 0.2, 3.0, _s.PcbBrightness,
                          v => _s.PcbBrightness = (float)v, "F2");
@@ -1435,6 +1478,31 @@ namespace EDes
             ui.AddToggle(sec, "Pads",             _s.PcbPads,        v => _s.PcbPads = v);
             ui.AddToggle(sec, "Copper pours",     _s.PcbRegions,     v => _s.PcbRegions = v);
             ui.AddToggle(sec, "Cross-hatch pours", _s.PcbFillRegions, v => _s.PcbFillRegions = v);
+            ui.AddLiveInfo(sec, () =>
+            {
+                int n = 0;
+                double area = 0;
+                foreach (var l in _board.Layers)
+                {
+                    if (l.Kind is not (PcbLayerKind.CopperTop or PcbLayerKind.CopperInner
+                                       or PcbLayerKind.CopperBottom)) continue;
+                    foreach (var r in l.Regions)
+                    {
+                        n++;
+                        double a = 0;
+                        for (int i = 0; i < r.Count; i++)
+                        {
+                            int j = (i + 1) % r.Count;
+                            a += r.X[i] * (double)r.Y[j] - r.X[j] * (double)r.Y[i];
+                        }
+                        area += Math.Abs(a) * 0.5;
+                    }
+                }
+                return n == 0 ? "no copper pours on this board"
+                              : $"{n} copper pour(s), {area:0.#} mm2"
+                                + (_s.PcbFillRegions ? " (cross-hatched)"
+                                                     : " (OUTLINE ONLY - hard to see)");
+            }, 1.0);
             ui.AddToggle(sec, "Drills",           _s.PcbHoles,       v => _s.PcbHoles = v);
             ui.AddToggle(sec, "Vias",             _s.PcbVias,        v => _s.PcbVias = v);
             ui.AddSlider(sec, "Pour outline density", 0.2, 4.0, _s.PcbPourDensity,
@@ -1444,7 +1512,7 @@ namespace EDes
             ui.AddInfo(sec, "Higher is denser. Hatch only applies with filled pours on. " +
                             "Pours and hatch are usually the biggest voxel consumers on a " +
                             "board, so these two are the first knobs to turn when the " +
-                            "budget runs out and the backdrop starts disappearing.");
+                            "budget runs out and geometry starts disappearing.");
             ui.AddToggle(sec, "STEP / CAD wireframe", _s.PcbCad,     v => _s.PcbCad = v);
             ui.AddSlider(sec, "CAD brightness", 0.2, 2.0, _s.PcbCadBright,
                          v => _s.PcbCadBright = (float)v, "F2");
@@ -1627,11 +1695,11 @@ namespace EDes
         {
             var sec = ui.AddSection(stack, "Render budget & text", group);
             ui.AddInfo(sec, "Max voxels is a hard per-frame ceiling for EVERYTHING drawn, " +
-                            "text included. Draw order is priority order: the backdrop is " +
-                            "dropped first, then labels, then geometry.");
-            ui.AddSlider(sec, "Max voxels / frame", 5000, VoxelBatch.MAX_CAPACITY, _s.MaxVoxels,
+                            "text included. Draw order is priority order: labels are dropped " +
+                            "before geometry.");
+            ui.AddNumber(sec, "Max voxels / frame", _s.MaxVoxels,
                          v => _s.MaxVoxels = (int)v, "F0");
-            ui.AddSlider(sec, "Min voxels per glyph cell", 1.0, 4.0, _s.MinTextCellVoxels,
+            ui.AddNumber(sec, "Min voxels per glyph cell", _s.MinTextCellVoxels,
                          v => _s.MinTextCellVoxels = (float)v, "F1");
             ui.AddLiveInfo(sec, () =>
             {
@@ -1649,11 +1717,11 @@ namespace EDes
                             "better trade on a low-resolution display.");
             ui.AddToggle(sec, "Reduce voxels while moving if slow", _s.AdaptiveBudget,
                          v => _s.AdaptiveBudget = v);
-            ui.AddSlider(sec, "Throttle below VPS", 2, 30, _s.AdaptiveLowVps,
+            ui.AddNumber(sec, "Throttle below VPS", _s.AdaptiveLowVps,
                          v => _s.AdaptiveLowVps = (float)v, "F1");
-            ui.AddSlider(sec, "Recover above VPS", 2, 30, _s.AdaptiveGoodVps,
+            ui.AddNumber(sec, "Recover above VPS", _s.AdaptiveGoodVps,
                          v => _s.AdaptiveGoodVps = (float)v, "F1");
-            ui.AddSlider(sec, "Throttle floor (fraction)", 0.05, 1.0, _s.AdaptiveFloor,
+            ui.AddNumber(sec, "Throttle floor (fraction)", _s.AdaptiveFloor,
                          v => _s.AdaptiveFloor = (float)v, "F2");
             ui.AddInfo(sec, "The budget is only cut while the view is MOVING — a still " +
                             "frame that renders slowly is one you are studying, and " +
@@ -1663,16 +1731,20 @@ namespace EDes
             ui.AddLiveInfo(sec, () =>
                 $"budget scale {_budgetScale * 100f:0}%  ->  {(int)(_s.MaxVoxels * _budgetScale):N0} vox"
                 + $"   ({(_viewMoving ? "moving" : "still")}, {_engine?.LiveVps ?? 0f:0.0} VPS)", 0.3);
-            ui.AddSlider(sec, "Voxel density (shared with Simulator tab)", 0.25, 3.0,
+            ui.AddNumber(sec, "Voxel density (shared with Display panel)",
                          _engine.VoxelDensity, v => _engine.VoxelDensity = (float)v, "F2");
-            ui.AddSlider(sec, "Text size", 0.05, 0.6, _s.TextSize, v => _s.TextSize = (float)v, "F2");
-            ui.AddSlider(sec, "Text weight", 0.5, 3.0, _s.TextWeight, v => _s.TextWeight = (float)v, "F2");
+            ui.AddNumber(sec, "Text size", _s.TextSize, v => _s.TextSize = (float)v, "F2");
+            ui.AddNumber(sec, "Text weight", _s.TextWeight, v => _s.TextWeight = (float)v, "F2");
             ui.AddButton(sec, "Cycle font (Classic / Blocky / Bold)",
                          () => _s.FontIndex = (_s.FontIndex + 1) % 3);
             ui.AddToggle(sec, "Labels & readouts", _s.ShowLabels,   v => _s.ShowLabels = v);
             ui.AddToggle(sec, "Title / voxel readout", _s.ShowHudPanel, v => _s.ShowHudPanel = v);
-            ui.AddToggle(sec, "Backdrop (grid + rings)", _s.ShowBackdrop, v => _s.ShowBackdrop = v);
-            ui.AddSlider(sec, "Readout plane Y", -1.0, 1.0, _s.PlaneY, v => _s.PlaneY = (float)v, "F2");
+            // No backdrop row, because there is no backdrop: the grid floor and
+            // orientation rings are gone entirely. They were decoration competing for
+            // budget with the board, and on a transparent display they also crossed
+            // everything else in the volume. The readout plane keeps its default too --
+            // it exists so the HUD sits on ONE flat plane, and moving it mid-session is
+            // not a thing anyone needs.
             ui.AddLiveInfo(sec, () =>
                 $"Drawn {_lastVoxels} / {_s.MaxVoxels} voxels" +
                 (_lastDropped > 0 ? $", {_lastDropped} dropped" : "") +
@@ -1685,21 +1757,20 @@ namespace EDes
             ui.AddInfo(sec, "Left-drag the preview to orbit the simulator camera; " +
                             "Ctrl+wheel zooms it. WASD orbits the scene, Q/E rolls, " +
                             "comma/period zooms, R resets.");
-            ui.AddToggle(sec, "SpaceNavigator enabled", _s.NavEnabled, v => _s.NavEnabled = v);
             ui.AddInfo(sec, "ONE sensitivity for all three translation axes and ONE for all " +
                             "three rotation axes — so the puck feels the same in X, Y and Z, and " +
                             "rotation can be tuned independently of translation.");
-            ui.AddSlider(sec, "Translation sensitivity (units/s)", 0.1, 40, _s.NavPanRate,
+            ui.AddNumber(sec, "Translation sensitivity (units/s)", _s.NavPanRate,
                          v => _s.NavPanRate = (float)v, "F2");
-            ui.AddSlider(sec, "Rotation sensitivity (rad/s)", 0.1, 20, _s.NavRotRate,
+            ui.AddNumber(sec, "Rotation sensitivity (rad/s)", _s.NavRotRate,
                          v => _s.NavRotRate = (float)v, "F2");
-            ui.AddSlider(sec, "Button zoom rate", 0.1, 10, _s.NavZoomRate,
+            ui.AddNumber(sec, "Button zoom rate", _s.NavZoomRate,
                          v => _s.NavZoomRate = (float)v, "F2");
-            ui.AddSlider(sec, "Translation full scale (raw counts)", 1, 1000, _s.NavFullScaleTrans,
+            ui.AddNumber(sec, "Translation full scale (raw counts)", _s.NavFullScaleTrans,
                          v => _s.NavFullScaleTrans = (float)v, "F0");
-            ui.AddSlider(sec, "Rotation full scale (raw counts)", 1, 1000, _s.NavFullScaleRot,
+            ui.AddNumber(sec, "Rotation full scale (raw counts)", _s.NavFullScaleRot,
                          v => _s.NavFullScaleRot = (float)v, "F0");
-            ui.AddSlider(sec, "Nav dead-zone (fraction)", 0, 0.5, _s.NavDeadzone,
+            ui.AddNumber(sec, "Nav dead-zone (fraction)", _s.NavDeadzone,
                          v => _s.NavDeadzone = (float)v, "F3");
             ui.AddInfo(sec, "The driver reports RAW counts, not -1..1, and NOT the same range for " +
                             "translation as for rotation. The two full-scale values convert them, " +
@@ -1730,6 +1801,14 @@ namespace EDes
                                   + (_s.LockRotZ ? "Z" : "");
             }, 0.3);
 
+            ui.AddToggle(sec, "Invert all XYZ translation (not rotation)",
+                         _s.NavInvertTranslation, v => _s.NavInvertTranslation = v);
+            ui.AddInfo(sec, "Flips all three translation axes together. Which way feels " +
+                            "right depends on whether you read the puck as moving the MODEL " +
+                            "or as moving your VIEWPOINT — those are opposite on every axis, " +
+                            "so it is a preference rather than something to get 'correct'. " +
+                            "Rotation is deliberately unaffected.");
+
             ui.AddButton(sec, "Rotate about: LOCAL / GLOBAL axes", () =>
             {
                 _s.NavLocalAxes = !_s.NavLocalAxes;
@@ -1745,11 +1824,11 @@ namespace EDes
                             "through the volume, everything dims except what the probe is " +
                             "over, and its details appear top-left.");
             ui.AddButton(sec, "Cycle Camera / Signal / Component inspector", ToggleInspect);
-            ui.AddSlider(sec, "Probe speed", 0.2, 12, _s.InspectRate,
+            ui.AddNumber(sec, "Probe speed", _s.InspectRate,
                          v => _s.InspectRate = (float)v, "F2");
-            ui.AddSlider(sec, "Dim for unhovered (1 = no dimming)", 0.1, 1.0, _s.InspectDim,
+            ui.AddNumber(sec, "Dim for unhovered (1 = no dimming)", _s.InspectDim,
                          v => _s.InspectDim = (float)v, "F2");
-            ui.AddSlider(sec, "Probe snap reach", 0.1, 2.0, _s.InspectSnap,
+            ui.AddNumber(sec, "Probe snap reach", _s.InspectSnap,
                          v => _s.InspectSnap = (float)v, "F2");
             ui.AddInfo(sec, "The probe reaches for the nearest TRACE or PART and draws a " +
                             "line to it — vias and layers are not selectable, since a " +
@@ -1798,7 +1877,7 @@ namespace EDes
                 };
 
                 return "GLOBAL\n" +
-                       "Tab mode   L labels   G backdrop   R reset camera   Esc quit\n" +
+                       "Tab mode   L labels   R reset camera   Esc quit\n" +
                        "\nCAMERA\n" +
                        "WASD orbit   Q/E roll   , / . zoom   left-drag preview\n" +
                        "SpaceNav 6DOF   both puck buttons = inspection mode\n" +
