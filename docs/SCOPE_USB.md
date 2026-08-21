@@ -33,7 +33,7 @@ t=1024 v1=1.2 v2=0.4  -> ch1=1024, ch2=1.2, ch3=0.4   (see note)
 - Values are **volts** (whatever scale you feed it becomes the Y axis; `Volts / division`
   scales the view).
 - Up to **4 channels**. The channel count latches from the lines as they arrive and is shown
-  in the PCB… sorry, in the **Oscilloscope** tab as `N ch @ M Hz`.
+  in the **Oscilloscope** tab as `N ch @ M Hz`.
 - Lines are separated by `\n` (a trailing `\r` is harmless).
 - Anything non-numeric is skipped, so `#`-comments and units are tolerated — but note the
   fourth example above: a timestamp column becomes *channel 1*. Send only the channels you
