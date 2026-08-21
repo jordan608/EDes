@@ -135,7 +135,9 @@ Solve/layout sits behind a dirty flag in `CircuitScene`; the renderers only ever
 | `Pcb/PcbBoard.cs` | Board model in **mm** (layers, segs, pads, regions, holes, mesh clouds) + bounds + analysis (drill table, min track/drill, copper layer count). |
 | `Pcb/GerberParser.cs` | RS-274X subset: `%FS/%MO/%AD/%LP`, `D01/02/03`, `G01/02/03` (+`G74/75` arcs), `G36/37` regions. Unsupported constructs add a note, never silently drop. |
 | `Pcb/ExcellonParser.cs` | Drill/route: units, **zero suppression**, tool table, modal hits, `G85` slots. |
-| `Pcb/MeshLoader.cs` | Assimp to a deterministic area-weighted surface point cloud (STL/OBJ/PLY/GLB/...). Detects STEP and reports the conversion path instead of failing. |
+| `Pcb/MeshLoader.cs` | Assimp to a deterministic area-weighted surface point cloud (STL/OBJ/PLY/GLB/...). Surface-only sampling — never a solid fill. STEP goes to `StepParser` instead. |
+| `Pcb/StepParser.cs` | STEP (ISO 10303-21) to an EDGE wireframe with no CAD kernel: tokenizer (incl. complex instances), units, assembly placement, `LINE`/`CIRCLE` edges, colours, designators. Surfaces deliberately not read — read its header before touching it. |
+| `Pcb/CadModel.cs` | `CadSolid`/`CadEdge`/`CadModel` — what a STEP import produces, in board mm with Z up. |
 | `Pcb/PcbImporter.cs` | Folder/file dispatch + layer-kind classification (KiCad AND Altium/Eagle naming) + stack ordering. |
 | `Pcb/PcbRenderer.cs` | Fits the board to the cylinder (bounding **circle**), spreads layers along Z, draws tracks/pads/pours(hatched)/drills/meshes/cursor. |
 | `tests/PcbParserTests/` | Console check harness for the two parsers (30 assertions incl. inch/metric, legacy 2.4, arc sweep direction, slots). |
@@ -189,7 +191,14 @@ Solve/layout sits behind a dirty flag in `CircuitScene`; the renderers only ever
     permanent drift. `NavFullScale` is a setting because the true full-scale is per-device
     — the diagnostics block reports the observed peak so it can be calibrated, not guessed.
 
-13. **EDes: draw order is priority order** - mode content, then HUD text, then backdrop. When the
+13. **EDes: CAD is drawn as EDGES, never as filled surfaces.** The display is
+    transparent and has no occlusion, so a filled or densely-sampled surface shows its
+    own back faces through its front and the part reads as fog. `StepParser` therefore
+    reads only B-rep edges, and `MeshLoader` samples only surfaces (never interiors).
+    Do not "improve" either by adding a solid fill — it costs budget and reduces
+    legibility at the same time. A whole 2-layer board's CAD is ~10k voxels as edges.
+
+14. **EDes: draw order is priority order** - mode content, then HUD text, then backdrop. When the
     budget runs out, the tail of that order is what disappears. Keep new decoration last.
 
 ## Rendering best practices

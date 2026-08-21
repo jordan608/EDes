@@ -109,6 +109,8 @@ namespace EDes
         /// small component leads (0.8 mm+) classified as through-holes.</summary>
         public volatile float  PcbViaMaxDia  = 0.7f;    // mm
         public volatile bool   PcbMeshes     = true;
+        public volatile bool   PcbCad        = true;    // STEP solids as edge wireframes
+        public volatile float  PcbCadBright  = 1.0f;
         public volatile bool   PcbCursor     = false;
         public volatile float  PcbCursorX    = 0f;     // mm, board coordinates
         public volatile float  PcbCursorY    = 0f;

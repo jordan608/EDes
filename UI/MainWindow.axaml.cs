@@ -59,13 +59,6 @@ namespace EDes.UI
         // the game thread only writes it when no frame is in flight.
         private byte[]? _frameBuf;
 
-        // Camera slider sync suppressor
-        private bool _syncingCamera = false;
-
-        // Camera controls — built into the display panel. Always null-check before use.
-        private Slider?    _camYaw, _camTilt, _camZoom;
-        private TextBlock? _camYawLabel, _camTiltLabel, _camZoomLabel;
-
         // Mode headers, in IVoxonGame.Modes order. Index = mode index.
         private readonly List<Button> _modeHeaders = new();
 
@@ -131,7 +124,10 @@ namespace EDes.UI
             RefreshModePanel();
 
             // ── Motor buttons ─────────────────────────────────────────────────
-            BtnMotorStart.Click += (_, _) => _s.MotorRpmRequest = 600;
+            // The same spec constant GameLoop auto-starts from. Hardcoding 600 here
+            // meant pressing Motor On SLOWED a VX2-XL down from its 900 RPM default.
+            BtnMotorStart.Click += (_, _) =>
+                _s.MotorRpmRequest = VoxonHardwareCheck.VX2XL.DefaultMotorRpm;
             BtnMotorStop .Click += (_, _) => _s.MotorRpmRequest = 0;
 
             // ── Ctrl+[ / Ctrl+] — zoom in / out ──────────────────────────────
@@ -139,9 +135,9 @@ namespace EDes.UI
             {
                 if ((e.KeyModifiers & KeyModifiers.Control) == 0) return;
                 if (e.Key == Key.OemOpenBrackets)
-                { _s.EmuDist = Math.Max(0.5f, _s.EmuDist - 0.4f); SyncCameraSliders(); e.Handled = true; }
+                { _s.EmuDist = Math.Max(0.5f, _s.EmuDist - 0.4f); e.Handled = true; }
                 else if (e.Key == Key.OemCloseBrackets)
-                { _s.EmuDist = Math.Min(20f,  _s.EmuDist + 0.4f); SyncCameraSliders(); e.Handled = true; }
+                { _s.EmuDist = Math.Min(20f,  _s.EmuDist + 0.4f); e.Handled = true; }
             };
 
             // ── Window focus gating ───────────────────────────────────────────
@@ -196,10 +192,13 @@ namespace EDes.UI
                 }
                 else
                 {
-                    // Drag right = camera walks right around the volume.
-                    float h = _s.EmuHAng + (float)(dx * 0.01);
+                    // Both axes are negated so the drag feels like grabbing the volume
+                    // and turning it, rather than walking the camera around the outside
+                    // of it. Those two readings move the view in opposite directions and
+                    // the grab-the-object one is what matches the preview.
+                    float h = _s.EmuHAng - (float)(dx * 0.01);
                     _s.EmuHAng = (h % (2f * MathF.PI) + 2f * MathF.PI) % (2f * MathF.PI);
-                    _s.EmuVAng = Math.Clamp(_s.EmuVAng + (float)(dy * 0.01), -1.4f, 1.4f);
+                    _s.EmuVAng = Math.Clamp(_s.EmuVAng - (float)(dy * 0.01), -1.4f, 1.4f);
                 }
                 _lastPtr = pos;
             };
@@ -329,9 +328,6 @@ namespace EDes.UI
 
             // The volume Tab key changes the mode behind the window back — notice it.
             if (_game != null && _game.ActiveMode != _shownMode) RefreshModePanel();
-
-            // Sync camera labels from game-loop-updated angles
-            SyncCameraSliders();
         }
 
         // ── Splash ─────────────────────────────────────────────────────────────
@@ -353,20 +349,6 @@ namespace EDes.UI
                 }
                 catch { /* missing/invalid image — title-only splash */ }
             }
-        }
-
-        // ── Camera slider sync ────────────────────────────────────────────────
-        private void SyncCameraSliders()
-        {
-            if (_camYaw == null) return;   // Simulator panel not currently showing
-            _syncingCamera = true;
-            _camYaw .Value = _s.EmuHAng;
-            _camTilt!.Value = _s.EmuVAng;
-            _camZoom!.Value = _s.EmuDist;
-            _camYawLabel !.Text = $"{_s.EmuHAng:F2}";
-            _camTiltLabel!.Text = $"{_s.EmuVAng:F2}";
-            _camZoomLabel!.Text = $"{_s.EmuDist:F1}";
-            _syncingCamera = false;
         }
 
         // ── Global key gate — keep game keys out of the settings UI ───────────
@@ -490,43 +472,33 @@ namespace EDes.UI
         private Control BuildDisplayPanel()
         {
             var stack = MakeScrollPanel();
-            var group = new List<Expander>();
 
-            var rend = AddSection(stack, "Rendering", group, expanded: true);
-            AddSlider(rend, "Gamma",           0.5,  4.0, _s.Gamma,           v => _s.Gamma           = (float)v, "F2");
-            AddIntToggle(rend, "Dithering",    _s.DitherMode != 0,             v => _s.DitherMode      = v ? 1 : 0);
-            AddSlider(rend, "Dither threshold",0,    255, _s.DitherThreshold,  v => _s.DitherThreshold = (int)v,   "F0");
+            // One flat list, no accordion. This panel is short enough to read whole, and
+            // a collapsed Expander hides that a setting exists at all — which matters
+            // more here than saving a few hundred pixels.
+            //
+            // No camera rows either: the preview window IS the camera control (left-drag
+            // to turn the volume, wheel and Ctrl+wheel to zoom), so sliders duplicating
+            // it were a second source of truth for the same three numbers.
+            var rend = _ui.AddHeader(stack, "Rendering");
+            AddSlider(rend, "Gamma",            0.5,  4.0, _s.Gamma,           v => _s.Gamma           = (float)v, "F2");
+            AddIntToggle(rend, "Dithering",     _s.DitherMode != 0,            v => _s.DitherMode      = v ? 1 : 0);
+            AddSlider(rend, "Dither threshold", 0,    255, _s.DitherThreshold, v => _s.DitherThreshold = (int)v,   "F0");
             AddToggle(rend, "Show debug border", _s.ShowDebugBorder,           v => _s.ShowDebugBorder = v);
+            AddSlider(rend, "Voxel density",    0.25, 3.0, _s.VoxelDensity,    v => _s.VoxelDensity    = (float)v, "F2");
             AddInfo(rend, "Voxel density re-meshes the model (higher = finer, more voxels).");
-            AddSlider(rend, "Voxel density",  0.25, 3.0, _s.VoxelDensity,      v => _s.VoxelDensity    = (float)v, "F2");
 
-            var perf = AddSection(stack, "Performance", group);
+            var perf = _ui.AddHeader(stack, "Performance");
+            AddToggle(perf, "Cap to 30 VPS", _s.CapVps30, v => _s.CapVps30 = v);
             AddInfo(perf, "Display tops out at 30 VPS. Cap the loop to save CPU/heat.");
-            AddToggle(perf, "Cap to 30 VPS",     _s.CapVps30,                  v => _s.CapVps30        = v);
 
-            var cam = AddSection(stack, "Simulator Camera", group);
-            AddInfo(cam, "[ / ] rotate · Ctrl+[ / ] zoom");
-            _camYaw  = AddCameraSlider(cam, "Yaw",  0,       6.2832, _s.EmuHAng, "F2",
-                                       v => _s.EmuHAng = (float)v, out _camYawLabel);
-            _camTilt = AddCameraSlider(cam, "Tilt", -1.5708, 1.5708, _s.EmuVAng, "F2",
-                                       v => _s.EmuVAng = (float)v, out _camTiltLabel);
-            _camZoom = AddCameraSlider(cam, "Zoom", 0.5,     20,     _s.EmuDist, "F1",
-                                       v => _s.EmuDist = (float)v, out _camZoomLabel);
-
-            var reset = new Button
-            {
-                Content             = "Reset Camera",
-                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
-                FontSize            = 10,
-                Padding             = new Thickness(4, 3),
-                Margin              = new Thickness(10, 6, 10, 0),
-            };
-            reset.Click += (_, _) =>
+            var view = _ui.AddHeader(stack, "View");
+            AddInfo(view, "Drag the preview to turn the volume. Wheel zooms the model, " +
+                          "Ctrl+wheel and Ctrl+[ / ] zoom the camera.");
+            AddButton(view, "Reset camera", () =>
             {
                 _s.EmuHAng = 0f; _s.EmuVAng = 0f; _s.EmuDist = 4f;
-                SyncCameraSliders();
-            };
-            cam.Children.Add(reset);
+            });
 
             return WrapInScroll(stack);
         }
@@ -555,61 +527,6 @@ namespace EDes.UI
 
         private void AddRgb(StackPanel p, Func<int> getColor, Action<int> setColor)
             => _ui.AddRgb(p, getColor, setColor);
-
-        // ── AddCameraSlider — slider with bidirectional sync support ──────────
-        // Like AddSlider, but the PropertyChanged handler respects _syncingCamera
-        // (so SyncCameraSliders can push game-loop values back without feedback),
-        // returns the slider, and hands back its value label via out param.
-        // Camera angles aren't persisted, so this does NOT trigger DebounceSave.
-        private Slider AddCameraSlider(StackPanel p, string label,
-                                       double min, double max, double initial,
-                                       string fmt, Action<double> onChange,
-                                       out TextBlock valueLabel)
-        {
-            var lbl = new TextBlock
-            {
-                Text       = initial.ToString(fmt),
-                FontSize   = 10,
-                Opacity    = 0.70,
-                Width      = 44,
-                TextAlignment = TextAlignment.Right,
-                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
-            };
-
-            var slider = new Slider
-            {
-                Minimum       = min,
-                Maximum       = max,
-                Value         = initial,
-                TickFrequency = (max - min) / 200.0,
-                Margin        = new Thickness(0, 0, 4, 0),
-            };
-            slider.PropertyChanged += (_, e) =>
-            {
-                if (_syncingCamera || e.Property.Name != nameof(Slider.Value)) return;
-                lbl.Text = slider.Value.ToString(fmt);
-                onChange(slider.Value);
-            };
-
-            var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,44") };
-            row.Children.Add(slider);
-            row.Children.Add(lbl);
-            Grid.SetColumn(lbl, 1);
-
-            p.Children.Add(new TextBlock
-            {
-                Text = label, FontSize = 11,
-                Margin = new Thickness(10, 4, 10, 0),
-            });
-            p.Children.Add(new Border
-            {
-                Margin  = new Thickness(10, 0, 10, 2),
-                Child   = row,
-            });
-
-            valueLabel = lbl;
-            return slider;
-        }
 
         private void AddToggle(StackPanel p, string label, bool initial, Action<bool> onChange)
             => _ui.AddToggle(p, label, initial, onChange);

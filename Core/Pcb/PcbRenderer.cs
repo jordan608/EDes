@@ -39,6 +39,8 @@ namespace EDes.Pcb
         public bool  ShowVias;         // via barrels bridging the whole stack
         public float ViaMaxDiaMm;      // plated holes at or under this are vias
         public bool  ShowMeshes;
+        public bool  ShowCad;          // STEP solids, as edge wireframes
+        public float CadBrightness;    // separate from Brightness: CAD sits above the board
         public bool  ShowCursor;
         public float CursorXmm, CursorYmm;
         public float Brightness;
@@ -97,6 +99,7 @@ namespace EDes.Pcb
 
             if (opt.ShowVias)  DrawVias(batch, cam, board, opt, cx, cy, z0, Spacing, slots);
             if (opt.ShowHoles) DrawHoles(batch, cam, board, cx, cy, z0, Spacing, slots, opt);
+            if (opt.ShowCad)    DrawCadSolids(batch, cam, board, opt, cx, cy);
             if (opt.ShowMeshes) DrawMeshes(batch, cam, board, cx, cy, opt);
             if (opt.ShowComponents) DrawComponents(batch, hud, cam, board, opt, cx, cy, z0, slots);
             if (opt.ShowCursor) DrawCursor(batch, cam, board, opt, cx, cy, z0, Spacing, slots);
@@ -321,6 +324,42 @@ namespace EDes.Pcb
                 }
 
                 if (batch.BudgetHit) return;
+            }
+        }
+
+        // ── CAD solids (STEP) ─────────────────────────────────────────────────
+        // Edges, not surfaces. On a transparent display a filled or densely-sampled
+        // surface shows its own back faces through its front and the part reads as fog,
+        // so the wireframe is not a cheap approximation of the real thing here — it is
+        // the more legible rendering, and it happens to cost a fraction of the voxels.
+        //
+        // Z uses the same convention as mesh clouds: the model frame has Z up, the
+        // display has -Z up, so heights are negated on the way through.
+        private void DrawCadSolids(VoxelBatch batch, SceneCamera cam, PcbBoard board,
+                                   in PcbViewOptions opt, float cx, float cy)
+        {
+            float bright = opt.CadBrightness > 0f ? opt.CadBrightness : opt.Brightness;
+
+            foreach (var solid in board.Solids)
+            {
+                if (!solid.Visible || solid.Edges.Count == 0) continue;
+
+                int col = Palette.Scale(solid.Colour, bright);
+
+                foreach (var e in solid.Edges)
+                {
+                    // A polyline, so consecutive points are joined — drawing the points
+                    // alone would dot a long straight edge into two lonely voxels.
+                    for (int i = 1; i < e.Count; i++)
+                    {
+                        var a = cam.Transform(Wx(e.X[i - 1], cx), Wy(e.Y[i - 1], cy),
+                                              -e.Z[i - 1] * Scale);
+                        var b = cam.Transform(Wx(e.X[i], cx), Wy(e.Y[i], cy),
+                                              -e.Z[i] * Scale);
+                        batch.Line(a, b, col);
+                    }
+                    if (batch.BudgetHit) return;
+                }
             }
         }
 

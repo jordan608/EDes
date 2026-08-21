@@ -68,6 +68,24 @@ namespace EDes.UI
             return content;
         }
 
+        // ── AddHeader — a plain, non-collapsible group label ──────────────────
+        // For panels shown as one flat list. An Expander would let the reader hide a
+        // setting and then not know it exists; a label cannot.
+        public StackPanel AddHeader(StackPanel root, string title)
+        {
+            root.Children.Add(new TextBlock
+            {
+                Text       = title.ToUpperInvariant(),
+                FontSize   = 10,
+                FontWeight = FontWeight.Bold,
+                Opacity    = 0.55,
+                Margin     = new Thickness(10, 12, 10, 3),
+            });
+            var content = new StackPanel { Spacing = 2 };
+            root.Children.Add(content);
+            return content;
+        }
+
         // ── AddInfo — dim informational text ──────────────────────────────────
         public void AddInfo(StackPanel p, string text)
         {

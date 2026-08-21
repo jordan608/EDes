@@ -82,8 +82,56 @@ public static class RealBoardCheck
 
         CheckTrue("xlsx BOM was read", board.BomLines.Count > 0);
         CheckTrue("DRC report parsed", board.Drc.Parsed && board.Drc.Rules > 5);
-        CheckTrue("STEP was catalogued, not parsed",
+        CheckTrue("STEP still catalogued as a document",
                   board.Documents.Exists(d => d.Kind == DocKind.Cad3D));
+
+        // ── STEP, end to end through the folder importer ─────────────────────
+        // The parser has its own unit tests; what this adds is the designator link,
+        // which can only be checked once the placement file has been read too.
+        {
+            int linked = 0, points = 0;
+            double lengthMm = 0;
+            foreach (var solid in board.Solids)
+            {
+                if (solid.Designator.Length > 0) linked++;
+                points += solid.PointCount;
+                foreach (var e in solid.Edges)
+                    for (int i = 1; i < e.Count; i++)
+                    {
+                        double dx = e.X[i] - e.X[i - 1];
+                        double dy = e.Y[i] - e.Y[i - 1];
+                        double dz = e.Z[i] - e.Z[i - 1];
+                        lengthMm += Math.Sqrt(dx * dx + dy * dy + dz * dz);
+                    }
+            }
+
+            Console.WriteLine($"STEP: {board.Solids.Count} solid(s), {linked} linked, " +
+                              $"{points} edge point(s), {lengthMm:0.0} mm of edge");
+
+            // Voxel cost is what decides whether this is usable at all: total edge
+            // length, scaled into the volume, divided by the voxel spacing.
+            double scale = 4.0 * 0.88 / (0.5 * Math.Sqrt(
+                board.WidthMm * board.WidthMm + board.HeightMm * board.HeightMm));
+            double voxels = lengthMm * scale / 0.03;
+            Console.WriteLine($"      ~{voxels:N0} voxels at the default budget of 150,000");
+
+            CheckTrue("STEP solids were imported", board.Solids.Count > 10);
+            CheckTrue("solids carry edges", points > 500);
+            CheckTrue("most solids matched a designator",
+                      linked >= board.Solids.Count / 2);
+            CheckTrue("the wireframe fits the voxel budget with room to spare",
+                      voxels > 0 && voxels < 100_000);
+
+            var designators = new SortedSet<string>();
+            foreach (var solid in board.Solids)
+                if (solid.Designator.Length > 0) designators.Add(solid.Designator);
+            Console.WriteLine($"      linked designators: {string.Join(", ", designators)}");
+            CheckTrue("linked designators exist in the placement data",
+                      designators.Count > 0 &&
+                      board.Components.TrueForAll(_ => true) &&
+                      designators.All(d => board.Components.Exists(
+                          c => string.Equals(c.Designator, d, StringComparison.OrdinalIgnoreCase))));
+        }
         CheckTrue("schematic PDF catalogued",
                   board.Documents.Exists(d => d.Kind == DocKind.Schematic));
         CheckTrue("aperture library was NOT parsed as a layer",

@@ -585,6 +585,8 @@ namespace EDes
                 ShowVias     = _s.PcbVias,
                 ViaMaxDiaMm  = _s.PcbViaMaxDia,
                 ShowMeshes   = _s.PcbMeshes,
+                ShowCad       = _s.PcbCad,
+                CadBrightness = _s.PcbCadBright,
                 ShowCursor   = _s.PcbCursor,
                 CursorXmm    = _s.PcbCursorX,
                 CursorYmm    = _s.PcbCursorY,
@@ -899,7 +901,7 @@ namespace EDes
         {
             var sec = ui.AddSection(stack, "PCB import", group);
             ui.AddInfo(sec, "Point this at a fabrication output FOLDER (Gerbers + drill) or a " +
-                            "single file. Meshes: STL / OBJ / PLY / GLB. STEP must be converted " +
+                            "single file. Meshes: STL / OBJ / PLY / GLB. STEP is read directly " +
                             "to STL first — see docs/PCB_IMPORT.md.");
             ui.AddTextBox(sec, "Path (folder or file)", _s.PcbPath, v => _s.PcbPath = v.Trim('"', ' '));
             ui.AddButton(sec, "Import / reload", () => _s.PcbImportRequested = true);
@@ -919,6 +921,21 @@ namespace EDes
             ui.AddToggle(sec, "Hatch pours",      _s.PcbFillRegions, v => _s.PcbFillRegions = v);
             ui.AddToggle(sec, "Drills",           _s.PcbHoles,       v => _s.PcbHoles = v);
             ui.AddToggle(sec, "Vias",             _s.PcbVias,        v => _s.PcbVias = v);
+            ui.AddToggle(sec, "STEP / CAD wireframe", _s.PcbCad,     v => _s.PcbCad = v);
+            ui.AddSlider(sec, "CAD brightness", 0.2, 2.0, _s.PcbCadBright,
+                         v => _s.PcbCadBright = (float)v, "F2");
+            ui.AddLiveInfo(sec, () =>
+            {
+                if (_board.Solids.Count == 0) return "no STEP solids loaded";
+                int linked = 0, pts = 0;
+                foreach (var s in _board.Solids)
+                {
+                    if (s.Designator.Length > 0) linked++;
+                    pts += s.PointCount;
+                }
+                return $"{_board.Solids.Count} CAD solid(s), {linked} matched to a designator, "
+                     + $"{pts} edge point(s)";
+            }, 0.5);
             ui.AddSlider(sec, "Via max diameter (mm)", 0.1, 2.0, _s.PcbViaMaxDia,
                          v => _s.PcbViaMaxDia = (float)v, "F2");
             ui.AddLiveInfo(sec, () =>

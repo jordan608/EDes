@@ -251,6 +251,21 @@ namespace EDes
             GCHandle previewPin  = GCHandle.Alloc(previewBuf, GCHandleType.Pinned);
             tiletype previewTile = MakePreviewTile(previewPin, previewW, previewH);
 
+            // ── Step 6b: spin the platter up ──────────────────────────────────
+            // Nothing used to request the motor at startup — it only ever moved when
+            // someone pressed Motor On, so the display came up with a stationary
+            // platter and no image. Requested rather than called directly so it goes
+            // through the one SetRPM path in the loop below, which is already the
+            // acknowledged, RPM-reporting one.
+            //
+            // Only with real hardware confirmed: in the simulator there is no platter,
+            // and reporting a live RPM there would be a readout that means nothing.
+            if (hardwareConfirmed)
+            {
+                settings.MotorRpmRequest = spec.DefaultMotorRpm;
+                App.Log($"[GameLoop] Auto-starting motor at {spec.DefaultMotorRpm} RPM");
+            }
+
             // ── Step 7: main game loop ────────────────────────────────────────
             try
             {

@@ -27,8 +27,11 @@
     <Compile Include="$(PcbSrc)\MeshLoader.cs" />
     <Compile Include="$(PcbSrc)\PcbImporter.cs" />
     <Compile Include="$(PcbSrc)\XlsxReader.cs" />
+    <Compile Include="$(PcbSrc)\CadModel.cs" />
+    <Compile Include="$(PcbSrc)\StepParser.cs" />
     <Compile Include="DesignTreeChecks.cs" />
     <Compile Include="RealBoardCheck.cs" />
+    <Compile Include="StepChecks.cs" />
   </ItemGroup>
 
   <ItemGroup>

@@ -174,6 +174,11 @@ namespace EDes.Pcb
         public readonly List<PcbHole>   Holes  = new();
         public readonly List<MeshCloud> Meshes = new();
 
+        /// <summary>CAD solids from STEP imports, as edge wireframes. Kept separate from
+        /// Meshes because they are drawn differently on purpose: a mesh becomes a surface
+        /// point cloud, a CAD solid becomes its feature edges.</summary>
+        public readonly List<CadSolid> Solids = new();
+
         /// <summary>Placed parts (from a centroid file), their BOM rows, and every
         /// non-geometry document found in the design folder tree.</summary>
         public readonly List<PcbComponent> Components = new();
@@ -217,6 +222,7 @@ namespace EDes.Pcb
             Layers.Clear();
             Holes.Clear();
             Meshes.Clear();
+            Solids.Clear();
             Components.Clear();
             BomLines.Clear();
             Documents.Clear();

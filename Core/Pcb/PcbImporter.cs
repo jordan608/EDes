@@ -129,6 +129,7 @@ namespace EDes.Pcb
             });
 
             int gerbers = 0, drills = 0, meshes = 0, holes = 0, parts = 0, bomRows = 0, docs = 0;
+            int solids = 0;
             int skippedDuplicates = 0;
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -149,11 +150,16 @@ namespace EDes.Pcb
                 catch { key = name; }
                 if (!seen.Add(key)) { skippedDuplicates++; continue; }
 
-                if (MeshLoader.IsStep(file))
+                if (StepParser.IsStep(file))
                 {
-                    // Records the "convert to STL" note, and is also inventoried so the
-                    // readout shows the design DOES ship a 3D model.
-                    MeshLoader.TryLoad(file, meshPointBudget, board.Notes);
+                    // Parsed as an edge wireframe (see StepParser) AND inventoried, so the
+                    // document readout still shows the design ships a 3D model.
+                    var cad = StepParser.TryLoad(file, board.Notes);
+                    if (cad != null)
+                    {
+                        board.Solids.AddRange(cad.Solids);
+                        solids += cad.SolidCount;
+                    }
                     AddDocument(board, file, DocKind.Cad3D);
                     docs++;
                     continue;
@@ -269,8 +275,13 @@ namespace EDes.Pcb
                 return docs > 0;
             }
 
+            int linked = LinkSolidsToComponents(board);
+
             var summary = $"{gerbers} gerber layer(s), {holes} hole(s) from {drills} drill file(s), " +
-                          $"{meshes} mesh(es), {parts} part(s), {bomRows} BOM row(s), {docs} document(s)";
+                          $"{meshes} mesh(es), {solids} CAD solid(s), {parts} part(s), " +
+                          $"{bomRows} BOM row(s), {docs} document(s)";
+            if (solids > 0)
+                summary += $", {linked} solid(s) matched to a designator";
             if (board.Drc.Parsed)
                 summary += $", DRC {board.Drc.Violations} violation(s) over {board.Drc.Rules} rule(s)";
             if (skippedDuplicates > 0) summary += $", {skippedDuplicates} duplicate(s) skipped";
@@ -551,6 +562,50 @@ namespace EDes.Pcb
 
         /// <summary>Render order within the stack — lower is drawn nearer the top of
         /// the volume (remember -Z is up, so the renderer negates this).</summary>
+        /// <summary>Attach each CAD solid to the placed component it belongs to.
+        ///
+        /// Matching is by designator, against the names already on the assembly chain, and
+        /// it is deliberately strict: a solid is only claimed when a chain element equals
+        /// a designator the placement file actually lists. A fuzzy match here would be
+        /// worse than none — mislabelling U1 as U11 puts the wrong part number next to
+        /// the wrong body, and the whole point of the link is to trust that label.
+        ///
+        /// Returns how many solids were matched, so the caller can report it rather than
+        /// leave the user guessing whether the link worked.</summary>
+        private static int LinkSolidsToComponents(PcbBoard board)
+        {
+            if (board.Solids.Count == 0 || board.Components.Count == 0) return 0;
+
+            var byDesignator = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var c in board.Components)
+                if (!string.IsNullOrEmpty(c.Designator))
+                    byDesignator[c.Designator] = c.Designator;
+
+            int linked = 0;
+            foreach (var solid in board.Solids)
+            {
+                // The leaf name first — BestName already preferred a designator-shaped
+                // element — then the rest of the chain, deepest first.
+                if (byDesignator.TryGetValue(solid.Name, out string? exact))
+                {
+                    solid.Designator = exact;
+                    linked++;
+                    continue;
+                }
+
+                if (solid.AssemblyPath.Length == 0) continue;
+                var parts = solid.AssemblyPath.Split(" / ", StringSplitOptions.RemoveEmptyEntries);
+                for (int i = parts.Length - 1; i >= 0; i--)
+                {
+                    if (!byDesignator.TryGetValue(parts[i].Trim(), out string? hit)) continue;
+                    solid.Designator = hit;
+                    linked++;
+                    break;
+                }
+            }
+            return linked;
+        }
+
         private static int StackOrder(PcbLayerKind k) => k switch
         {
             PcbLayerKind.Silkscreen   => 0,

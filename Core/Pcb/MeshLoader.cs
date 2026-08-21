@@ -15,12 +15,10 @@
 //  (Z = height, positive up); PcbRenderer is what maps height onto the
 //  display's -Z-is-up convention.
 //
-//  STEP (.step / .stp) is NOT loadable here — it is a boundary-representation
-//  CAD format that needs a geometry kernel (OpenCascade et al.), and Assimp
-//  does not read it. Rather than fail silently, TryLoad reports the conversion
-//  command that does work:
-//      FreeCAD:  freecadcmd -c "…Mesh export…"      (see docs/PCB_IMPORT.md)
-//      or export STL/STEP-to-STL from the MCAD tool that produced it.
+//  STEP (.step / .stp) is handled by StepParser, NOT here — Assimp does not read
+//  it, and a B-rep solid wants drawing as its feature edges rather than as a
+//  surface cloud anyway. IsStep/StepExtensions remain only so callers that have
+//  not been updated still classify the extension correctly.
 // ═══════════════════════════════════════════════════════════════════════════
 
 using System;
@@ -50,8 +48,10 @@ namespace EDes.Pcb
         {
             if (IsStep(path))
             {
-                notes.Add($"{Path.GetFileName(path)}: STEP needs a CAD kernel — export STL/GLB " +
-                          "first (see docs/PCB_IMPORT.md)");
+                // Reaching here means a caller routed a STEP file to the mesh loader
+                // instead of StepParser. Say so plainly rather than returning a bare null.
+                notes.Add($"{Path.GetFileName(path)}: STEP is parsed by StepParser, " +
+                          "not the mesh loader");
                 return null;
             }
 

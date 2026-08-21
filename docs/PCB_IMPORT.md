@@ -18,7 +18,7 @@ typical board, and reports what it found in the panel underneath the button.
 | **Gerber RS-274X** | `.gbr .ger .gtl .gbl .gto .gbo .gts .gbs .gtp .gbp .gm1 .gko .g1–.g4 .cmp .sol .plc .pls .art .pho` | Full common subset — see below |
 | **Excellon drill/route** | `.drl .xln .nc .tap .exc .drd`, or `.txt` with an `M48` header | Holes + `G85` slots |
 | **Mesh (mechanical)** | `.stl .obj .ply .glb .gltf .fbx .dae .3ds .off` | Sampled to a point cloud |
-| **STEP** | `.step .stp` | **Not supported directly — convert first (below)** |
+| **STEP** | `.step .stp` | Edge wireframe, with assembly placement, colours and designators |
 
 Extension-less or oddly-named files are sniffed: a file starting with `%FS`, `%MO` or `G04`
 is treated as Gerber, and one starting with `M48`, `METRIC` or `INCH` as a drill file.
@@ -72,52 +72,73 @@ An unrecognised Gerber still imports, as an `Unknown` layer in the stack.
 
 ## STEP files
 
-STEP (ISO 10303) is a boundary-representation CAD format: surfaces are defined
-analytically, not as triangles. Reading it requires a geometry kernel (OpenCascade and
-friends) — Assimp, which EDes uses for meshes, does not read it, and there is no practical
-pure-.NET STEP loader to bundle. EDes therefore **detects STEP and tells you**, rather than
-half-loading it.
+STEP (ISO 10303) is a boundary-representation format: surfaces are defined
+analytically, not as triangles. The usual conclusion is that reading it needs a geometry
+kernel — and for **surfaces** that is true. EDes does not read surfaces.
 
-Convert once, on the command line, with FreeCAD (free, scriptable):
+It reads **edges**, and that turns out to be both the cheap half and the half you
+actually want. The display is transparent, so it has no occlusion: a filled or
+densely-sampled surface shows its own back faces through its front and the part reads as
+fog. The B-rep feature curves are what read as CAD. Measured on a real Altium AP214
+export of a 2-layer sensor board:
+
+| Edge curve type | Count | Share |
+|---|---:|---:|
+| `LINE` | 1083 | 84.8% |
+| `CIRCLE` | 138 | 10.8% |
+| `B_SPLINE_CURVE_WITH_KNOTS` | 76 | 5.9% |
+
+95.6% of edges are a straight line or a circular arc, which need arithmetic rather than a
+kernel. So `Core/Pcb/StepParser.cs` reads the subset directly, in the same spirit as
+`GerberParser` reading a subset of RS-274X.
+
+### What you get
+
+- **Geometry** — every `MANIFOLD_SOLID_BREP` / `SHELL_BASED_SURFACE_MODEL` as edge
+  polylines. Edges are de-duplicated: each is referenced by two `ORIENTED_EDGE`s, and
+  drawing both doubles the voxel cost for identical pixels.
+- **Assembly placement** — walked through `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION` →
+  `REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION` → `ITEM_DEFINED_TRANSFORMATION`.
+  Without this every component collapses onto the origin in one heap, which is the
+  classic wrong-looking STEP import.
+- **Units** — `SI_UNIT` prefixes and `CONVERSION_BASED_UNIT`, so an inch or metre file
+  lands at the right size instead of 25.4x or 1000x out.
+- **Colour** — `STYLED_ITEM` → `COLOUR_RGB` per solid.
+- **Designators** — the name is taken from the assembly chain, not just the leaf. Altium
+  nests the vendor body inside a per-placement node, so the leaf product is called
+  something like `CRCW060310R5FKEC` while `R2` sits one level up. Solids are then matched
+  against the designators from the placement file, by exact match only — a fuzzy match
+  would put the wrong part number beside the wrong body, which is worse than no link.
+
+On that board: **31 solids, 30 matched to a designator, 1670 mm of edge ≈ 10,100 voxels**
+of the default 150,000 budget.
+
+### What is approximated
+
+`B_SPLINE_CURVE_WITH_KNOTS` and the other analytic curves (`ELLIPSE`, `HYPERBOLA`,
+`PARABOLA`) are drawn as the straight chord between their end vertices. On mechanical
+parts these are fillet blends and the chord is visually close. The import note reports how
+many were approximated, so it is never a silent lie.
+
+**Surfaces are not read at all.** That is deliberate, not a gap to be filled by default —
+see the reasoning above.
+
+### If you do want surfaces
+
+Tessellate to a mesh and import that instead; the mesh path samples surfaces only (never a
+solid fill), so it stays legible. `gmsh` is the lightest route — one pip install, headless,
+OpenCASCADE inside, reads STEP directly:
 
 ```bash
-freecadcmd -c "import Mesh; Mesh.Mesh(__import__('Import').open('board.step') or __import__('FreeCAD').ActiveDocument.Objects[0].Shape.tessellate(0.05)).write('board.stl')"
+pip install gmsh
 ```
 
-More reliably, as a small script (`step2stl.py`, run with `freecadcmd step2stl.py`):
-
-```python
-import FreeCAD, Import, Mesh, sys
-doc = FreeCAD.newDocument()
-Import.insert("board.step", doc.Name)
-shapes = [o.Shape for o in doc.Objects if hasattr(o, "Shape")]
-mesh = Mesh.Mesh()
-for s in shapes:
-    verts, faces = s.tessellate(0.05)      # 0.05 mm deflection
-    mesh.addFacets([[verts[i] for i in f] for f in faces])
-mesh.write("board.stl")
+```bash
+gmsh board.step -2 -format stl -o board.stl
 ```
 
-Other routes that work: **KiCad** (`File → Export → STEP` has a mesh counterpart via the
-3D viewer's `Export current view as ...`), **FreeCAD GUI** (`File → Export → STL`),
-**Fusion 360** / **SolidWorks** (`Save As → STL`), or `assimp export in.stp out.stl` if your
-local Assimp build happens to include the STEP importer.
-
-Tessellation deflection controls point density: 0.05 mm is plenty for a display whose
-voxel pitch is around 30 µm of board at typical fit scales.
-
-### Mesh assumptions
-
-- **Units are millimetres** and **Z is up in the model** — the convention every MCAD export
-  from a PCB tool follows. The board frame keeps that convention; the renderer is what maps
-  height onto the display's `-Z is up` axis.
-- Meshes are **surface-sampled**, area-weighted, to at most **Mesh point budget** points
-  (PCB tab). Sampling is deterministic, so two revisions of the same board can be compared
-  point-for-point.
-- A mesh-only import still fits and displays; it just has no layers, drills or DRC numbers.
-
----
-
+FreeCAD's `freecadcmd` also works if it is already installed. Either way, drop the
+resulting `.stl` in the same folder and it imports alongside the wireframe.
 ## Reading the display
 
 - Layers are spread along **Z**, top layer highest (`-Z` is up), spacing set by
