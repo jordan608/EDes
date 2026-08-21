@@ -65,6 +65,22 @@ namespace EDes
         }
     }
 
+    /// <summary>One entry in the shell's pick list: something in the scene that can be
+    /// selected by name instead of hunted for with a pointer.</summary>
+    public readonly struct PickRow
+    {
+        public readonly string Group;    // "Nets", "Components" — the shell groups by this
+        public readonly string Label;
+        public readonly string Detail;   // shown dimmed beside the label
+        public readonly string Key;      // handed back on click
+        public readonly int    Colour;
+
+        public PickRow(string group, string label, string detail, string key, int colour)
+        {
+            Group = group; Label = label; Detail = detail; Key = key; Colour = colour;
+        }
+    }
+
     /// <summary>Engine services handed to the game in Init().</summary>
     public sealed class GameContext
     {
@@ -122,6 +138,18 @@ namespace EDes
         /// so the shell stays independent of any particular game's state object — the same
         /// reason Legend does.</summary>
         string StatusOverlay => "";
+
+        /// <summary>Everything selectable by name, for the shell's pick list. Empty means
+        /// no list is drawn. MUST be an immutable snapshot for the same reason Legend is:
+        /// the shell reads it on the UI thread while the game thread rebuilds.</summary>
+        IReadOnlyList<PickRow> PickList => Array.Empty<PickRow>();
+
+        /// <summary>Select the thing a pick row stands for, or clear with an empty key.
+        /// Called on the UI thread.</summary>
+        void Pick(string key) { }
+
+        /// <summary>Key of the current pick, so the shell can show which row is active.</summary>
+        string PickedKey => "";
 
         /// <summary>Show or hide what a legend row stands for. Called on the UI thread;
         /// implementations must be safe against a concurrent import.</summary>

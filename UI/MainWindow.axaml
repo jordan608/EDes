@@ -112,7 +112,7 @@
                  changes, so it costs less to leave on screen than to go looking for. -->
             <Grid Grid.Column="0"
                   MinWidth="220" MaxWidth="560"
-                  RowDefinitions="Auto,1,*,1,Auto"
+                  RowDefinitions="Auto,1,*,1,Auto,1,Auto"
                   Background="#0A0A12">
                 <TextBlock Grid.Row="0"
                            x:Name="GamePanelTitle"
@@ -123,8 +123,30 @@
                 <Border Grid.Row="1" Background="#22FFFFFF" Margin="8,0"/>
                 <ContentControl Grid.Row="2" x:Name="GamePanelArea"/>
 
+                <!-- Pick list: everything selectable by name. Between the settings and
+                     the controls because it is used WITH the settings but must not scroll
+                     away with them — the whole point is that it is always reachable. -->
                 <Border Grid.Row="3" Background="#22FFFFFF" Margin="8,0"/>
-                <Border Grid.Row="4" x:Name="ControlsPanel"
+                <Border Grid.Row="4" x:Name="PickPanel"
+                        Background="#0B0B14" Padding="8,6"
+                        MaxHeight="260"
+                        IsVisible="False">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Top"
+                                   x:Name="PickTitle"
+                                   Text="SELECT"
+                                   FontSize="10" FontWeight="Bold"
+                                   Opacity="0.55"
+                                   Margin="0,0,0,4"/>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel x:Name="PickItems" Spacing="1"/>
+                        </ScrollViewer>
+                    </DockPanel>
+                </Border>
+
+                <Border Grid.Row="5" Background="#22FFFFFF" Margin="8,0"/>
+                <Border Grid.Row="6" x:Name="ControlsPanel"
                         Background="#0D0D16" Padding="12,8"
                         IsVisible="False">
                     <StackPanel Spacing="3">

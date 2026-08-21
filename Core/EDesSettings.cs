@@ -148,6 +148,15 @@ namespace EDes
         /// to be exactly on one would make selection almost impossible by hand.</summary>
         public volatile float InspectSnap = 0.6f;
 
+        /// <summary>A LATCHED selection made from the pick list, as "net:<id>" or
+        /// "comp:<designator>", or empty.
+        ///
+        /// Separate from what the probe is hovering, and deliberately so: a pick made by
+        /// name has to survive letting go of the puck and moving the view, which a
+        /// hover-derived selection cannot. When both exist the pick wins — it was chosen
+        /// explicitly, where a hover is wherever the pointer happens to be.</summary>
+        public string PickedKey = "";
+
         /// <summary>What the probe is over, formatted for the shell's overlay. Written by
         /// the game thread, read by the UI; string assignment is atomic.</summary>
         public string InspectInfo = "";

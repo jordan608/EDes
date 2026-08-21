@@ -62,6 +62,12 @@ namespace EDes.Pcb
         public float DimFactor;        // brightness for everything not under the probe
         public float SnapRange;        // how far the probe reaches for a target, world units
         public float Pulse;            // 0..1 cyan<->white phase for the net highlight
+
+        /// <summary>Explicitly picked net, or -1. Overrides whatever the probe is over: it
+        /// was chosen by name, where a hover is wherever the pointer happens to be.</summary>
+        public int    PickedNet;
+        /// <summary>Explicitly picked component designator, or empty.</summary>
+        public string PickedDesignator;
         public float CadAmbient;       // floor brightness, so unlit edges never vanish
         public float CadLightX, CadLightY, CadLightZ;   // light direction, board frame
         public bool  ShowCursor;
@@ -277,47 +283,93 @@ namespace EDes.Pcb
 
         /// <summary>Scanline hatch of a polygon — a pour reads as filled for a fraction
         /// of the voxels a solid fill would cost.</summary>
+        /// <summary>Cross-hatch a copper pour: two families of parallel lines at right
+        /// angles, run diagonally.
+        ///
+        /// A pour is the largest object on a board, and filling it — even as a
+        /// single-direction hatch dense enough to read as solid — puts a whole PLANE of
+        /// voxels into the volume. On a transparent display that is close to the worst
+        /// thing you can draw: it costs more budget than everything else combined, and it
+        /// veils every layer behind it, which is exactly what you were looking through the
+        /// display to see.
+        ///
+        /// A lattice reads unmistakably as "copper is here" while leaving most of the plane
+        /// empty to look through. DIAGONAL rather than axis-aligned because tracks, pads
+        /// and the outline are overwhelmingly orthogonal — a 45 degree lattice cannot be
+        /// mistaken for routing, where a 0/90 one competes with it.</summary>
         private void HatchRegion(VoxelBatch batch, SceneCamera cam, PcbRegion r,
                                  float cx, float cy, float z, int col,
                                  in PcbViewOptions opt)
         {
-            float minY = float.MaxValue, maxY = float.MinValue;
+            // Base of 10 voxels between lines rather than 6, because there are now TWO
+            // families: at the old spacing a cross-hatch would cost twice what the single
+            // hatch did. Density scales the gap, clamped because a step below the voxel
+            // spacing is a solid fill in disguise — it would cost a fill's budget while
+            // still being described as a hatch.
+            float density = Math.Clamp(opt.HatchDensity <= 0f ? 1f : opt.HatchDensity, 0.1f, 8f);
+            float stepMm  = batch.Spacing * (10f / density) / MathF.Max(1e-6f, Scale);
+
+            const float R = 0.70710678f;      // cos = sin = 45 degrees
+            HatchPass(batch, cam, r, cx, cy, z, col, stepMm, R,  R);
+            if (batch.BudgetHit) return;
+            HatchPass(batch, cam, r, cx, cy, z, col, stepMm, R, -R);
+        }
+
+        /// <summary>One family of parallel scanlines running along (ux, uy).
+        ///
+        /// The line runs along u and steps along the perpendicular v — the same even-odd
+        /// crossing fill as an axis-aligned hatch, expressed in a rotated frame, so one
+        /// implementation covers every angle instead of a special case per direction.</summary>
+        private void HatchPass(VoxelBatch batch, SceneCamera cam, PcbRegion r,
+                               float cx, float cy, float z, int col, float stepMm,
+                               float ux, float uy)
+        {
+            float vx = -uy, vy = ux;
+
+            float minP = float.MaxValue, maxP = float.MinValue;
             for (int i = 0; i < r.Count; i++)
             {
-                if (r.Y[i] < minY) minY = r.Y[i];
-                if (r.Y[i] > maxY) maxY = r.Y[i];
+                float proj = r.X[i] * vx + r.Y[i] * vy;
+                if (proj < minP) minP = proj;
+                if (proj > maxP) maxP = proj;
             }
+            if (maxP <= minP || stepMm <= 1e-9f) return;
 
-            // Default is a hatch line every 6 voxels; density scales that gap, so 2.0
-            // hatches every 3 voxels and 0.5 every 12. Clamped because a hatch step below
-            // the voxel spacing is a solid fill in disguise — it would cost the budget of
-            // a fill while still being described as a hatch.
-            float density = Math.Clamp(opt.HatchDensity <= 0f ? 1f : opt.HatchDensity, 0.1f, 8f);
-            float stepMm  = batch.Spacing * (6f / density) / MathF.Max(1e-6f, Scale);
-            Span<float> xs = stackalloc float[64];
+            // 256, not 64: a diagonal through a complex pour crosses far more edges than a
+            // horizontal one, and the old limit stopped collecting partway — which drops
+            // spans out of the MIDDLE of the fill rather than failing visibly.
+            Span<float> along = stackalloc float[256];
 
-            for (float yy = minY; yy <= maxY; yy += stepMm)
+            for (float level = minP; level <= maxP; level += stepMm)
             {
                 int hits = 0;
-                for (int i = 0; i < r.Count && hits < xs.Length; i++)
+                for (int i = 0; i < r.Count && hits < along.Length; i++)
                 {
                     int j = (i + 1) % r.Count;
-                    float y0 = r.Y[i], y1 = r.Y[j];
-                    if ((yy >= y0 && yy < y1) || (yy >= y1 && yy < y0))
-                    {
-                        float t = (yy - y0) / (y1 - y0);
-                        xs[hits++] = r.X[i] + (r.X[j] - r.X[i]) * t;
-                    }
+                    float p0 = r.X[i] * vx + r.Y[i] * vy;
+                    float p1 = r.X[j] * vx + r.Y[j] * vy;
+                    if (!((level >= p0 && level < p1) || (level >= p1 && level < p0))) continue;
+
+                    float t  = (level - p0) / (p1 - p0);
+                    float hx = r.X[i] + (r.X[j] - r.X[i]) * t;
+                    float hy = r.Y[i] + (r.Y[j] - r.Y[i]) * t;
+                    along[hits++] = hx * ux + hy * uy;
                 }
-                // Sort the crossings and fill between pairs (even-odd rule).
+
                 for (int a = 1; a < hits; a++)
-                for (int b = a; b > 0 && xs[b - 1] > xs[b]; b--)
-                    (xs[b - 1], xs[b]) = (xs[b], xs[b - 1]);
+                for (int b = a; b > 0 && along[b - 1] > along[b]; b--)
+                    (along[b - 1], along[b]) = (along[b], along[b - 1]);
 
                 for (int k = 0; k + 1 < hits; k += 2)
                 {
-                    batch.Line(cam.Transform(Wx(xs[k], cx),     Wy(yy, cy), z),
-                               cam.Transform(Wx(xs[k + 1], cx), Wy(yy, cy), z), col);
+                    // Back to board space: P = along * u + level * v.
+                    float ax = along[k]     * ux + level * vx;
+                    float ay = along[k]     * uy + level * vy;
+                    float bx = along[k + 1] * ux + level * vx;
+                    float by = along[k + 1] * uy + level * vy;
+
+                    batch.Line(cam.Transform(Wx(ax, cx), Wy(ay, cy), z),
+                               cam.Transform(Wx(bx, cx), Wy(by, cy), z), col);
                     if (batch.BudgetHit) return;
                 }
             }
@@ -838,12 +890,17 @@ namespace EDes.Pcb
         private void ResolveProbe(SceneCamera cam, PcbBoard board,
                                   in PcbViewOptions opt, float z0)
         {
-            _inspecting = opt.Inspect;
             _dimFactor  = Math.Clamp(opt.DimFactor <= 0f ? 0.75f : opt.DimFactor, 0f, 1f);
             _hoverLayer = _hoverSolid = _hoverComponent = -1;
             _hoverNet   = -1;
             ProbeHasTarget = false;
             Probe.Clear();
+
+            // An explicit pick applies WITHOUT inspection mode, so a net chosen from the
+            // list on screen lights up in the normal camera view too. Dimming follows the
+            // same rule: if something is selected, everything else recedes.
+            bool havePick = ApplyPick(board, opt);
+            _inspecting = opt.Inspect || havePick;
 
             if (!opt.Inspect) return;
 
@@ -918,6 +975,8 @@ namespace EDes.Pcb
 
             if (bestKind == 0 || bestD > snap)
             {
+                // An explicit pick is left standing: the probe finding nothing is not a
+                // reason to drop a selection the user made deliberately.
                 Probe.Lines.Add("nothing within reach");
                 return;
             }
@@ -971,6 +1030,45 @@ namespace EDes.Pcb
             Probe.Index = bestItem;
             Probe.Title = comp.Designator;
             AddComponentInfo(board, comp.Designator);
+        }
+
+        /// <summary>Resolve an explicit pick into the same hover fields the probe uses, so
+        /// one highlight-and-dim path serves both. Returns whether anything was picked.</summary>
+        private bool ApplyPick(PcbBoard board, in PcbViewOptions opt)
+        {
+            bool any = false;
+
+            if (opt.PickedNet >= 0)
+            {
+                _hoverNet = opt.PickedNet;
+                any = true;
+            }
+
+            if (!string.IsNullOrEmpty(opt.PickedDesignator))
+            {
+                // Match the STEP body first, then the placement marker. The body is the
+                // thing you can actually see, so highlighting it is what the user meant;
+                // the marker is the fallback for a part with no 3D model.
+                for (int i = 0; i < board.Solids.Count; i++)
+                {
+                    if (!string.Equals(board.Solids[i].Designator, opt.PickedDesignator,
+                                       StringComparison.OrdinalIgnoreCase)) continue;
+                    _hoverSolid = i;
+                    any = true;
+                    break;
+                }
+
+                if (_hoverSolid < 0)
+                    for (int i = 0; i < board.Components.Count; i++)
+                    {
+                        if (!string.Equals(board.Components[i].Designator, opt.PickedDesignator,
+                                           StringComparison.OrdinalIgnoreCase)) continue;
+                        _hoverComponent = i;
+                        any = true;
+                        break;
+                    }
+            }
+            return any;
         }
 
         private static float Dist3(float ax, float ay, float az, float bx, float by, float bz)

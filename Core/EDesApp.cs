@@ -136,6 +136,7 @@ namespace EDes
             DriveCamera(input, dt);
             Sync();
             RebuildLegend(dt);
+            RebuildPickList(dt);
             TrackViewMotion();
 
             if (_s.PcbImportRequested) ImportBoard();
@@ -415,6 +416,86 @@ namespace EDes
             _cam.LockRotX = _s.LockRotX;
             _cam.LockRotY = _s.LockRotY;
             _cam.LockRotZ = _s.LockRotZ;
+        }
+
+        // ── Pick list ─────────────────────────────────────────────────────────
+        // Rebuilt on the same timer as the legend, for the same reason: what belongs in it
+        // depends on the loaded board and several toggles, and a dirty flag that misses one
+        // shows a stale list -- which is worse than none, because it will be clicked.
+        private volatile PickRow[] _picks = Array.Empty<PickRow>();
+        private float _picksAge;
+
+        public IReadOnlyList<PickRow> PickList => _picks;
+        public string PickedKey => _s.PickedKey;
+
+        /// <summary>Select from the list, or clear. Clicking the active row clears it, so
+        /// one control both selects and deselects rather than needing a separate button.</summary>
+        public void Pick(string key)
+        {
+            _s.PickedKey = string.Equals(_s.PickedKey, key, StringComparison.Ordinal)
+                           ? "" : (key ?? "");
+        }
+
+        private int PickedNetId()
+        {
+            string k = _s.PickedKey;
+            if (!k.StartsWith("net:", StringComparison.Ordinal)) return -1;
+            return int.TryParse(k.AsSpan(4), out int id) ? id : -1;
+        }
+
+        private string PickedDesignator()
+        {
+            string k = _s.PickedKey;
+            return k.StartsWith("comp:", StringComparison.Ordinal) ? k.Substring(5) : "";
+        }
+
+        private void RebuildPickList(float dt)
+        {
+            _picksAge += dt;
+            if (_picksAge < 0.5f) return;
+            _picksAge = 0f;
+
+            if ((EDesMode)_s.Mode != EDesMode.Pcb || !_board.HasGeometry)
+            {
+                if (_picks.Length > 0) _picks = Array.Empty<PickRow>();
+                return;
+            }
+
+            var rows = new List<PickRow>();
+
+            var nets = _board.Nets;
+            if (nets != null)
+            {
+                // Biggest nets first. On a derived netlist the large ones are the power and
+                // ground planes, which are what you most often want to see the extent of,
+                // and a list ordered by an arbitrary id would bury them.
+                var order = new List<int>(nets.NetCount);
+                for (int n = 0; n < nets.NetCount; n++) if (nets.Size(n) > 1) order.Add(n);
+                order.Sort((a, b) => nets.Size(b).CompareTo(nets.Size(a)));
+
+                foreach (int n in order)
+                    rows.Add(new PickRow("Nets", nets.Name(n),
+                                         nets.Size(n) + " obj", "net:" + n, 0x40E0E0));
+            }
+
+            // Designators from the STEP bodies first, then any placed part without a body,
+            // so a part is listed once whichever source knows about it.
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var sol in _board.Solids)
+            {
+                string d = sol.Designator.Length > 0 ? sol.Designator : sol.Name;
+                if (d.Length == 0 || !seen.Add(d)) continue;
+                rows.Add(new PickRow("Components", d, "3D", "comp:" + d, sol.Colour));
+            }
+            foreach (var c in _board.Components)
+            {
+                if (c.Designator.Length == 0 || !seen.Add(c.Designator)) continue;
+                rows.Add(new PickRow("Components", c.Designator,
+                                     c.Value.Length > 0 ? c.Value : "placed",
+                                     "comp:" + c.Designator, 0xC8C8D0));
+            }
+
+            _picks = rows.ToArray();
         }
 
         /// <summary>Advance the inspection stage: camera, signal, component, camera...
@@ -847,6 +928,8 @@ namespace EDes
                 CadSurfaceDensity = _s.PcbCadSurfaceDensity,
                 CadZOffset    = _s.PcbCadZOffset,
                 Inspect       = _s.InspectMode,
+                PickedNet        = PickedNetId(),
+                PickedDesignator = PickedDesignator(),
                 // Signal shows copper + outline; component shows outline only and hides
                 // every part-derived thing. Both are VIEW filters — the operator's own
                 // layer toggles are persisted and must survive a glance at an inspector.
@@ -1336,7 +1419,7 @@ namespace EDes
             ui.AddSlider(sec, "Isolate layer (-1 = all)", -1, 31, _s.PcbIsolate, v => _s.PcbIsolate = (int)v, "F0");
             ui.AddToggle(sec, "Pads",             _s.PcbPads,        v => _s.PcbPads = v);
             ui.AddToggle(sec, "Copper pours",     _s.PcbRegions,     v => _s.PcbRegions = v);
-            ui.AddToggle(sec, "Hatch pours",      _s.PcbFillRegions, v => _s.PcbFillRegions = v);
+            ui.AddToggle(sec, "Cross-hatch pours", _s.PcbFillRegions, v => _s.PcbFillRegions = v);
             ui.AddToggle(sec, "Drills",           _s.PcbHoles,       v => _s.PcbHoles = v);
             ui.AddToggle(sec, "Vias",             _s.PcbVias,        v => _s.PcbVias = v);
             ui.AddSlider(sec, "Pour outline density", 0.2, 4.0, _s.PcbPourDensity,

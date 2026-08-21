@@ -333,6 +333,7 @@ namespace EDes.UI
             RefreshLegend();
             RefreshProbe();
             RefreshControls();
+            RefreshPickList();
         }
 
         // ── Splash ─────────────────────────────────────────────────────────────
@@ -372,6 +373,123 @@ namespace EDes.UI
         private void OnSaveClick (object? s, RoutedEventArgs e) => _s.Save();
         private void OnLoadClick (object? s, RoutedEventArgs e) { _s.Load(); RebuildActivePanel(); }
         private void OnResetClick(object? s, RoutedEventArgs e) { _s.Reset(); RebuildActivePanel(); }
+
+        // ── Pick list ─────────────────────────────────────────────────────────
+        // Rows are rebuilt only when the SET changes; the active highlight is updated in
+        // place. Same reason as the legend: rebuilding the visual tree on every tick over
+        // a live preview churns layout for no visible difference, and here it would also
+        // fight the scroll position the moment anyone scrolled the list.
+        private string _pickKeyShown = "\u0001";
+        private string _pickedShown  = "\u0001";
+        private readonly List<(string Key, Border Row)> _pickRows = new();
+
+        private void RefreshPickList()
+        {
+            var rows = _game?.PickList;
+            if (rows == null || rows.Count == 0)
+            {
+                if (PickPanel.IsVisible) PickPanel.IsVisible = false;
+                _pickKeyShown = "";
+                return;
+            }
+
+            var sb = new StringBuilder(rows.Count * 20);
+            foreach (var r in rows) sb.Append(r.Key).Append('\u001f');
+            string key = sb.ToString();
+
+            if (key != _pickKeyShown)
+            {
+                _pickKeyShown = key;
+                _pickedShown  = "\u0001";     // force the highlight to reapply
+                RebuildPickRows(rows);
+            }
+
+            string picked = _game?.PickedKey ?? "";
+            if (picked != _pickedShown)
+            {
+                _pickedShown = picked;
+                foreach (var (rowKey, border) in _pickRows)
+                    border.Background = string.Equals(rowKey, picked, StringComparison.Ordinal)
+                        ? new SolidColorBrush(Color.Parse("#FF0A3A5A"))
+                        : Brushes.Transparent;
+            }
+
+            PickPanel.IsVisible = true;
+        }
+
+        private void RebuildPickRows(IReadOnlyList<PickRow> rows)
+        {
+            PickItems.Children.Clear();
+            _pickRows.Clear();
+
+            string lastGroup = "\u0001";
+            int nets = 0, comps = 0;
+            foreach (var r in rows)
+            {
+                if (r.Group == "Nets") nets++; else comps++;
+
+                if (r.Group != lastGroup)
+                {
+                    lastGroup = r.Group;
+                    PickItems.Children.Add(new TextBlock
+                    {
+                        Text       = r.Group.ToUpperInvariant(),
+                        FontSize   = 9,
+                        FontWeight = FontWeight.Bold,
+                        Opacity    = 0.4,
+                        Margin     = new Thickness(2, 6, 0, 2),
+                    });
+                }
+
+                string key = r.Key;
+
+                var swatch = new Border
+                {
+                    Width = 9, Height = 9,
+                    CornerRadius = new CornerRadius(2),
+                    Background = new SolidColorBrush(Rgb(r.Colour)),
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                };
+                var label = new TextBlock
+                {
+                    Text = r.Label, FontSize = 10,
+                    FontFamily = new FontFamily("Consolas,Menlo,monospace"),
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                };
+                var detail = new TextBlock
+                {
+                    Text = r.Detail, FontSize = 9, Opacity = 0.45,
+                    Margin = new Thickness(4, 0, 0, 0),
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                };
+
+                var line = new StackPanel
+                {
+                    Orientation = Avalonia.Layout.Orientation.Horizontal,
+                    Spacing = 5,
+                };
+                line.Children.Add(swatch);
+                line.Children.Add(label);
+                line.Children.Add(detail);
+
+                // A Border rather than a Button: a full-width click target that can carry
+                // the selected background, without a button's chrome fighting the list.
+                var row = new Border
+                {
+                    Child = line,
+                    Padding = new Thickness(4, 2),
+                    CornerRadius = new CornerRadius(2),
+                    Background = Brushes.Transparent,
+                    Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
+                };
+                row.PointerPressed += (_, _) => { _game?.Pick(key); DebounceSave(); };
+
+                PickItems.Children.Add(row);
+                _pickRows.Add((key, row));
+            }
+
+            PickTitle.Text = $"SELECT — {nets} NET(S), {comps} PART(S)   (click again to clear)";
+        }
 
         // ── Controls reference ────────────────────────────────────────────────
         // Pinned, not tucked into a section. Refreshed on the tick because the list is
