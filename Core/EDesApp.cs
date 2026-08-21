@@ -584,9 +584,16 @@ namespace EDes
                 ShowHoles    = _s.PcbHoles,
                 ShowVias     = _s.PcbVias,
                 ViaMaxDiaMm  = _s.PcbViaMaxDia,
+                PourDensity  = _s.PcbPourDensity,
+                HatchDensity = _s.PcbHatchDensity,
                 ShowMeshes   = _s.PcbMeshes,
                 ShowCad       = _s.PcbCad,
                 CadBrightness = _s.PcbCadBright,
+                CadLighting   = _s.PcbCadLighting,
+                CadAmbient    = _s.PcbCadAmbient,
+                CadLightX     = _s.PcbCadLightX,
+                CadLightY     = _s.PcbCadLightY,
+                CadLightZ     = _s.PcbCadLightZ,
                 ShowCursor   = _s.PcbCursor,
                 CursorXmm    = _s.PcbCursorX,
                 CursorYmm    = _s.PcbCursorY,
@@ -921,9 +928,28 @@ namespace EDes
             ui.AddToggle(sec, "Hatch pours",      _s.PcbFillRegions, v => _s.PcbFillRegions = v);
             ui.AddToggle(sec, "Drills",           _s.PcbHoles,       v => _s.PcbHoles = v);
             ui.AddToggle(sec, "Vias",             _s.PcbVias,        v => _s.PcbVias = v);
+            ui.AddSlider(sec, "Pour outline density", 0.2, 4.0, _s.PcbPourDensity,
+                         v => _s.PcbPourDensity = (float)v, "F2");
+            ui.AddSlider(sec, "Hatch density", 0.2, 4.0, _s.PcbHatchDensity,
+                         v => _s.PcbHatchDensity = (float)v, "F2");
+            ui.AddInfo(sec, "Higher is denser. Hatch only applies with filled pours on. " +
+                            "Pours and hatch are usually the biggest voxel consumers on a " +
+                            "board, so these two are the first knobs to turn when the " +
+                            "budget runs out and the backdrop starts disappearing.");
             ui.AddToggle(sec, "STEP / CAD wireframe", _s.PcbCad,     v => _s.PcbCad = v);
             ui.AddSlider(sec, "CAD brightness", 0.2, 2.0, _s.PcbCadBright,
                          v => _s.PcbCadBright = (float)v, "F2");
+            ui.AddToggle(sec, "CAD lighting", _s.PcbCadLighting, v => _s.PcbCadLighting = v);
+            ui.AddSlider(sec, "CAD ambient", 0, 1.0, _s.PcbCadAmbient,
+                         v => _s.PcbCadAmbient = (float)v, "F2");
+            ui.AddSlider(sec, "Light X", -1, 1, _s.PcbCadLightX, v => _s.PcbCadLightX = (float)v, "F2");
+            ui.AddSlider(sec, "Light Y", -1, 1, _s.PcbCadLightY, v => _s.PcbCadLightY = (float)v, "F2");
+            ui.AddSlider(sec, "Light Z", -1, 1, _s.PcbCadLightZ, v => _s.PcbCadLightZ = (float)v, "F2");
+            ui.AddInfo(sec, "Edges are shaded by the faces meeting at them, which only " +
+                            "planar faces can supply — edges between curved surfaces stay " +
+                            "unlit rather than mis-lit. The light is fixed to the BOARD, " +
+                            "so shading stays put as the scene rotates. Ambient is a floor: " +
+                            "at 0 edges facing across the light go black.");
             ui.AddLiveInfo(sec, () =>
             {
                 if (_board.Solids.Count == 0) return "no STEP solids loaded";
@@ -933,8 +959,14 @@ namespace EDes
                     if (s.Designator.Length > 0) linked++;
                     pts += s.PointCount;
                 }
+                int lit = 0, edges = 0;
+                foreach (var s in _board.Solids)
+                {
+                    edges += s.Edges.Count;
+                    lit   += s.NormalCount;
+                }
                 return $"{_board.Solids.Count} CAD solid(s), {linked} matched to a designator, "
-                     + $"{pts} edge point(s)";
+                     + $"{pts} edge point(s), {lit}/{edges} edge(s) shadeable";
             }, 0.5);
             ui.AddSlider(sec, "Via max diameter (mm)", 0.1, 2.0, _s.PcbViaMaxDia,
                          v => _s.PcbViaMaxDia = (float)v, "F2");

@@ -102,6 +102,12 @@ namespace EDes
         public volatile bool   PcbPads       = true;
         public volatile bool   PcbRegions    = true;
         public volatile bool   PcbFillRegions = false;
+        /// <summary>Sampling density for pour OUTLINES (1 = the frame voxel spacing) and
+        /// for the HATCH inside a filled pour (1 = a line every 6 voxels). Both are
+        /// multipliers where higher means denser, and both are clamped in the renderer —
+        /// a hatch finer than the voxel spacing is a solid fill wearing a hatch label.</summary>
+        public volatile float  PcbPourDensity  = 1.0f;
+        public volatile float  PcbHatchDensity = 1.0f;
         public volatile bool   PcbHoles      = true;
         public volatile bool   PcbVias       = false;   // via barrels through the stack
         /// <summary>A plated hole at or below this diameter counts as a via rather than
@@ -111,6 +117,20 @@ namespace EDes
         public volatile bool   PcbMeshes     = true;
         public volatile bool   PcbCad        = true;    // STEP solids as edge wireframes
         public volatile float  PcbCadBright  = 1.0f;
+
+        /// <summary>Directional shading for the STEP wireframe, using the adjacent-face
+        /// normals StepParser recovers from planar faces. Ambient is a floor rather than
+        /// an addition: at 0 an edge facing across the light goes fully dark and the shape
+        /// breaks up, so the default keeps a readable minimum.
+        ///
+        /// The light direction is in the BOARD frame (Z up), not the display frame, so it
+        /// stays fixed to the part as the scene is rotated — which is what makes the
+        /// shading read as the part's own form rather than as a rotating gradient.</summary>
+        public volatile bool   PcbCadLighting = true;
+        public volatile float  PcbCadAmbient  = 0.35f;
+        public volatile float  PcbCadLightX   = 0.3f;
+        public volatile float  PcbCadLightY   = 0.2f;
+        public volatile float  PcbCadLightZ   = 1.0f;
         public volatile bool   PcbCursor     = false;
         public volatile float  PcbCursorX    = 0f;     // mm, board coordinates
         public volatile float  PcbCursorY    = 0f;

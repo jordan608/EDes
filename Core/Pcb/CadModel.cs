@@ -28,6 +28,21 @@ namespace EDes.Pcb
         public float[] Y = System.Array.Empty<float>();
         public float[] Z = System.Array.Empty<float>();
         public int     Count;
+
+        /// <summary>Averaged normal of the faces meeting at this edge, for shading.
+        ///
+        /// Lighting is N·L, and an edge has a tangent rather than a normal — so on its
+        /// own a wireframe cannot be lit. What makes it possible is that the parser has
+        /// to walk the FACES anyway to reach the edges, and a STEP PLANE states its
+        /// normal exactly and for free. Averaging the (usually two) adjacent face normals
+        /// gives an edge something to shade against.
+        ///
+        /// HasNormal is false when neither neighbour was a planar face — curved surfaces
+        /// contribute nothing here because their normal varies along the edge, and a
+        /// single sampled value would shade the edge wrongly along most of its length.
+        /// Those edges render unlit rather than mis-lit.</summary>
+        public float NX, NY, NZ;
+        public bool  HasNormal;
     }
 
     /// <summary>One solid from the STEP assembly — a component body, or the board.</summary>
@@ -64,6 +79,9 @@ namespace EDes.Pcb
         /// this solid costs to draw, since each point becomes a line sample.</summary>
         public int PointCount;
 
+        /// <summary>How many of this solid's edges got a usable shading normal.</summary>
+        public int NormalCount;
+
         public bool HasGeometry => Edges.Count > 0;
     }
 
@@ -95,6 +113,11 @@ namespace EDes.Pcb
         public int TotalPoints
         {
             get { int n = 0; foreach (var s in Solids) n += s.PointCount; return n; }
+        }
+
+        public int TotalNormals
+        {
+            get { int n = 0; foreach (var s in Solids) n += s.NormalCount; return n; }
         }
 
         public float MinX = float.MaxValue, MinY = float.MaxValue, MinZ = float.MaxValue;

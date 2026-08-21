@@ -32,6 +32,7 @@
     <Compile Include="DesignTreeChecks.cs" />
     <Compile Include="RealBoardCheck.cs" />
     <Compile Include="StepChecks.cs" />
+    <Compile Include="ViaSpanChecks.cs" />
   </ItemGroup>
 
   <ItemGroup>

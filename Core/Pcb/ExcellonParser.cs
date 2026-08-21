@@ -22,6 +22,12 @@
 //  tool definitions (with Altium F/S feed fields), tool selection, X/Y hits
 //  (modal), G85 slots, ";TYPE=PLATED" / ";TYPE=NON_PLATED" sections as well as
 //  NPTH filename hints, M30/M00 end.
+//
+//  Layer span (for blind/buried vias) is read where it is stated: a Gerber X2
+//  TF.FileFunction attribute in the header, which KiCad writes as
+//  "; #@! TF.FileFunction,Plated,1,2,PTH" and newer Altium as a %TF...*% line, or
+//  failing that a layer pair in the file name ("Drill (1-2).TXT", "-1-2.drl").
+//  Nothing is inferred when neither is present — see PcbHole.SpanFrom.
 // ═══════════════════════════════════════════════════════════════════════════
 
 using System;
@@ -48,6 +54,8 @@ namespace EDes.Pcb
 
             var   toolDia   = new float[MAX_TOOLS];
             var   toolPlated = new bool[MAX_TOOLS];
+            int   spanFrom = 0, spanTo = 0;
+            ParseSpanFromName(path, ref spanFrom, ref spanTo);
             bool  metric    = false, unitsStated = false;
             bool  leadingZerosOmitted = true;      // "LZ" means leading kept; default: suppressed
             bool  inHeader  = false;
@@ -91,6 +99,19 @@ namespace EDes.Pcb
 
                     if (line.Contains("NON_PLATED", StringComparison.OrdinalIgnoreCase))
                         plated = false;
+                    else if (line.Contains("TF.FileFunction", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // ...,Plated,<from>,<to>,PTH  — the two numbers are copper layers.
+                        var bits = line.Split(',');
+                        for (int bi = 0; bi + 2 < bits.Length; bi++)
+                        {
+                            if (!int.TryParse(bits[bi + 1].Trim(), out int a)) continue;
+                            if (!int.TryParse(bits[bi + 2].Trim(), out int b)) continue;
+                            if (a <= 0 || b <= 0) continue;
+                            spanFrom = a; spanTo = b;
+                            break;
+                        }
+                    }
                     else if (line.Contains("TYPE=PLATED", StringComparison.OrdinalIgnoreCase))
                         plated = true;
 
@@ -144,6 +165,8 @@ namespace EDes.Pcb
                     X = x, Y = y,
                     Dia = dia > 0 ? dia : 0.3f,
                     Plated = tool >= 0 ? toolPlated[tool] : plated,
+                    SpanFrom = spanFrom,
+                    SpanTo   = spanTo,
                 };
 
                 if (second != null)
@@ -238,6 +261,37 @@ namespace EDes.Pcb
             double v = raw / Math.Pow(10, decDigits);
             if (neg) v = -v;
             return (float)(metric ? v : v * 25.4);
+        }
+
+        /// <summary>Pull a copper layer pair out of a drill file name.
+        ///
+        /// Altium writes "Project - Drill (1-2).TXT" for a blind drill, KiCad
+        /// "project-1-2.drl". Both mean the same thing. Deliberately conservative: the
+        /// two numbers must be small, different, and adjacent in the name, because a
+        /// project name containing something like "RS485-2-4" would otherwise be read
+        /// as a layer pair and quietly turn every through via into a blind one.</summary>
+        private static void ParseSpanFromName(string path, ref int from, ref int to)
+        {
+            string name = System.IO.Path.GetFileNameWithoutExtension(path);
+            for (int i = 0; i < name.Length; i++)
+            {
+                if (!char.IsDigit(name[i])) continue;
+                int a = 0, j = i;
+                while (j < name.Length && char.IsDigit(name[j])) { a = a * 10 + (name[j] - '0'); j++; }
+                if (j >= name.Length || (name[j] != '-' && name[j] != '_')) { i = j; continue; }
+                int k = j + 1;
+                if (k >= name.Length || !char.IsDigit(name[k])) { i = j; continue; }
+                int b = 0;
+                while (k < name.Length && char.IsDigit(name[k])) { b = b * 10 + (name[k] - '0'); k++; }
+
+                // A layer pair, not a version or a part number.
+                if (a >= 1 && b >= 1 && a <= 64 && b <= 64 && a != b)
+                {
+                    from = a; to = b;
+                    return;
+                }
+                i = k;
+            }
         }
     }
 }

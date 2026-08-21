@@ -62,6 +62,23 @@ namespace EDes.Pcb
         public bool  Slot;
         public float X1, Y1;      // slot end (valid when Slot)
         public bool  Plated;
+
+        /// <summary>Which COPPER layers this hole connects, 1-based in stack order
+        /// (1 = top copper). 0 on either side means "not stated", which is treated as a
+        /// through hole spanning the whole copper stack.
+        ///
+        /// Excellon does not carry this. It arrives either from a Gerber X2
+        /// TF.FileFunction attribute embedded in the drill header, or from the layer pair
+        /// in the file name that Altium and KiCad both use for blind/buried drills. Both
+        /// are best-effort, and a hole with no information must render as a through hole
+        /// rather than guess a span -- guessing wrong hides a connection that exists.</summary>
+        public int SpanFrom, SpanTo;
+
+        /// <summary>True only when a real layer pair was stated AND it does not reach both
+        /// outer copper layers. Used for labelling, never for geometry.</summary>
+        public bool IsBlind(int copperCount)
+            => SpanFrom > 0 && SpanTo > 0 && copperCount > 1 &&
+               !(Math.Min(SpanFrom, SpanTo) == 1 && Math.Max(SpanFrom, SpanTo) == copperCount);
     }
 
     public sealed class PcbLayer
@@ -370,6 +387,39 @@ namespace EDes.Pcb
             int n = 0;
             foreach (var h in Holes) if (IsVia(h, maxDiaMm)) n++;
             return n;
+        }
+
+        /// <summary>Resolve which copper layers a via actually spans, 1-based and ordered.
+        ///
+        /// Split out of the renderer so it can be tested: getting this wrong is invisible
+        /// in a screenshot but wrong on the board. Rules, in order:
+        ///   • an unstated end means the outer copper on that side, i.e. a through via —
+        ///     showing a connection that exists beats hiding one;
+        ///   • the pair is sorted, so a "4-1" file reads the same as "1-4";
+        ///   • both ends are clamped into the real stack, because a drill file may name
+        ///     more layers than the Gerbers present (a 4-layer drill set imported with
+        ///     only two copper layers found).</summary>
+        public static void ViaSpan(in PcbHole h, int copperCount, out int first, out int last)
+        {
+            if (copperCount < 1) { first = last = 1; return; }
+
+            first = h.SpanFrom > 0 ? h.SpanFrom : 1;
+            last  = h.SpanTo   > 0 ? h.SpanTo   : copperCount;
+            if (first > last) (first, last) = (last, first);
+            first = Math.Clamp(first, 1, copperCount);
+            last  = Math.Clamp(last,  1, copperCount);
+        }
+
+        /// <summary>Copper layers in stack order, as indices into Layers. This is the
+        /// mapping a via span is expressed in — index 0 is top copper.</summary>
+        public List<int> CopperStack()
+        {
+            var order = new List<int>();
+            for (int i = 0; i < Layers.Count; i++)
+                if (Layers[i].Kind is PcbLayerKind.CopperTop or PcbLayerKind.CopperInner
+                                     or PcbLayerKind.CopperBottom)
+                    order.Add(i);
+            return order;
         }
 
         public float MinDrill()

@@ -36,11 +36,16 @@ namespace EDes.Pcb
         public bool  ShowRegions;
         public bool  FillRegions;      // hatch pours instead of outlining them
         public bool  ShowHoles;
-        public bool  ShowVias;         // via barrels bridging the whole stack
+        public bool  ShowVias;         // via barrels between the copper they connect
         public float ViaMaxDiaMm;      // plated holes at or under this are vias
+        public float PourDensity;      // 1 = default outline sampling, higher = tighter
+        public float HatchDensity;     // 1 = a hatch line every 6 voxels
         public bool  ShowMeshes;
         public bool  ShowCad;          // STEP solids, as edge wireframes
         public float CadBrightness;    // separate from Brightness: CAD sits above the board
+        public bool  CadLighting;      // shade edges by their adjacent-face normals
+        public float CadAmbient;       // floor brightness, so unlit edges never vanish
+        public float CadLightX, CadLightY, CadLightZ;   // light direction, board frame
         public bool  ShowCursor;
         public float CursorXmm, CursorYmm;
         public float Brightness;
@@ -56,6 +61,14 @@ namespace EDes.Pcb
         /// <summary>Vias draw copper-amber so they read as plated conductor and are
         /// unmistakable against the grey drill bores.</summary>
         private const int VIA_COLOUR = 0xE8A020;
+
+        /// <summary>Blind and buried vias draw cooler, so a barrel that stops short reads
+        /// as deliberate rather than as a clipping bug.</summary>
+        private const int BLIND_VIA_COLOUR = 0x40D0E8;
+
+        /// <summary>Z of each copper layer for the current frame's layout. Rebuilt every
+        /// Draw because layer visibility and spacing are live UI settings.</summary>
+        private readonly System.Collections.Generic.List<float> _copperZ = new();
 
         // ── Board-to-world mapping from the last Draw (the app quotes it in the HUD) ──
         public float Scale   { get; private set; } = 1f;   // world units per mm
@@ -81,6 +94,12 @@ namespace EDes.Pcb
 
             float cx = board.CentreX, cy = board.CentreY;
             float z0 = -(slots - 1) * 0.5f * Spacing;      // first layer highest (-Z is up)
+
+            // Z of every copper layer, in stack order. Vias are defined against COPPER,
+            // not against the visible stack — a 2-layer board can easily have 14 visible
+            // layers once silk, mask, paste and mechanical are counted, and spanning
+            // those made every barrel stick far out of the board.
+            BuildCopperZ(board, z0, Spacing);
 
             int index = 0;
             for (int li = 0; li < board.Layers.Count; li++)
@@ -167,15 +186,23 @@ namespace EDes.Pcb
                 foreach (var r in layer.Regions)
                 {
                     if (r.Count < 2) continue;
+
+                    // Density is expressed as a multiplier on how CLOSE the samples are,
+                    // so higher reads as denser. VoxelBatch.Line wants the inverse (a
+                    // spacing multiplier), hence the reciprocal.
+                    float outlineMul = 1f / Math.Clamp(opt.PourDensity <= 0f ? 1f
+                                                                            : opt.PourDensity,
+                                                       0.1f, 8f);
                     for (int i = 0; i < r.Count; i++)
                     {
                         int j = (i + 1) % r.Count;
                         batch.Line(cam.Transform(Wx(r.X[i], cx), Wy(r.Y[i], cy), z),
-                                   cam.Transform(Wx(r.X[j], cx), Wy(r.Y[j], cy), z), regCol);
+                                   cam.Transform(Wx(r.X[j], cx), Wy(r.Y[j], cy), z),
+                                   regCol, outlineMul);
                         if (batch.BudgetHit) return;
                     }
                     if (opt.FillRegions) HatchRegion(batch, cam, r, cx, cy, z,
-                                                     Palette.Scale(col, 0.35f));
+                                                     Palette.Scale(col, 0.35f), opt);
                     if (batch.BudgetHit) return;
                 }
             }
@@ -184,7 +211,8 @@ namespace EDes.Pcb
         /// <summary>Scanline hatch of a polygon — a pour reads as filled for a fraction
         /// of the voxels a solid fill would cost.</summary>
         private void HatchRegion(VoxelBatch batch, SceneCamera cam, PcbRegion r,
-                                 float cx, float cy, float z, int col)
+                                 float cx, float cy, float z, int col,
+                                 in PcbViewOptions opt)
         {
             float minY = float.MaxValue, maxY = float.MinValue;
             for (int i = 0; i < r.Count; i++)
@@ -193,7 +221,12 @@ namespace EDes.Pcb
                 if (r.Y[i] > maxY) maxY = r.Y[i];
             }
 
-            float stepMm = batch.Spacing * 6f / MathF.Max(1e-6f, Scale);   // hatch every 6 voxels
+            // Default is a hatch line every 6 voxels; density scales that gap, so 2.0
+            // hatches every 3 voxels and 0.5 every 12. Clamped because a hatch step below
+            // the voxel spacing is a solid fill in disguise — it would cost the budget of
+            // a fill while still being described as a hatch.
+            float density = Math.Clamp(opt.HatchDensity <= 0f ? 1f : opt.HatchDensity, 0.1f, 8f);
+            float stepMm  = batch.Spacing * (6f / density) / MathF.Max(1e-6f, Scale);
             Span<float> xs = stackalloc float[64];
 
             for (float yy = minY; yy <= maxY; yy += stepMm)
@@ -288,13 +321,25 @@ namespace EDes.Pcb
                               in PcbViewOptions opt, float cx, float cy,
                               float z0, float spacing, int slots)
         {
-            float zTop = z0;                                 // topmost layer plane
-            float zBot = z0 + (slots - 1) * spacing;         // bottommost layer plane
-            int   col  = Palette.Scale(VIA_COLOUR, opt.Brightness);
+            if (_copperZ.Count == 0) return;   // no copper: nothing for a via to connect
+
+            int through = Palette.Scale(VIA_COLOUR, opt.Brightness);
+            int blind   = Palette.Scale(BLIND_VIA_COLOUR, opt.Brightness);
+            int copperCount = _copperZ.Count;
 
             foreach (var h in board.Holes)
             {
                 if (!PcbBoard.IsVia(h, opt.ViaMaxDiaMm)) continue;
+
+                // The span, in copper layers. Unstated means through, which is the safe
+                // reading: showing a connection that exists beats hiding one.
+                PcbBoard.ViaSpan(h, copperCount, out int first, out int last);
+
+                float zTop = _copperZ[first - 1];
+                float zBot = _copperZ[last - 1];
+                if (zBot < zTop) (zTop, zBot) = (zBot, zTop);
+
+                int col = h.IsBlind(copperCount) ? blind : through;
 
                 float x = Wx(h.X, cx), y = Wy(h.Y, cy);
                 float r = h.Dia * 0.5f * Scale;
@@ -317,10 +362,11 @@ namespace EDes.Pcb
                                    cam.Transform(x + ox, y + oy, zBot), col);
                     }
 
-                    // A ring where the barrel meets each layer — this is what makes it
-                    // readable as "connected to every layer" rather than a bare spike.
-                    for (int i = 0; i < slots; i++)
-                        CircleXY(batch, cam, x, y, z0 + i * spacing, r, col, fill: false);
+                    // A ring where the barrel meets each copper layer it connects — and
+                    // only those. Ringing a layer the via does not reach would draw a
+                    // connection that is not there.
+                    for (int i = first - 1; i <= last - 1; i++)
+                        CircleXY(batch, cam, x, y, _copperZ[i], r, col, fill: false);
                 }
 
                 if (batch.BudgetHit) return;
@@ -340,14 +386,33 @@ namespace EDes.Pcb
         {
             float bright = opt.CadBrightness > 0f ? opt.CadBrightness : opt.Brightness;
 
+            // Normalise the light once, not per edge. A zero vector would divide by zero
+            // and blacken the model, so it falls back to lighting from above.
+            float lx = opt.CadLightX, ly = opt.CadLightY, lz = opt.CadLightZ;
+            float ll = MathF.Sqrt(lx * lx + ly * ly + lz * lz);
+            if (ll < 1e-6f) { lx = 0f; ly = 0f; lz = 1f; ll = 1f; }
+            lx /= ll; ly /= ll; lz /= ll;
+
+            float ambient = Math.Clamp(opt.CadAmbient, 0f, 1f);
+
             foreach (var solid in board.Solids)
             {
                 if (!solid.Visible || solid.Edges.Count == 0) continue;
 
-                int col = Palette.Scale(solid.Colour, bright);
+                int baseCol = Palette.Scale(solid.Colour, bright);
 
                 foreach (var e in solid.Edges)
                 {
+                    int col = baseCol;
+                    if (opt.CadLighting && e.HasNormal)
+                    {
+                        // Two-sided N·L: the sign of the dot is meaningless on a display
+                        // with no viewpoint, since every face is seen from both sides at
+                        // once. The magnitude is what carries the shape, so take |N·L|.
+                        float ndl = MathF.Abs(e.NX * lx + e.NY * ly + e.NZ * lz);
+                        col = Palette.Scale(baseCol, ambient + (1f - ambient) * ndl);
+                    }
+
                     // A polyline, so consecutive points are joined — drawing the points
                     // alone would dot a long straight edge into two lonely voxels.
                     for (int i = 1; i < e.Count; i++)
@@ -442,6 +507,38 @@ namespace EDes.Pcb
             batch.Line(cam.Transform(x, y, zTop), cam.Transform(x, y, zBot), Palette.TextHilite);
             batch.Line(cam.Transform(x - arm, y, z0), cam.Transform(x + arm, y, z0), Palette.TextHilite);
             batch.Line(cam.Transform(x, y - arm, z0), cam.Transform(x, y + arm, z0), Palette.TextHilite);
+        }
+
+        /// <summary>Z of each copper layer, in stack order, for the layout just chosen.
+        ///
+        /// Only VISIBLE layers occupy a slot (that is how Draw assigns z), so this walks
+        /// the same sequence Draw does rather than recomputing from layer indices — if the
+        /// two ever disagreed, vias would land between layers instead of on them.
+        /// A copper layer that is hidden gets the nearest visible slot, so a via still
+        /// terminates somewhere sensible instead of vanishing.</summary>
+        private void BuildCopperZ(PcbBoard board, float z0, float spacing)
+        {
+            _copperZ.Clear();
+
+            int index = 0;
+            float lastZ = z0;
+            for (int li = 0; li < board.Layers.Count; li++)
+            {
+                var layer = board.Layers[li];
+                bool copper = layer.Kind is PcbLayerKind.CopperTop
+                                          or PcbLayerKind.CopperInner
+                                          or PcbLayerKind.CopperBottom;
+                if (!layer.Visible)
+                {
+                    if (copper) _copperZ.Add(lastZ);
+                    continue;
+                }
+
+                float z = z0 + index * spacing;
+                lastZ = z;
+                index++;
+                if (copper) _copperZ.Add(z);
+            }
         }
 
         // ── Board-to-world helpers ────────────────────────────────────────────

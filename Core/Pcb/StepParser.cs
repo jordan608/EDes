@@ -39,6 +39,11 @@
 //    • LINE and CIRCLE tessellated properly, including arc sweep direction from
 //      the edge sense — get that wrong and arcs appear as their own complement.
 //    • Colour from STYLED_ITEM → …→ COLOUR_RGB, and the PRODUCT name per solid.
+//    • A shading normal per edge, averaged from the PLANE faces meeting there. This
+//      is the one thing that lets a wireframe be lit at all: N·L needs a normal and
+//      an edge only has a tangent, but the face walk is already happening and a
+//      PLANE states its normal exactly. Curved faces contribute nothing, so their
+//      edges render unlit rather than mis-lit — see CadEdge.HasNormal.
 //
 //  WHAT IS NOT, each counted as a note rather than dropped in silence
 //    • B_SPLINE_CURVE_WITH_KNOTS and the other analytic curves (ELLIPSE,
@@ -569,6 +574,11 @@ namespace EDes.Pcb
             private int _splineApprox, _otherApprox, _skippedSolids;
             private readonly HashSet<int> _seenEdgeCurves = new();
 
+            // Edge id → summed adjacent-face normals, and the order edges were first
+            // seen so output stays deterministic. Both are per-shell scratch.
+            private readonly Dictionary<int, (double x, double y, double z)> _edgeNormal = new();
+            private readonly List<int> _edgeOrder = new();
+
             public BuildContext(StepFile f, CadModel m, double unitMm)
             {
                 _f = f; _m = m; _unit = unitMm;
@@ -860,10 +870,25 @@ namespace EDes.Pcb
                 var shell = _f.GetAny(shellId, "CLOSED_SHELL", "OPEN_SHELL");
                 if (shell == null) return;
 
+                // Two passes, and they cannot be merged: an edge's normal is the average
+                // of BOTH faces meeting at it, so nothing can be emitted until every face
+                // has been visited. Emitting on first sight (which is what the de-dup used
+                // to do) would shade every edge from only one of its two neighbours.
+                _edgeNormal.Clear();
+                _edgeOrder.Clear();
+
                 foreach (var f in shell.Arg(1).AsList)
                 {
                     var face = _f.GetAny(f.AsRef, "ADVANCED_FACE", "FACE_SURFACE", "FACE");
                     if (face == null) continue;
+
+                    bool haveN = PlaneNormal(face.Arg(2).AsRef,
+                                             out double nx, out double ny, out double nz);
+
+                    // ADVANCED_FACE's same_sense flag flips the outward direction. Ignoring
+                    // it lights half the faces from inside the solid.
+                    if (haveN && face.Arg(3).Kind == VKind.Enum && face.Arg(3).Str == "F")
+                    { nx = -nx; ny = -ny; nz = -nz; }
 
                     foreach (var b in face.Arg(1).AsList)
                     {
@@ -878,20 +903,52 @@ namespace EDes.Pcb
                             if (orient == null) continue;
                             int ecId = orient.Arg(3).AsRef;
 
-                            // Every edge is shared by two faces, so it appears twice.
-                            // Drawing both costs double the voxels for identical pixels.
-                            if (!_seenEdgeCurves.Add(ecId)) continue;
-
-                            AddEdgeCurve(ecId, xf, cad);
+                            if (!_edgeNormal.TryGetValue(ecId, out var acc))
+                            {
+                                acc = (0, 0, 0);
+                                _edgeOrder.Add(ecId);
+                            }
+                            if (haveN) acc = (acc.x + nx, acc.y + ny, acc.z + nz);
+                            _edgeNormal[ecId] = acc;
                         }
                     }
                 }
+
+                foreach (int ecId in _edgeOrder)
+                {
+                    // Still de-duplicated across shells within one solid.
+                    if (!_seenEdgeCurves.Add(ecId)) continue;
+
+                    var n = _edgeNormal[ecId];
+                    double len = Math.Sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+                    bool has = len > 1e-9;
+                    if (has) { n = (n.x / len, n.y / len, n.z / len); }
+
+                    AddEdgeCurve(ecId, xf, cad, has, n.x, n.y, n.z);
+                }
+            }
+
+            /// <summary>Outward normal of a PLANE surface — its placement's own Z axis.
+            /// Returns false for anything else, including cylinders and NURBS, whose
+            /// normal varies across the face and so cannot be reduced to one value.</summary>
+            private bool PlaneNormal(int surfId, out double nx, out double ny, out double nz)
+            {
+                nx = ny = nz = 0;
+                var plane = _f.GetAny(surfId, "PLANE");
+                if (plane == null) return false;
+                var a = _f.GetAny(plane.Arg(1).AsRef, "AXIS2_PLACEMENT_3D");
+                if (a == null) return false;
+                return Direction(a.Arg(2).AsRef, out nx, out ny, out nz);
             }
 
             // ── One edge ──────────────────────────────────────────────────────
 
-            private void AddEdgeCurve(int ecId, in Xf xf, CadSolid cad)
+            private void AddEdgeCurve(int ecId, in Xf xf, CadSolid cad,
+                                      bool hasNormal, double nx, double ny, double nz)
             {
+                _pendingHasNormal = hasNormal;
+                _pendingNx = nx; _pendingNy = ny; _pendingNz = nz;
+
                 var ec = _f.GetAny(ecId, "EDGE_CURVE");
                 if (ec == null) return;
 
@@ -1071,6 +1128,11 @@ namespace EDes.Pcb
                 AddPolyline(xs, ys, zs, xf, cad);
             }
 
+            // Carried from AddEdgeCurve to AddPolyline rather than threaded through every
+            // tessellation path, which would mean the same three doubles on five signatures.
+            private bool   _pendingHasNormal;
+            private double _pendingNx, _pendingNy, _pendingNz;
+
             private void AddPolyline(double[] xs, double[] ys, double[] zs,
                                      in Xf xf, CadSolid cad)
             {
@@ -1091,6 +1153,18 @@ namespace EDes.Pcb
                     if (fx < cad.MinX) cad.MinX = fx; if (fx > cad.MaxX) cad.MaxX = fx;
                     if (fy < cad.MinY) cad.MinY = fy; if (fy > cad.MaxY) cad.MaxY = fy;
                     if (fz < cad.MinZ) cad.MinZ = fz; if (fz > cad.MaxZ) cad.MaxZ = fz;
+                }
+
+                if (_pendingHasNormal)
+                {
+                    // Rotate the normal by the assembly placement. Translation must NOT
+                    // apply — a direction has no position, and adding TX/TY/TZ would turn
+                    // every off-origin component's lighting into nonsense.
+                    edge.NX = (float)(xf.XX * _pendingNx + xf.XY * _pendingNy + xf.XZ * _pendingNz);
+                    edge.NY = (float)(xf.YX * _pendingNx + xf.YY * _pendingNy + xf.YZ * _pendingNz);
+                    edge.NZ = (float)(xf.ZX * _pendingNx + xf.ZY * _pendingNy + xf.ZZ * _pendingNz);
+                    edge.HasNormal = true;
+                    cad.NormalCount++;
                 }
 
                 cad.Edges.Add(edge);

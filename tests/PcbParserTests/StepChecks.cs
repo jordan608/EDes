@@ -266,6 +266,41 @@ END-ISO-10303-21;
                notes.Exists(n => n.Contains("spline")));
         }
 
+        // ── Shading normals ─────────────────────────────────────────────────
+        {
+            // The rectangle's single face is a PLANE with a +Z normal, so all four of its
+            // edges must inherit exactly that. A normal that is not unit-length, or points
+            // somewhere else, would shade the part wrongly rather than not at all.
+            notes.Clear();
+            var m = StepParser.TryLoad(Write("normals.step", RectSolid(".MILLI.", 10, 4)), notes);
+            Ok("normals file parsed", m != null && m.TotalEdges == 4);
+            if (m != null && m.TotalEdges == 4)
+            {
+                Ok($"every edge got a normal ({m.TotalNormals}/4)", m.TotalNormals == 4);
+                bool unit = true, plusZ = true;
+                foreach (var e in m.Solids[0].Edges)
+                {
+                    double len = Math.Sqrt(e.NX * e.NX + e.NY * e.NY + e.NZ * e.NZ);
+                    if (Math.Abs(len - 1.0) > 1e-4) unit = false;
+                    if (Math.Abs(Math.Abs(e.NZ) - 1.0) > 1e-4) plusZ = false;
+                }
+                Ok("normals are unit length", unit);
+                Ok("and point along the plane's own axis (Z)", plusZ);
+            }
+
+            // A face with no PLANE surface must yield NO normal rather than a bogus one:
+            // unlit is honest, mis-lit is not.
+            string curved = RectSolid(".MILLI.", 10, 4)
+                .Replace("#150 = PLANE('',#180);",
+                         "#150 = CYLINDRICAL_SURFACE('',#180,5.);");
+            notes.Clear();
+            var c = StepParser.TryLoad(Write("curved.step", curved), notes);
+            Ok("curved-face solid still parses", c != null && c.TotalEdges == 4);
+            if (c != null)
+                Ok($"a non-planar face contributes no normal ({c.TotalNormals})",
+                   c.TotalNormals == 0);
+        }
+
         // ── Not a STEP file at all ───────────────────────────────────────────
         {
             notes.Clear();
@@ -293,6 +328,11 @@ END-ISO-10303-21;
         Console.WriteLine($"      bounds {big.WidthMm:0.##} x {big.DepthMm:0.##} x " +
                           $"{big.HeightMm:0.##} mm");
         foreach (var n in notes) Console.WriteLine($"      note: {n}");
+
+        Console.WriteLine($"      shadeable edges {big.TotalNormals} of {big.TotalEdges} " +
+                          $"({100.0 * big.TotalNormals / Math.Max(1, big.TotalEdges):0.#}%)");
+        Ok($"most real edges are shadeable ({big.TotalNormals}/{big.TotalEdges})",
+           big.TotalNormals > big.TotalEdges / 2);
 
         Ok($"found the 27 B-rep solids ({big.SolidCount})", big.SolidCount >= 20);
         Ok($"edge count is the right order ({big.TotalEdges})",
