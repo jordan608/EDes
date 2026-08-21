@@ -38,6 +38,7 @@ namespace EDes.Pcb
         public bool  ShowHoles;
         public bool  ShowVias;         // via barrels between the copper they connect
         public float ViaMaxDiaMm;      // plated holes at or under this are vias
+        public float ViaDisplayVoxels; // drawn radius, in voxels — same for every via
         public float PourDensity;      // 1 = default outline sampling, higher = tighter
         public float HatchDensity;     // 1 = a hatch line every 6 voxels
         public bool  ShowMeshes;
@@ -342,16 +343,22 @@ namespace EDes.Pcb
                 int col = h.IsBlind(copperCount) ? blind : through;
 
                 float x = Wx(h.X, cx), y = Wy(h.Y, cy);
-                float r = h.Dia * 0.5f * Scale;
 
-                // The conductor itself: always drawn, always the full stack height.
+                // Vias are drawn at a FIXED radius, identical for every via, rather than
+                // at true scale. At true scale they are invisible: a 0.3 mm via on a 35 mm
+                // board works out at 0.027 world units, under the 0.03 voxel spacing, so
+                // the wall and rings were skipped and all that survived was a bare centre
+                // line one voxel wide. A via is a topological feature — you need to see
+                // THAT it is there and what it connects, not how wide it is — so a
+                // legible constant beats a faithful sub-voxel one. True diameters are
+                // still what classify a via and what the readout quotes.
+                float r = batch.Spacing * Math.Clamp(opt.ViaDisplayVoxels, 0.5f, 12f);
+
+                // The conductor itself: always drawn, always the full span height.
                 // Everything below is decoration and may be skipped or budget-cut
                 // without ever breaking the connection this line represents.
                 batch.Line(cam.Transform(x, y, zTop), cam.Transform(x, y, zBot), col);
 
-                // Wall + annular ring only once the via is wider than a voxel or two.
-                // Below that the wall lands on the same voxels as the centre line, so
-                // it would cost four times the budget to draw the same thing.
                 if (r > batch.Spacing * 1.5f)
                 {
                     for (int k = 0; k < 4; k++)

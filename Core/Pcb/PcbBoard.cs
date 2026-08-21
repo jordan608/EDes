@@ -185,8 +185,31 @@ namespace EDes.Pcb
         public bool Parsed;
     }
 
+    /// <summary>What the importer decided about one file it found.
+    ///
+    /// Recorded for EVERY file, including the ones it ignored, because "the viewer did
+    /// not find my STEP file" and "the viewer found it and failed to parse it" and "the
+    /// viewer skipped it as a duplicate" are three different problems with three
+    /// different fixes, and without a per-file record they are indistinguishable.</summary>
+    public struct ImportedFile
+    {
+        public string Name;
+        public string Folder;    // relative to the imported root
+        public string Role;      // Gerber, Drill, STEP, Mesh, Placement, BOM, Document...
+        public string Detail;    // what came out of it, or why nothing did
+        public long   Bytes;
+        public int    Ms;        // time spent on this file
+        public bool   Used;      // false = ignored, skipped or failed
+    }
+
     public sealed class PcbBoard
     {
+        /// <summary>Every file the importer looked at, in the order it looked.</summary>
+        public readonly List<ImportedFile> ImportLog = new();
+
+        /// <summary>Wall-clock milliseconds for the whole import.</summary>
+        public int ImportMs;
+
         public readonly List<PcbLayer>  Layers = new();
         public readonly List<PcbHole>   Holes  = new();
         public readonly List<MeshCloud> Meshes = new();
@@ -240,6 +263,8 @@ namespace EDes.Pcb
             Holes.Clear();
             Meshes.Clear();
             Solids.Clear();
+            ImportLog.Clear();
+            ImportMs = 0;
             Components.Clear();
             BomLines.Clear();
             Documents.Clear();

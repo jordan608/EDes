@@ -114,6 +114,11 @@ namespace EDes
         /// a component through-hole. 0.7 mm covers ordinary vias while leaving even
         /// small component leads (0.8 mm+) classified as through-holes.</summary>
         public volatile float  PcbViaMaxDia  = 0.7f;    // mm
+
+        /// <summary>Drawn via radius in VOXELS, the same for every via regardless of its
+        /// real diameter. Real vias are sub-voxel at any board scale that fits the volume,
+        /// so drawing them faithfully draws them invisibly.</summary>
+        public volatile float  PcbViaSize    = 3.0f;
         public volatile bool   PcbMeshes     = true;
         public volatile bool   PcbCad        = true;    // STEP solids as edge wireframes
         public volatile float  PcbCadBright  = 1.0f;
@@ -145,6 +150,14 @@ namespace EDes
         /// <summary>Set by the UI to ask the game thread to (re)import PcbPath.
         /// The game thread clears it — imports never run on the UI thread.</summary>
         public volatile bool PcbImportRequested = false;
+
+        /// <summary>The file the import is working on right now, or "" when idle.
+        ///
+        /// Written by the game thread, read by the UI. Imports run on the game thread, so
+        /// a slow file stalls rendering and the app looks hung; this is what turns that
+        /// into "parsing big_assembly.step" so the difference between slow and stuck is
+        /// visible. Reference assignment of a string is atomic, so no lock is needed.</summary>
+        public string PcbImportStatus = "";
 
         // ── Persistence ───────────────────────────────────────────────────────
 

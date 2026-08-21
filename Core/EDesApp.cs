@@ -167,7 +167,8 @@ namespace EDes
             }
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            bool ok = PcbImporter.Import(path, _board, Math.Max(1000, _s.MeshPointBudget));
+            bool ok = PcbImporter.Import(path, _board, Math.Max(1000, _s.MeshPointBudget),
+                                         f => _s.PcbImportStatus = f);
             sw.Stop();
 
             var sb = new StringBuilder();
@@ -584,6 +585,7 @@ namespace EDes
                 ShowHoles    = _s.PcbHoles,
                 ShowVias     = _s.PcbVias,
                 ViaMaxDiaMm  = _s.PcbViaMaxDia,
+                ViaDisplayVoxels = _s.PcbViaSize,
                 PourDensity  = _s.PcbPourDensity,
                 HatchDensity = _s.PcbHatchDensity,
                 ShowMeshes   = _s.PcbMeshes,
@@ -908,8 +910,9 @@ namespace EDes
         {
             var sec = ui.AddSection(stack, "PCB import", group);
             ui.AddInfo(sec, "Point this at a fabrication output FOLDER (Gerbers + drill) or a " +
-                            "single file. Meshes: STL / OBJ / PLY / GLB. STEP is read directly " +
-                            "to STL first — see docs/PCB_IMPORT.md.");
+                            "single file. Meshes: STL / OBJ / PLY / GLB. STEP (.step/.stp) is " +
+                            "read directly as an edge wireframe — no conversion needed. " +
+                            "See docs/PCB_IMPORT.md.");
             ui.AddTextBox(sec, "Path (folder or file)", _s.PcbPath, v => _s.PcbPath = v.Trim('"', ' '));
             ui.AddButton(sec, "Import / reload", () => _s.PcbImportRequested = true);
             ui.AddButton(sec, "Clear board", () =>
@@ -918,6 +921,13 @@ namespace EDes
                 _s.PcbImportRequested = true;
             });
             ui.AddLiveInfo(sec, () => BoardSummary, 1.5);
+
+            // Every file, including the ignored ones. Refreshed twice a second so the
+            // IMPORTING line is live rather than a snapshot from before the stall.
+            ui.AddInfo(sec, "Files found by the last import — anything the viewer did not " +
+                            "pick up will be in the NOT USED list with the reason. A file " +
+                            "that appears nowhere was never enumerated at all.");
+            ui.AddLiveInfo(sec, ImportInventory, 0.5);
 
             ui.AddSlider(sec, "Layer spacing", 0.02, 1.5, _s.LayerSpacing, v => _s.LayerSpacing = (float)v, "F2");
             ui.AddSlider(sec, "Track width scale", 0.1, 6, _s.TrackScale, v => _s.TrackScale = (float)v, "F2");
@@ -970,6 +980,12 @@ namespace EDes
             }, 0.5);
             ui.AddSlider(sec, "Via max diameter (mm)", 0.1, 2.0, _s.PcbViaMaxDia,
                          v => _s.PcbViaMaxDia = (float)v, "F2");
+            ui.AddSlider(sec, "Via drawn size (voxels)", 1.0, 10.0, _s.PcbViaSize,
+                         v => _s.PcbViaSize = (float)v, "F1");
+            ui.AddInfo(sec, "Every via draws at this one size whatever its real diameter — " +
+                            "a real 0.3 mm via is smaller than a voxel and would be " +
+                            "invisible drawn to scale. Max diameter above still uses the " +
+                            "TRUE size to decide what counts as a via.");
             ui.AddLiveInfo(sec, () =>
             {
                 int vias = _board.ViaCount(_s.PcbViaMaxDia);
@@ -1021,6 +1037,61 @@ namespace EDes
                     sb.Append($"folders walked: {_board.SourceFolders.Count}\n");
                 return sb.ToString().TrimEnd();
             }, 2.0);
+        }
+
+        /// <summary>Every file the last import looked at and what it decided, newest
+        /// import only. This is the answer to "did it even find my STEP file?" — a file
+        /// that is absent from this list was never enumerated, which is a different
+        /// problem from one that was found and rejected.</summary>
+        private string ImportInventory()
+        {
+            string busy = _s.PcbImportStatus;
+            if (busy.Length > 0)
+                return "IMPORTING: " + busy + "\n(the game thread is busy; large STEP " +
+                       "assemblies can take a while)";
+
+            if (_board.ImportLog.Count == 0)
+                return "No import has run yet. Set a folder or file and press Import.";
+
+            var sb = new StringBuilder();
+            sb.Append($"{_board.ImportLog.Count} file(s) examined in {_board.ImportMs} ms\n");
+
+            // Used files first, then everything skipped — the skipped list is the one
+            // people actually need when something is missing, so it must not be buried
+            // or truncated away.
+            AppendGroup(sb, "USED", true);
+            AppendGroup(sb, "NOT USED", false);
+            return sb.ToString();
+        }
+
+        private static string SizeText(long bytes)
+            => bytes >= 1024L * 1024L ? $"{bytes / 1024.0 / 1024.0:0.#} MB"
+             : bytes >= 1024L         ? $"{bytes / 1024.0:0.#} kB"
+                                      : $"{bytes} B";
+
+        private void AppendGroup(StringBuilder sb, string title, bool used)
+        {
+            int n = 0;
+            foreach (var f in _board.ImportLog) if (f.Used == used) n++;
+            if (n == 0) return;
+
+            sb.Append('\n').Append(title).Append(" (").Append(n).Append(")\n");
+            string lastFolder = "\u0001";
+            foreach (var f in _board.ImportLog)
+            {
+                if (f.Used != used) continue;
+                if (f.Folder != lastFolder)
+                {
+                    lastFolder = f.Folder;
+                    sb.Append("  ").Append(f.Folder.Length > 0 ? f.Folder : ".").Append("/\n");
+                }
+                sb.Append("    ").Append(f.Role.PadRight(10))
+                  .Append(f.Name);
+                if (f.Bytes > 0) sb.Append("  ").Append(SizeText(f.Bytes));
+                if (f.Ms >= 50)  sb.Append("  ").Append(f.Ms).Append(" ms");
+                if (f.Detail.Length > 0) sb.Append("\n                ").Append(f.Detail);
+                sb.Append('\n');
+            }
         }
 
         private void BuildRenderSection(PanelBuilder ui, StackPanel stack, List<Expander> group)

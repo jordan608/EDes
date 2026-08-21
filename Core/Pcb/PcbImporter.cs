@@ -84,8 +84,16 @@ namespace EDes.Pcb
         { ".csv", ".tsv", ".xls", ".xlsx", ".ods", ".txt" };
 
         /// <summary>Import everything at path (a file or a folder) into board.
-        /// The board is cleared first. Returns true if anything was loaded.</summary>
-        public static bool Import(string path, PcbBoard board, int meshPointBudget)
+        /// The board is cleared first. Returns true if anything was loaded.
+        ///
+        /// <paramref name="progress"/> is called with the file about to be handled, before
+        /// the work rather than after. That ordering is the point: this runs on the game
+        /// thread, so a slow file freezes rendering, and a status set beforehand is what
+        /// tells the difference between "still parsing this 80 MB STEP" and "hung". A
+        /// status set afterwards would name the last file that FINISHED, which is exactly
+        /// the wrong one to know about.</summary>
+        public static bool Import(string path, PcbBoard board, int meshPointBudget,
+                                  Action<string>? progress = null)
         {
             board.Clear();
             if (string.IsNullOrWhiteSpace(path))
@@ -133,6 +141,40 @@ namespace EDes.Pcb
             int skippedDuplicates = 0;
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+            var totalWatch = System.Diagnostics.Stopwatch.StartNew();
+            var fileWatch  = new System.Diagnostics.Stopwatch();
+            string rootDir = Directory.Exists(path) ? path : (Path.GetDirectoryName(path) ?? "");
+
+            // Records one file's outcome. Called from every branch below, including the
+            // ignore paths — a file missing from this list means the importer never even
+            // enumerated it, which is a different bug from mis-classifying it.
+            void Note(string f, string role, string detail, bool used)
+            {
+                long bytes = 0;
+                try { bytes = new FileInfo(f).Length; } catch { }
+                string folder = "";
+                try
+                {
+                    string? d = Path.GetDirectoryName(f);
+                    if (d != null && rootDir.Length > 0 &&
+                        d.StartsWith(rootDir, StringComparison.OrdinalIgnoreCase))
+                        folder = d.Substring(rootDir.Length).Trim(Path.DirectorySeparatorChar,
+                                                                  Path.AltDirectorySeparatorChar);
+                }
+                catch { }
+
+                board.ImportLog.Add(new ImportedFile
+                {
+                    Name   = Path.GetFileName(f),
+                    Folder = folder,
+                    Role   = role,
+                    Detail = detail,
+                    Bytes  = bytes,
+                    Ms     = (int)fileWatch.ElapsedMilliseconds,
+                    Used   = used,
+                });
+            }
+
             // Placement and BOM are handled in a second pass: the BOM can only fill in
             // values once the parts it refers to have been placed.
             var placementFiles = new List<string>();
@@ -148,7 +190,25 @@ namespace EDes.Pcb
                 string key;
                 try   { key = name + "|" + new FileInfo(file).Length; }
                 catch { key = name; }
-                if (!seen.Add(key)) { skippedDuplicates++; continue; }
+                if (!seen.Add(key))
+                {
+                    skippedDuplicates++;
+                    fileWatch.Restart();
+                    Note(file, "duplicate", "same name and size already loaded", false);
+                    continue;
+                }
+
+                // Size goes in the status too: "parsing assembly.step (86.4 MB)" tells you
+                // to wait, where a bare name looks identical to a hang.
+                if (progress != null)
+                {
+                    long pb = 0;
+                    try { pb = new FileInfo(file).Length; } catch { }
+                    progress(pb >= 1024L * 1024L
+                             ? $"{name} ({pb / 1024.0 / 1024.0:0.#} MB)"
+                             : name);
+                }
+                fileWatch.Restart();
 
                 if (StepParser.IsStep(file))
                 {
@@ -159,6 +219,12 @@ namespace EDes.Pcb
                     {
                         board.Solids.AddRange(cad.Solids);
                         solids += cad.SolidCount;
+                        Note(file, "STEP", $"{cad.SolidCount} solid(s), {cad.TotalEdges} edge(s)",
+                             true);
+                    }
+                    else
+                    {
+                        Note(file, "STEP", "FAILED to parse — see the notes above", false);
                     }
                     AddDocument(board, file, DocKind.Cad3D);
                     docs++;
@@ -168,7 +234,12 @@ namespace EDes.Pcb
                 if (MeshLoader.IsMesh(file))
                 {
                     var cloud = MeshLoader.TryLoad(file, meshPointBudget, board.Notes);
-                    if (cloud != null) { board.Meshes.Add(cloud); meshes++; }
+                    if (cloud != null)
+                    {
+                        board.Meshes.Add(cloud); meshes++;
+                        Note(file, "mesh", $"{cloud.Count} point(s)", true);
+                    }
+                    else Note(file, "mesh", "FAILED to load", false);
                     continue;
                 }
 
@@ -177,7 +248,12 @@ namespace EDes.Pcb
                 // an aperture library or a DRC report.
                 if (Array.IndexOf(NeverGeometry, ext) >= 0)
                 {
-                    if (LooksLikeBom(file)) { bomFiles.Add(file); continue; }
+                    if (LooksLikeBom(file))
+                    {
+                        bomFiles.Add(file);
+                        Note(file, "BOM", "queued for the second pass", true);
+                        continue;
+                    }
 
                     if (ext == ".drc" || name.Contains("Design Rule Check",
                                                        StringComparison.OrdinalIgnoreCase))
@@ -185,11 +261,20 @@ namespace EDes.Pcb
                         ParseDrc(file, board);
                         AddDocument(board, file, DocKind.Other);
                         docs++;
+                        Note(file, "DRC", board.Drc.Parsed
+                             ? $"{board.Drc.Violations} violation(s) over {board.Drc.Rules} rule(s)"
+                             : "not parsed", board.Drc.Parsed);
                         continue;
                     }
 
                     var k = ClassifyDocument(file);
-                    if (k.HasValue) { AddDocument(board, file, k.Value); docs++; }
+                    if (k.HasValue)
+                    {
+                        AddDocument(board, file, k.Value);
+                        docs++;
+                        Note(file, "document", k.Value.ToString(), true);
+                    }
+                    else Note(file, "ignored", "not geometry and not a known document", false);
                     continue;
                 }
 
@@ -198,17 +283,36 @@ namespace EDes.Pcb
                     ParseDrc(file, board);
                     AddDocument(board, file, DocKind.Other);
                     docs++;
+                    Note(file, "DRC", board.Drc.Parsed ? "parsed" : "not parsed", board.Drc.Parsed);
                     continue;
                 }
 
-                if (LooksLikePlacement(file)) { placementFiles.Add(file); continue; }
-                if (LooksLikeBom(file))       { bomFiles.Add(file);       continue; }
+                if (LooksLikePlacement(file))
+                {
+                    placementFiles.Add(file);
+                    Note(file, "placement", "queued for the second pass", true);
+                    continue;
+                }
+                if (LooksLikeBom(file))
+                {
+                    bomFiles.Add(file);
+                    Note(file, "BOM", "queued for the second pass", true);
+                    continue;
+                }
 
                 if (Array.IndexOf(DrillExtensions, ext) >= 0 || LooksLikeDrill(file))
                 {
                     int n = ExcellonParser.Parse(file, board);
-                    if (n > 0) { drills++; holes += n; }
-                    else AddDocument(board, file, DocKind.Other);
+                    if (n > 0)
+                    {
+                        drills++; holes += n;
+                        Note(file, "drill", $"{n} hole(s)", true);
+                    }
+                    else
+                    {
+                        AddDocument(board, file, DocKind.Other);
+                        Note(file, "drill", "no holes parsed — filed as a document", false);
+                    }
                     continue;
                 }
 
@@ -226,15 +330,28 @@ namespace EDes.Pcb
                     if (kind == PcbLayerKind.PadMaster) layer.Visible = false;
 
                     if (GerberParser.Parse(file, layer, board) && layer.ObjectCount > 0)
+                    {
                         gerbers++;
+                        Note(file, "gerber", $"{kind}, {layer.ObjectCount} object(s)" +
+                                             (layer.Visible ? "" : ", hidden by default"), true);
+                    }
                     else
+                    {
                         board.Layers.Remove(layer);      // unparseable, or drew nothing
+                        Note(file, "gerber", "parsed to nothing — dropped", false);
+                    }
                     continue;
                 }
 
                 // Everything else is inventory, not geometry.
                 var docKind = ClassifyDocument(file);
-                if (docKind.HasValue) { AddDocument(board, file, docKind.Value); docs++; }
+                if (docKind.HasValue)
+                {
+                    AddDocument(board, file, docKind.Value);
+                    docs++;
+                    Note(file, "document", docKind.Value.ToString(), true);
+                }
+                else Note(file, "ignored", "unrecognised extension and content", false);
             }
 
             // Altium writes the SAME placement data as both .csv and .txt, so the second
@@ -276,6 +393,8 @@ namespace EDes.Pcb
             }
 
             int linked = LinkSolidsToComponents(board);
+            board.ImportMs = (int)totalWatch.ElapsedMilliseconds;
+            progress?.Invoke("");
 
             var summary = $"{gerbers} gerber layer(s), {holes} hole(s) from {drills} drill file(s), " +
                           $"{meshes} mesh(es), {solids} CAD solid(s), {parts} part(s), " +
@@ -320,8 +439,22 @@ namespace EDes.Pcb
                     string leaf = Path.GetFileName(dir).ToLowerInvariant();
                     bool skip = false;
                     foreach (string s in SkipFolders)
-                        if (leaf == s || leaf.EndsWith(s)) { skip = true; break; }
-                    if (skip) continue;
+                    {
+                        // Suffix matching ONLY for the entries that are written as suffixes.
+                        // A blanket EndsWith silently swallowed any folder whose name merely
+                        // ended in one of these words — "Fabrication-bin", "STEP and OBJ",
+                        // "Rev2 backup" — and a skipped folder looks exactly like a missing
+                        // file to whoever is staring at the viewer.
+                        bool hit = s[0] == '-' ? leaf.EndsWith(s, StringComparison.Ordinal)
+                                               : leaf == s;
+                        if (hit) { skip = true; break; }
+                    }
+                    if (skip)
+                    {
+                        board.Notes.Add($"Skipped folder \"{Path.GetFileName(dir)}\" " +
+                                        "(matches the backup/temp skip list)");
+                        continue;
+                    }
 
                     CollectTree(dir, files, board, depth + 1);
                 }

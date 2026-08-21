@@ -29,8 +29,21 @@ public static class RealBoardCheck
 
         var board = new PcbBoard();
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        bool ok = PcbImporter.Import(Root, board, 60_000);
+        var seenProgress = new List<string>();
+        bool ok = PcbImporter.Import(Root, board, 60_000, f => seenProgress.Add(f));
         sw.Stop();
+
+        // The per-file inventory — printed in full, because its whole purpose is to be
+        // read when something is missing.
+        Console.WriteLine();
+        Console.WriteLine("--- import inventory ---");
+        foreach (var f in board.ImportLog)
+            Console.WriteLine($"  {(f.Used ? "USE" : "---")} {f.Role,-10} " +
+                              $"{(f.Folder.Length > 0 ? f.Folder + "/" : "")}{f.Name}" +
+                              $"{(f.Ms >= 20 ? $"  [{f.Ms} ms]" : "")}" +
+                              $"{(f.Detail.Length > 0 ? "  :: " + f.Detail : "")}");
+        Console.WriteLine($"  ({board.ImportLog.Count} files, {board.ImportMs} ms total)");
+        Console.WriteLine();
 
         Console.WriteLine($"import: {ok} in {sw.ElapsedMilliseconds} ms");
         foreach (var n in board.Notes) Console.WriteLine("    note: " + n);
@@ -79,6 +92,21 @@ public static class RealBoardCheck
         // A board this size must be tens of mm, not hundreds or fractions.
         CheckTrue("board width is tens of mm", board.WidthMm is > 5 and < 200);
         CheckTrue("board height is tens of mm", board.HeightMm is > 5 and < 200);
+
+        // ── The inventory itself ─────────────────────────────────────────────
+        CheckTrue("every file examined got an inventory entry",
+                  board.ImportLog.Count > 20);
+        CheckTrue("progress was reported per file", seenProgress.Count > 10);
+        CheckTrue("the STEP file appears in the inventory as STEP",
+                  board.ImportLog.Exists(f => f.Role == "STEP" && f.Used &&
+                                              f.Name.EndsWith(".step", StringComparison.OrdinalIgnoreCase)));
+        CheckTrue("the drill file appears as a drill with a hole count",
+                  board.ImportLog.Exists(f => f.Role == "drill" && f.Used));
+        CheckTrue("gerbers appear with their layer kind",
+                  board.ImportLog.FindAll(f => f.Role == "gerber" && f.Used).Count >= 10);
+        CheckTrue("nothing is left with an empty role",
+                  board.ImportLog.TrueForAll(f => f.Role.Length > 0));
+        CheckTrue("import time was recorded", board.ImportMs > 0);
 
         CheckTrue("xlsx BOM was read", board.BomLines.Count > 0);
         CheckTrue("DRC report parsed", board.Drc.Parsed && board.Drc.Rules > 5);
