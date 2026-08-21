@@ -51,6 +51,13 @@ namespace EDes.Pcb
 
         // ── Inspection ────────────────────────────────────────────────────────
         public bool  Inspect;          // probe active: dim everything it is not over
+
+        /// <summary>0 all layers, 1 copper + outline (signal), 2 outline only (component).
+        /// A VIEW filter, never a change to the user's own layer toggles — those are
+        /// persisted, and clobbering them would lose the operator's setup every time they
+        /// glanced at an inspector.</summary>
+        public int   LayerFilter;
+        public bool  HideParts;        // component-inspector hides copper; signal hides parts
         public float ProbeX, ProbeY, ProbeZ;   // probe position, DISPLAY space
         public float DimFactor;        // brightness for everything not under the probe
         public float SnapRange;        // how far the probe reaches for a target, world units
@@ -153,14 +160,13 @@ namespace EDes.Pcb
             // not against the visible stack — a 2-layer board can easily have 14 visible
             // layers once silk, mask, paste and mechanical are counted, and spanning
             // those made every barrel stick far out of the board.
-            BuildCopperZ(board, z0, Spacing);
+            BuildCopperZ(board, z0, Spacing, opt);
 
             int index = 0;
             for (int li = 0; li < board.Layers.Count; li++)
             {
                 var layer = board.Layers[li];
-                if (!layer.Visible) continue;
-                if (opt.IsolateLayer >= 0 && opt.IsolateLayer != li) { index++; continue; }
+                if (!LayerShown(layer, opt, li)) continue;
 
                 float z   = z0 + index * Spacing;
                 int   col = Palette.Scale(layer.Colour, opt.Brightness * Dim(_hoverLayer == li));
@@ -176,11 +182,12 @@ namespace EDes.Pcb
 
             if (opt.ShowVias)  DrawVias(batch, cam, board, opt, cx, cy, z0, Spacing, slots);
             if (opt.ShowHoles) DrawHoles(batch, cam, board, cx, cy, z0, Spacing, slots, opt);
-            if (opt.ShowCad)    DrawCadSolids(batch, cam, board, opt, cx, cy, z0);
-            if (opt.ShowCad && opt.CadSurfaces)
+            if (opt.ShowCad && !opt.HideParts) DrawCadSolids(batch, cam, board, opt, cx, cy, z0);
+            if (opt.ShowCad && opt.CadSurfaces && !opt.HideParts)
                 DrawCadFaces(batch, cam, board, opt, cx, cy, z0);
-            if (opt.ShowMeshes) DrawMeshes(batch, cam, board, cx, cy, opt);
-            if (opt.ShowComponents) DrawComponents(batch, hud, cam, board, opt, cx, cy, z0, slots);
+            if (opt.ShowMeshes && !opt.HideParts) DrawMeshes(batch, cam, board, cx, cy, opt);
+            if (opt.ShowComponents && !opt.HideParts)
+                DrawComponents(batch, hud, cam, board, opt, cx, cy, z0, slots);
             if (opt.ShowCursor) DrawCursor(batch, cam, board, opt, cx, cy, z0, Spacing, slots);
         }
 
@@ -528,11 +535,9 @@ namespace EDes.Pcb
             for (int li = 0; li < board.Layers.Count; li++)
             {
                 var layer = board.Layers[li];
-                if (!layer.Visible) continue;
-                bool isolatedOut = opt.IsolateLayer >= 0 && opt.IsolateLayer != li;
+                if (!LayerShown(layer, opt, li)) continue;
                 float z = z0 + index * Spacing;
                 index++;
-                if (isolatedOut) continue;
 
                 for (int i = 0; i < layer.Segs.Count; i++)
                 {
@@ -759,7 +764,8 @@ namespace EDes.Pcb
         /// two ever disagreed, vias would land between layers instead of on them.
         /// A copper layer that is hidden gets the nearest visible slot, so a via still
         /// terminates somewhere sensible instead of vanishing.</summary>
-        private void BuildCopperZ(PcbBoard board, float z0, float spacing)
+        private void BuildCopperZ(PcbBoard board, float z0, float spacing,
+                                  in PcbViewOptions opt)
         {
             _copperZ.Clear();
 
@@ -771,7 +777,7 @@ namespace EDes.Pcb
                 bool copper = layer.Kind is PcbLayerKind.CopperTop
                                           or PcbLayerKind.CopperInner
                                           or PcbLayerKind.CopperBottom;
-                if (!layer.Visible)
+                if (!LayerShown(layer, opt, li))
                 {
                     if (copper) _copperZ.Add(lastZ);
                     continue;
@@ -782,6 +788,29 @@ namespace EDes.Pcb
                 index++;
                 if (copper) _copperZ.Add(z);
             }
+        }
+
+        /// <summary>Is this layer drawn at all this frame?
+        ///
+        /// THE one place that decides. Draw, BuildCopperZ and ResolveProbe all walk the
+        /// stack assigning slot Z by position, so if any of them disagreed about which
+        /// layers count, vias would terminate between layers and the probe would test
+        /// against planes nothing was drawn on — both invisible until someone measured.</summary>
+        private static bool LayerShown(PcbLayer layer, in PcbViewOptions opt, int li)
+        {
+            if (!layer.Visible) return false;
+            if (opt.IsolateLayer >= 0 && opt.IsolateLayer != li) return false;
+
+            bool copper = layer.Kind is PcbLayerKind.CopperTop or PcbLayerKind.CopperInner
+                                      or PcbLayerKind.CopperBottom;
+            bool outline = layer.Kind is PcbLayerKind.Outline;
+
+            return opt.LayerFilter switch
+            {
+                1 => copper || outline,      // signal inspector
+                2 => outline,                // component inspector
+                _ => true,
+            };
         }
 
         /// <summary>Brightness multiplier: full for the thing under the probe, dimmed for
@@ -836,11 +865,9 @@ namespace EDes.Pcb
             for (int li = 0; li < board.Layers.Count; li++)
             {
                 var layer = board.Layers[li];
-                if (!layer.Visible) continue;
-                bool isolatedOut = opt.IsolateLayer >= 0 && opt.IsolateLayer != li;
+                if (!LayerShown(layer, opt, li)) continue;
                 float lz = z0 + index * Spacing;
                 index++;
-                if (isolatedOut) continue;
                 if (layer.Kind is not (PcbLayerKind.CopperTop or PcbLayerKind.CopperInner
                                        or PcbLayerKind.CopperBottom)) continue;
 
@@ -862,7 +889,7 @@ namespace EDes.Pcb
 
             // ── Parts: STEP bodies, then placement markers ────────────────────
             float zBase = z0 + opt.CadZOffset;
-            for (int i = 0; i < board.Solids.Count; i++)
+            for (int i = 0; i < board.Solids.Count && !opt.HideParts; i++)
             {
                 var sol = board.Solids[i];
                 if (!sol.Visible || !sol.HasGeometry) continue;
@@ -878,7 +905,7 @@ namespace EDes.Pcb
                 bestPt = new point3d(sx, sy, sz);
             }
 
-            for (int i = 0; i < board.Components.Count; i++)
+            for (int i = 0; i < board.Components.Count && !opt.HideParts; i++)
             {
                 var c = board.Components[i];
                 float sx = Wx(c.X, cx), sy = Wy(c.Y, cy);
@@ -911,12 +938,13 @@ namespace EDes.Pcb
                 Probe.Net   = net;
                 Probe.Title = board.Nets?.Name(net) ?? "trace";
 
+                // One line, side by side. Four stacked rows for four short values wasted
+                // most of a very limited text band, and the values are read together
+                // anyway — the layer only means something next to the width.
                 var sg = layer.Segs[bestSeg];
-                Probe.Lines.Add($"layer     {layer.Kind}{(layer.Bottom ? " (bottom)" : "")}");
-                Probe.Lines.Add($"width     {sg.W:0.000} mm");
-                Probe.Lines.Add($"length    {sg.Length:0.00} mm");
-                if (net >= 0 && board.Nets != null)
-                    Probe.Lines.Add($"net       {board.Nets.Size(net)} copper object(s)");
+                string side = layer.Bottom ? " (bottom)" : "";
+                Probe.Lines.Add($"{Probe.Title}   {layer.Kind}{side}   " +
+                                $"w {sg.W:0.000} mm   l {sg.Length:0.00} mm");
                 return;
             }
 
@@ -928,8 +956,9 @@ namespace EDes.Pcb
                 Probe.Kind  = "part";
                 Probe.Index = bestItem;
                 Probe.Title = sol.Name.Length > 0 ? sol.Name : "STEP solid";
-                Probe.Lines.Add($"3D body   {sol.Edges.Count} edge(s), {sol.Faces.Count} face(s)");
-                Probe.Lines.Add($"size      {sol.MaxX - sol.MinX:0.00} x " +
+                // Edge and face counts are a parser statistic, not something anyone
+                // inspecting a board wants to read off the display.
+                Probe.Lines.Add($"size       {sol.MaxX - sol.MinX:0.00} x " +
                                 $"{sol.MaxY - sol.MinY:0.00} x {sol.MaxZ - sol.MinZ:0.00} mm");
                 if (sol.Designator.Length > 0) AddComponentInfo(board, sol.Designator);
                 return;
@@ -973,19 +1002,10 @@ namespace EDes.Pcb
             {
                 if (!string.Equals(c.Designator, designator, StringComparison.OrdinalIgnoreCase))
                     continue;
-                if (c.Value.Length > 0)     Probe.Lines.Add($"value     {c.Value}");
-                if (c.Footprint.Length > 0) Probe.Lines.Add($"footprint {c.Footprint}");
-                Probe.Lines.Add($"placed    {c.X:0.00}, {c.Y:0.00} mm  rot {c.Rotation:0}deg  " +
+                if (c.Value.Length > 0)     Probe.Lines.Add($"value      {c.Value}");
+                if (c.Footprint.Length > 0) Probe.Lines.Add($"footprint  {c.Footprint}");
+                Probe.Lines.Add($"placed     {c.X:0.00}, {c.Y:0.00} mm  rot {c.Rotation:0}deg  " +
                                 $"{(c.Bottom ? "bottom" : "top")}");
-                break;
-            }
-
-            foreach (var b in board.BomLines)
-            {
-                if (b.Designators.IndexOf(designator, StringComparison.OrdinalIgnoreCase) < 0)
-                    continue;
-                Probe.Lines.Add($"BOM       qty {b.Quantity}" +
-                                (b.Value.Length > 0 ? $", {b.Value}" : ""));
                 break;
             }
         }

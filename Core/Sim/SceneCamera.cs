@@ -292,7 +292,23 @@ namespace EDes.Sim
         /// <summary>Keyboard roll (Q/E), about the scene's own depth axis.</summary>
         public void RollBy(float d) => Rotate(0f, d, 0f);
 
-        public void ZoomBy(float factor) => Zoom = Math.Clamp(Zoom * factor, 0.2f, 5f);
+        /// <summary>Zoom by a factor, with no practical limit.
+        ///
+        /// The 0.2..5 range this used to clamp to was a UX guess, and it stopped anyone
+        /// getting close enough to inspect a 0.2 mm track. The bounds that remain are
+        /// NUMERICAL, not editorial: at zero the transform collapses every point onto the
+        /// origin and InverseTransform divides by it, and past ~1e6 single-precision
+        /// coordinates stop resolving neighbouring voxels at all. Both would look like a
+        /// crash rather than a limit. A non-finite factor is rejected outright for the same
+        /// reason — one NaN here propagates into every transformed point for the rest of
+        /// the session.</summary>
+        public void ZoomBy(float factor)
+        {
+            if (!float.IsFinite(factor) || factor <= 0f) return;
+            float z = Zoom * factor;
+            if (!float.IsFinite(z)) return;
+            Zoom = Math.Clamp(z, 1e-4f, 1e6f);
+        }
 
         // ── Derived angles, for the settings readout only ──────────────────────
         // The basis is the truth; these are a human-readable projection of it and are

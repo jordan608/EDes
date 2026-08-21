@@ -17,6 +17,17 @@ namespace EDes
 {
     public enum EDesMode { Education = 0, Scope = 1, Pcb = 2 }
 
+    /// <summary>The inspection stages the both-buttons gesture cycles through.</summary>
+    public enum EDesInspect
+    {
+        /// <summary>Normal camera driving; no probe.</summary>
+        Off = 0,
+        /// <summary>Copper and board outline only — for tracing signals.</summary>
+        Signal = 1,
+        /// <summary>Parts and board outline only — for identifying components.</summary>
+        Component = 2,
+    }
+
     public sealed class EDesSettings : IGameSettings
     {
         // ── Mode ──────────────────────────────────────────────────────────────
@@ -46,6 +57,13 @@ namespace EDes
         /// point is to stay usable while moving, not to blank the display.</summary>
         public volatile float AdaptiveFloor = 0.15f;
         public volatile float TextSize    = 0.20f;
+
+        /// <summary>Minimum voxels per glyph CELL, which is what sets the real text floor.
+        /// A 5x7 glyph needs about one voxel per cell to be readable at all and two to be
+        /// comfortable; below one, adjacent lit cells share voxels and the character turns
+        /// into a blob. Expressed in voxels rather than world units so it holds on both a
+        /// VX2 and a VX2-XL, and at any voxel density.</summary>
+        public volatile float MinTextCellVoxels = 1.6f;
         public volatile int   FontIndex   = 2;      // 0 Classic, 1 Blocky, 2 Bold
         public volatile float TextWeight  = 1.0f;
         public volatile bool  ShowLabels  = true;
@@ -99,11 +117,20 @@ namespace EDes
         public volatile bool  LockRotZ = false;
 
         // ── Inspection mode ───────────────────────────────────────────────────
-        /// <summary>Both puck buttons together toggle this. In inspection mode the puck's
-        /// translation drives a probe inside the volume instead of panning the scene;
-        /// rotation still turns the scene, so you can look around what you are probing.
-        /// Everything dims except whatever the probe is over.</summary>
-        public volatile bool  InspectMode = false;
+        /// <summary>Which inspector is active: 0 camera, 1 signal, 2 component.
+        ///
+        /// Both puck buttons together CYCLE through them. A cycle rather than a toggle
+        /// because the two inspectors answer different questions — one about copper, one
+        /// about parts — and each hides what the other needs, so there is no single view
+        /// that serves both.
+        ///
+        /// In any inspector the puck's translation drives a probe instead of panning;
+        /// rotation is locked so the board cannot slide out from under it. Everything dims
+        /// except whatever the probe is over. See EDesInspect.</summary>
+        public volatile int   InspectStage = 0;
+
+        /// <summary>Convenience over InspectStage: any inspector at all.</summary>
+        public bool InspectMode => InspectStage != 0;
 
         /// <summary>Probe position, in DISPLAY space, clamped to the volume. Display space
         /// rather than scene space on purpose: the probe is a physical pointer in the box,

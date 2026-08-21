@@ -59,6 +59,15 @@ namespace EDes
 
         // ── Live frame state ──────────────────────────────────────────────────
         private float _radius = 4f, _zHalf = 2f, _spacing = 0.03f;
+
+        /// <summary>Height of one 5x7 glyph cell as a fraction of the text size — the
+        /// constant VoxelFont.EmitGlyphs uses. Named here so the legibility floor is
+        /// derived from the renderer's real metric rather than a guess about it.</summary>
+        private const float GLYPH_CELL_FRACTION = 0.18f;
+
+        /// <summary>True when the requested text size was raised to stay legible, so the
+        /// panel can say so instead of appearing to ignore the slider.</summary>
+        private bool _textFloored;
         private float _textSize = 0.2f, _step = 0.31f;   // display-scaled text metrics
         private FrameLayout _layout;                     // this frame's vertical plan
 
@@ -408,9 +417,15 @@ namespace EDes
             _cam.LockRotZ = _s.LockRotZ;
         }
 
+        /// <summary>Advance the inspection stage: camera, signal, component, camera...
+        ///
+        /// A cycle rather than a toggle because the two inspectors answer different
+        /// questions and each hides what the other needs — there is no one view that
+        /// serves both, so they have to be separate stops.</summary>
         private void ToggleInspect()
         {
-            _s.InspectMode = !_s.InspectMode;
+            _s.InspectStage = (_s.InspectStage + 1) % 3;
+
             if (_s.InspectMode)
             {
                 // Start at the centre rather than wherever it was left: the volume may have
@@ -419,7 +434,8 @@ namespace EDes
                 _s.InspectX = 0f; _s.InspectY = _s.PlaneY; _s.InspectZ = 0f;
             }
             else _s.InspectInfo = "";
-            App.Log($"[EDesApp] {( _s.InspectMode ? "Inspection" : "Camera")} mode");
+
+            App.Log($"[EDesApp] {(EDesInspect)_s.InspectStage} inspector");
         }
 
         /// <summary>Move the probe, clamped inside the physical volume.
@@ -449,6 +465,11 @@ namespace EDes
 
             _s.InspectX = x; _s.InspectY = y; _s.InspectZ = z;
         }
+
+        /// <summary>True when an inspector is active AND the probe is actually on
+        /// something. Both halves matter: with nothing selected the normal readouts are
+        /// still the most useful thing on the display.</summary>
+        private bool ProbeHasSelection => _s.InspectMode && _pcb.Probe.Hit;
 
         /// <summary>Leader line from the probe to whatever it snapped to.
         ///
@@ -495,8 +516,13 @@ namespace EDes
             // blocks end up in the same voxels once one of them grows a line.
             ref TextStack st = ref _topText;
 
-            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.TextHilite,
-                      "INSPECTION MODE");
+            string title = ((EDesInspect)_s.InspectStage) switch
+            {
+                EDesInspect.Signal    => "SIGNAL INSPECTOR",
+                EDesInspect.Component => "COMPONENT INSPECTOR",
+                _                     => "INSPECTION MODE",
+            };
+            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.TextHilite, title);
 
             if (!probe.Hit)
             {
@@ -559,7 +585,11 @@ namespace EDes
             else if (_s.InspectInfo.Length > 0) _s.InspectInfo = "";
 
             if (_s.ShowNavDiag)   DrawNavReadout();
-            if (_s.ShowHudPanel)  DrawHudPanel();
+            // The title/voxel panel is suppressed while the probe has something, so the
+            // selection sits at the very top of the display instead of under two rows of
+            // information nobody is reading at that moment. The text band is only a few
+            // rows tall, so anything kept is something else lost.
+            if (_s.ShowHudPanel && !ProbeHasSelection) DrawHudPanel();
             if (_s.ShowBackdrop)  DrawBackdrop();     // last: decoration is dropped first
 
             _batch.Flush(ledHost, ref vs);
@@ -653,8 +683,19 @@ namespace EDes
 
             // Text scales with the display so a VX2 is not covered in giant glyphs
             // and a VX2-XL is not covered in unreadable specks.
-            _textSize = MathF.Max(0.04f, _s.TextSize * (radius / 4f));
+            //
+            // The floor is derived from the VOXEL SPACING, not picked. The 5x7 glyphs use
+            // a cell of size * 0.18 in height, so a glyph is only legible while one cell
+            // is at least a voxel or so across — below that every lit cell lands on the
+            // same voxel as its neighbour and the character collapses into a blob. The old
+            // fixed floor of 0.04 was roughly a QUARTER of a voxel per cell at default
+            // density, i.e. far past unreadable, so text could be configured into
+            // illegibility and look like a rendering fault.
+            float minSize = _spacing / GLYPH_CELL_FRACTION *
+                            MathF.Max(1f, _s.MinTextCellVoxels);
+            _textSize = MathF.Max(minSize, _s.TextSize * (radius / 4f));
             _step     = Hud.LineStep(_textSize);
+            _textFloored = _textSize > _s.TextSize * (radius / 4f) + 1e-6f;
         }
 
         /// <summary>The single top-of-display text cursor for this frame. Every text block
@@ -669,10 +710,15 @@ namespace EDes
             // The optional blocks share the same top band, so their rows have to be
             // reserved here as well — otherwise the geometry band starts inside them.
             int extra = 0;
-            if (_s.InspectMode) extra += 9;   // heading + probe line + up to 7 detail rows
+            // Trimmed from nine: a trace is now one line and a part is at most four, so
+            // reserving nine pushed the geometry down for rows that never get drawn.
+            if (_s.InspectMode) extra += 6;
             if (_s.ShowNavDiag) extra += 5;
 
-            if (!_s.ShowLabels) return extra;
+            // With a selection the mode's own readout is suppressed, so its rows must not
+            // be reserved either — reserving space for text that will not be drawn is the
+            // same mistake as drawing it.
+            if (!_s.ShowLabels || ProbeHasSelection) return extra;
             switch ((EDesMode)_s.Mode)
             {
                 case EDesMode.Education:
@@ -812,6 +858,12 @@ namespace EDes
                 CadSurfaceDensity = _s.PcbCadSurfaceDensity,
                 CadZOffset    = _s.PcbCadZOffset,
                 Inspect       = _s.InspectMode,
+                // Signal shows copper + outline; component shows outline only and hides
+                // every part-derived thing. Both are VIEW filters — the operator's own
+                // layer toggles are persisted and must survive a glance at an inspector.
+                LayerFilter   = _s.InspectStage == (int)EDesInspect.Signal ? 1
+                              : _s.InspectStage == (int)EDesInspect.Component ? 2 : 0,
+                HideParts     = _s.InspectStage == (int)EDesInspect.Signal,
                 ProbeX        = _s.InspectX,
                 ProbeY        = _s.InspectY,
                 ProbeZ        = _s.InspectZ,
@@ -838,7 +890,7 @@ namespace EDes
 
             _pcb.Draw(_batch, _hud, _cam, _board, opt, _radius, _zHalf);
 
-            if (!_s.ShowLabels) return;
+            if (!_s.ShowLabels || ProbeHasSelection) return;
 
             ref TextStack f = ref _topText;
 
@@ -1514,6 +1566,22 @@ namespace EDes
                             "dropped first, then labels, then geometry.");
             ui.AddSlider(sec, "Max voxels / frame", 5000, VoxelBatch.MAX_CAPACITY, _s.MaxVoxels,
                          v => _s.MaxVoxels = (int)v, "F0");
+            ui.AddSlider(sec, "Min voxels per glyph cell", 1.0, 4.0, _s.MinTextCellVoxels,
+                         v => _s.MinTextCellVoxels = (float)v, "F1");
+            ui.AddLiveInfo(sec, () =>
+            {
+                float cell = _textSize * 0.18f / MathF.Max(1e-6f, _spacing);
+                return $"text size {_textSize:0.000} -> {cell:0.0} voxels per glyph cell"
+                     + (_textFloored ? "   (raised to stay legible)" : "");
+            }, 0.5);
+            ui.AddInfo(sec, "Glyphs are 5x7 cells, so legibility is set by how many voxels " +
+                            "ONE CELL covers, not by the size in world units — which is why " +
+                            "the floor is in voxels and follows the display and the density. " +
+                            "Below about one voxel per cell adjacent cells share voxels and " +
+                            "the character becomes a blob. A smaller glyph grid would let " +
+                            "text shrink further but 3x5 characters are harder to read than " +
+                            "small 5x7 ones, so the 5x7 Bold font plus this floor is the " +
+                            "better trade on a low-resolution display.");
             ui.AddToggle(sec, "Reduce voxels while moving if slow", _s.AdaptiveBudget,
                          v => _s.AdaptiveBudget = v);
             ui.AddSlider(sec, "Throttle below VPS", 2, 30, _s.AdaptiveLowVps,
@@ -1611,7 +1679,7 @@ namespace EDes
                             "Inspection mode. In inspection mode the puck moves a probe " +
                             "through the volume, everything dims except what the probe is " +
                             "over, and its details appear top-left.");
-            ui.AddButton(sec, "Toggle Camera / Inspection mode", ToggleInspect);
+            ui.AddButton(sec, "Cycle Camera / Signal / Component inspector", ToggleInspect);
             ui.AddSlider(sec, "Probe speed", 0.2, 12, _s.InspectRate,
                          v => _s.InspectRate = (float)v, "F2");
             ui.AddSlider(sec, "Dim for unhovered (1 = no dimming)", 0.1, 1.0, _s.InspectDim,
@@ -1634,7 +1702,8 @@ namespace EDes
                         : "");
             }, 0.3);
             ui.AddLiveInfo(sec, () => _s.InspectMode
-                ? $"INSPECTION  probe {_s.InspectX:0.00}, {_s.InspectY:0.00}, {_s.InspectZ:0.00}"
+                ? $"{(EDesInspect)_s.InspectStage} inspector   probe "
+                  + $"{_s.InspectX:0.00}, {_s.InspectY:0.00}, {_s.InspectZ:0.00}"
                 : "CAMERA mode", 0.3);
             ui.AddLiveInfo(sec, () =>
                 $"yaw {_cam.Yaw:0.00}  pitch {_cam.Pitch:0.00}  roll {_cam.Roll:0.00}  zoom {_cam.Zoom:0.00}");
