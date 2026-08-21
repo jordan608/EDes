@@ -48,6 +48,11 @@ namespace EDes.Pcb
         public bool  CadSurfaces;     // flat-shaded fill on the planar faces
         public float CadSurfaceDensity;// 1 = one sample per voxel; lower is sparser
         public float CadZOffset;       // nudge the 3D model along Z, world units
+
+        // ── Inspection ────────────────────────────────────────────────────────
+        public bool  Inspect;          // probe active: dim everything it is not over
+        public float ProbeX, ProbeY, ProbeZ;   // probe position, DISPLAY space
+        public float DimFactor;        // brightness for everything not under the probe
         public float CadAmbient;       // floor brightness, so unlit edges never vanish
         public float CadLightX, CadLightY, CadLightZ;   // light direction, board frame
         public bool  ShowCursor;
@@ -58,6 +63,23 @@ namespace EDes.Pcb
         public bool  ShowLabels;       // designators next to those markers
         public int   LabelLimit;       // skip labels entirely above this part count
         public float TextSize;         // label size, in display units
+    }
+
+    /// <summary>What the inspection probe is currently over. Reused between frames
+    /// rather than reallocated — this is rebuilt every frame the probe is active.</summary>
+    public sealed class InspectHit
+    {
+        public bool   Hit;
+        public string Kind  = "";     // "layer", "component", "solid"
+        public int    Index = -1;
+        public string Title = "";
+        public readonly List<string> Lines = new();
+
+        public void Clear()
+        {
+            Hit = false; Kind = ""; Index = -1; Title = "";
+            Lines.Clear();
+        }
     }
 
     public sealed class PcbRenderer
@@ -73,6 +95,13 @@ namespace EDes.Pcb
         /// <summary>Z of each copper layer for the current frame's layout. Rebuilt every
         /// Draw because layer visibility and spacing are live UI settings.</summary>
         private readonly System.Collections.Generic.List<float> _copperZ = new();
+
+        /// <summary>What the probe found this frame. Valid after Draw.</summary>
+        public InspectHit Probe { get; } = new InspectHit();
+
+        // Resolved once per Draw, then consulted by every draw pass so exactly one thing
+        // is at full brightness.
+        private int _hoverLayer = -1, _hoverSolid = -1, _hoverComponent = -1;
 
         // ── Board-to-world mapping from the last Draw (the app quotes it in the HUD) ──
         public float Scale   { get; private set; } = 1f;   // world units per mm
@@ -99,6 +128,8 @@ namespace EDes.Pcb
             float cx = board.CentreX, cy = board.CentreY;
             float z0 = -(slots - 1) * 0.5f * Spacing;      // first layer highest (-Z is up)
 
+            ResolveProbe(cam, board, opt, z0);
+
             // Z of every copper layer, in stack order. Vias are defined against COPPER,
             // not against the visible stack — a 2-layer board can easily have 14 visible
             // layers once silk, mask, paste and mechanical are counted, and spanning
@@ -113,7 +144,7 @@ namespace EDes.Pcb
                 if (opt.IsolateLayer >= 0 && opt.IsolateLayer != li) { index++; continue; }
 
                 float z   = z0 + index * Spacing;
-                int   col = Palette.Scale(layer.Colour, opt.Brightness);
+                int   col = Palette.Scale(layer.Colour, opt.Brightness * Dim(_hoverLayer == li));
                 index++;
 
                 DrawLayer(batch, cam, layer, col, z, cx, cy, opt);
@@ -413,11 +444,12 @@ namespace EDes.Pcb
 
             float ambient = Math.Clamp(opt.CadAmbient, 0f, 1f);
 
-            foreach (var solid in board.Solids)
+            for (int si = 0; si < board.Solids.Count; si++)
             {
+                var solid = board.Solids[si];
                 if (!solid.Visible || solid.Edges.Count == 0) continue;
 
-                int baseCol = Palette.Scale(solid.Colour, bright);
+                int baseCol = Palette.Scale(solid.Colour, bright * Dim(_hoverSolid == si));
 
                 foreach (var e in solid.Edges)
                 {
@@ -480,11 +512,12 @@ namespace EDes.Pcb
                                        0.1f, 2f);
             float step = batch.Spacing / density;
 
-            foreach (var solid in board.Solids)
+            for (int si = 0; si < board.Solids.Count; si++)
             {
+                var solid = board.Solids[si];
                 if (!solid.Visible || solid.Faces.Count == 0) continue;
 
-                int baseCol = Palette.Scale(solid.Colour, bright);
+                int baseCol = Palette.Scale(solid.Colour, bright * Dim(_hoverSolid == si));
 
                 foreach (var face in solid.Faces)
                 {
@@ -653,6 +686,148 @@ namespace EDes.Pcb
                 lastZ = z;
                 index++;
                 if (copper) _copperZ.Add(z);
+            }
+        }
+
+        /// <summary>Brightness multiplier: full for the thing under the probe, dimmed for
+        /// everything else, and untouched when not inspecting.</summary>
+        private float Dim(bool hovered)
+        {
+            if (!_inspecting) return 1f;
+            return hovered ? 1f : _dimFactor;
+        }
+
+        private bool  _inspecting;
+        private float _dimFactor = 0.75f;
+
+        /// <summary>Work out what the probe is pointing at.
+        ///
+        /// The probe lives in DISPLAY space, but everything it might be pointing at is
+        /// defined in board space — so this inverse-transforms the probe rather than
+        /// forward-transforming every candidate. That is both cheaper and exact, since the
+        /// camera basis is orthonormal.
+        ///
+        /// Order matters: a STEP solid wins over a placement marker (it is the real body,
+        /// and it can borrow the marker's data through its designator), and both win over
+        /// a layer, which is the fallback because the probe is ALWAYS within half a slot of
+        /// some layer and would otherwise mask everything else.</summary>
+        private void ResolveProbe(SceneCamera cam, PcbBoard board,
+                                  in PcbViewOptions opt, float z0)
+        {
+            _inspecting = opt.Inspect;
+            _dimFactor  = Math.Clamp(opt.DimFactor <= 0f ? 0.75f : opt.DimFactor, 0f, 1f);
+            _hoverLayer = _hoverSolid = _hoverComponent = -1;
+            Probe.Clear();
+
+            if (!opt.Inspect) return;
+
+            var scene = cam.InverseTransform(opt.ProbeX, opt.ProbeY, opt.ProbeZ);
+            float cx = board.CentreX, cy = board.CentreY;
+
+            // Scene space back to board millimetres.
+            float mmX = Scale > 1e-9f ? scene.x / Scale + cx : cx;
+            float mmY = Scale > 1e-9f ? scene.y / Scale + cy : cy;
+
+            Probe.Lines.Add($"probe  {mmX:0.00}, {mmY:0.00} mm");
+
+            // ── STEP solids ───────────────────────────────────────────────────
+            float zBase = z0 + opt.CadZOffset;
+            for (int i = 0; i < board.Solids.Count; i++)
+            {
+                var sol = board.Solids[i];
+                if (!sol.Visible || !sol.HasGeometry) continue;
+                if (mmX < sol.MinX - 0.2f || mmX > sol.MaxX + 0.2f) continue;
+                if (mmY < sol.MinY - 0.2f || mmY > sol.MaxY + 0.2f) continue;
+
+                // The solid occupies zBase - MaxZ*Scale .. zBase - MinZ*Scale (-Z is up).
+                float zHi = zBase - sol.MaxZ * Scale;
+                float zLo = zBase - sol.MinZ * Scale;
+                if (scene.z < zHi - 0.1f || scene.z > zLo + 0.1f) continue;
+
+                _hoverSolid = i;
+                Probe.Hit   = true;
+                Probe.Kind  = "solid";
+                Probe.Index = i;
+                Probe.Title = sol.Name.Length > 0 ? sol.Name : "STEP solid";
+                Probe.Lines.Add($"3D body   {sol.Edges.Count} edge(s), {sol.Faces.Count} face(s)");
+                Probe.Lines.Add($"size      {sol.MaxX - sol.MinX:0.00} x " +
+                                $"{sol.MaxY - sol.MinY:0.00} x {sol.MaxZ - sol.MinZ:0.00} mm");
+                if (sol.Designator.Length > 0) AddComponentInfo(board, sol.Designator);
+                return;
+            }
+
+            // ── Placement markers ─────────────────────────────────────────────
+            // Tolerance in mm from a few voxels, so the probe is as forgiving on a big
+            // board as on a small one rather than pixel-exact on neither.
+            float tolMm = Scale > 1e-9f ? 1.5f : 1.5f;
+            int best = -1;
+            float bestD = float.MaxValue;
+            for (int i = 0; i < board.Components.Count; i++)
+            {
+                var c = board.Components[i];
+                float d = MathF.Sqrt((c.X - mmX) * (c.X - mmX) + (c.Y - mmY) * (c.Y - mmY));
+                if (d < bestD && d <= tolMm) { bestD = d; best = i; }
+            }
+            if (best >= 0)
+            {
+                var c = board.Components[best];
+                _hoverComponent = best;
+                Probe.Hit   = true;
+                Probe.Kind  = "component";
+                Probe.Index = best;
+                Probe.Title = c.Designator;
+                AddComponentInfo(board, c.Designator);
+                return;
+            }
+
+            // ── Layers ────────────────────────────────────────────────────────
+            int index = 0;
+            for (int li = 0; li < board.Layers.Count; li++)
+            {
+                var layer = board.Layers[li];
+                if (!layer.Visible) continue;
+                if (opt.IsolateLayer >= 0 && opt.IsolateLayer != li) { index++; continue; }
+
+                float z = z0 + index * Spacing;
+                index++;
+                if (MathF.Abs(scene.z - z) > Spacing * 0.5f) continue;
+
+                _hoverLayer = li;
+                Probe.Hit   = true;
+                Probe.Kind  = "layer";
+                Probe.Index = li;
+                Probe.Title = layer.Name;
+                Probe.Lines.Add($"kind      {layer.Kind}{(layer.Bottom ? " (bottom)" : "")}");
+                Probe.Lines.Add($"objects   {layer.Segs.Count} seg, {layer.Pads.Count} pad, " +
+                                $"{layer.Regions.Count} pour");
+                if (layer.MinWidth < float.MaxValue)
+                    Probe.Lines.Add($"min width {layer.MinWidth:0.000} mm");
+                if (layer.TrackLength > 0)
+                    Probe.Lines.Add($"track len {layer.TrackLength:0.0} mm");
+                return;
+            }
+        }
+
+        private void AddComponentInfo(PcbBoard board, string designator)
+        {
+            foreach (var c in board.Components)
+            {
+                if (!string.Equals(c.Designator, designator, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (c.Value.Length > 0)     Probe.Lines.Add($"value     {c.Value}");
+                if (c.Footprint.Length > 0) Probe.Lines.Add($"footprint {c.Footprint}");
+                Probe.Lines.Add($"placed    {c.X:0.00}, {c.Y:0.00} mm  rot {c.Rotation:0}deg  " +
+                                $"{(c.Bottom ? "bottom" : "top")}");
+                break;
+            }
+
+            foreach (var b in board.BomLines)
+            {
+                if (b.Designators.IndexOf(designator, StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                Probe.Lines.Add($"BOM       qty {b.Quantity}" +
+                                (b.Value.Length > 0 ? $", {b.Value}" : ""));
+                break;
             }
         }
 

@@ -75,6 +75,7 @@ namespace EDes
         private bool        _navHostUsable;
         private string      _navSource = "none";
         private NavState    _navLive;          // conditioned (-1..1, dead-zoned) signal
+        private int         _prevNavButtons;   // for both-buttons edge detection
         private float       _navPeakTrans;     // largest raw translation count seen
         private float       _navPeakRot;       // largest raw rotation count seen
         private float       _lastDt = 1f / 30f;
@@ -358,8 +359,108 @@ namespace EDes
                 _navPeakTrans = MathF.Max(_navPeakTrans, raw.PeakTranslation);
                 _navPeakRot   = MathF.Max(_navPeakRot,   raw.PeakRotation);
                 _navLive = raw.Condition(_s.NavFullScaleTrans, _s.NavFullScaleRot, _s.NavDeadzone);
-                _cam.ApplyNav(_navLive, _lastDt, _s.NavPanRate, _s.NavRotRate, _s.NavZoomRate);
+
+                // Both buttons together switch mode, on the RISING edge only — held down,
+                // a level test would flip modes every frame for as long as they were held.
+                bool bothNow  = (raw.Buttons & 0x3) == 0x3;
+                bool bothPrev = (_prevNavButtons & 0x3) == 0x3;
+                if (bothNow && !bothPrev) ToggleInspect();
+                _prevNavButtons = raw.Buttons;
+
+                _cam.LocalAxes = _s.NavLocalAxes;
+
+                // Zoom is on the individual buttons, and both-at-once already cancels
+                // there, so the mode switch cannot also zoom.
+                _cam.ApplyNav(_navLive, _lastDt, _s.NavPanRate, _s.NavRotRate, _s.NavZoomRate,
+                              allowPan: !_s.InspectMode);
+
+                if (_s.InspectMode) DriveProbe(_navLive, _lastDt);
             }
+        }
+
+        private void ToggleInspect()
+        {
+            _s.InspectMode = !_s.InspectMode;
+            if (_s.InspectMode)
+            {
+                // Start at the centre rather than wherever it was left: the volume may have
+                // been re-fitted or a different board loaded since, and a probe resuming
+                // off in a corner reads as a broken control.
+                _s.InspectX = 0f; _s.InspectY = _s.PlaneY; _s.InspectZ = 0f;
+            }
+            else _s.InspectInfo = "";
+            App.Log($"[EDesApp] {( _s.InspectMode ? "Inspection" : "Camera")} mode");
+        }
+
+        /// <summary>Move the probe, clamped inside the physical volume.
+        ///
+        /// Clamped to the CYLINDER, not a box: the display is round in XY, so a box clamp
+        /// would let the probe sit in a corner where nothing is ever drawn — it would
+        /// simply vanish. Bounds come from the live values read this frame, so the clamp
+        /// follows the hardware rather than a hardcoded 4.0/2.0.</summary>
+        private void DriveProbe(in NavState nav, float dt)
+        {
+            float rate = _s.InspectRate * dt;
+            float x = _s.InspectX + nav.Dx * rate;
+            float y = _s.InspectY + nav.Dy * rate;
+            float z = _s.InspectZ + nav.Dz * rate;
+
+            float rMax = _radius * 0.94f;
+            float rr   = MathF.Sqrt(x * x + y * y);
+            if (rr > rMax && rr > 1e-6f) { x *= rMax / rr; y *= rMax / rr; }
+            z = Math.Clamp(z, -_zHalf * 0.94f, _zHalf * 0.94f);
+
+            _s.InspectX = x; _s.InspectY = y; _s.InspectZ = z;
+        }
+
+        /// <summary>The probe itself, plus its readout. Drawn in DISPLAY space and NOT
+        /// camera-transformed: it is a physical pointer in the box, so rotating the scene
+        /// must move the board past the probe, not carry the probe along with it.</summary>
+        private void DrawProbe()
+        {
+            var at = new point3d(_s.InspectX, _s.InspectY, _s.InspectZ);
+            float r = MathF.Max(_spacing * 2.5f, _radius * 0.012f);
+            _batch.Blob(at, r, 0xFFFFFF);
+
+            // Cross-hair arms, so the probe's depth is readable — a lone blob on a
+            // transparent display gives no cue about where it sits in Y.
+            float arm = r * 3f;
+            _batch.Line(new point3d(at.x - arm, at.y, at.z), new point3d(at.x + arm, at.y, at.z), 0xB0B0C0);
+            _batch.Line(new point3d(at.x, at.y - arm, at.z), new point3d(at.x, at.y + arm, at.z), 0xB0B0C0);
+            _batch.Line(new point3d(at.x, at.y, at.z - arm), new point3d(at.x, at.y, at.z + arm), 0xB0B0C0);
+        }
+
+        /// <summary>Probe readout, top-left of the volume on the constant-Y HUD plane.
+        /// Deliberately NOT camera-transformed, like the other readouts, so it stays
+        /// legible while the scene turns.</summary>
+        private void DrawProbeReadout()
+        {
+            var probe = _pcb.Probe;
+
+            float size = _textSize * 0.85f;
+            float x    = -_radius * 0.95f;
+            var   st   = new TextStack(-_zHalf * 0.92f, Hud.LineStep(size));
+
+            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.TextHilite,
+                      "INSPECTION MODE");
+
+            if (!probe.Hit)
+            {
+                _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.TextDim,
+                          "move the probe over a layer or part");
+                _s.InspectInfo = "Inspection mode\nNothing under the probe.";
+                return;
+            }
+
+            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.Trace,
+                      probe.Kind.ToUpperInvariant() + "  " + probe.Title);
+            foreach (string line in probe.Lines)
+                _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.Text, line);
+
+            var sb = new StringBuilder();
+            sb.Append(probe.Kind.ToUpperInvariant()).Append("  ").Append(probe.Title).Append('\n');
+            foreach (string line in probe.Lines) sb.Append(line).Append('\n');
+            _s.InspectInfo = sb.ToString();
         }
 
         /// <summary>Everything known about the puck, for the settings panel and the
@@ -416,6 +517,16 @@ namespace EDes
                 case EDesMode.Scope:     DrawScopeMode(); break;
                 case EDesMode.Pcb:       DrawPcbMode();   break;
             }
+
+            // Probe and its readout come BEFORE the HUD panel and the backdrop: when the
+            // probe is what you are driving, it is the last thing that should disappear
+            // to a tight budget, not the first.
+            if (_s.InspectMode)
+            {
+                DrawProbe();
+                DrawProbeReadout();
+            }
+            else if (_s.InspectInfo.Length > 0) _s.InspectInfo = "";
 
             if (_s.ShowNavDiag)   DrawNavReadout();
             if (_s.ShowHudPanel)  DrawHudPanel();
@@ -600,6 +711,11 @@ namespace EDes
                 CadSurfaces   = _s.PcbCadSurfaces,
                 CadSurfaceDensity = _s.PcbCadSurfaceDensity,
                 CadZOffset    = _s.PcbCadZOffset,
+                Inspect       = _s.InspectMode,
+                ProbeX        = _s.InspectX,
+                ProbeY        = _s.InspectY,
+                ProbeZ        = _s.InspectZ,
+                DimFactor     = _s.InspectDim,
                 CadAmbient    = _s.PcbCadAmbient,
                 CadLightX     = _s.PcbCadLightX,
                 CadLightY     = _s.PcbCadLightY,
@@ -780,6 +896,9 @@ namespace EDes
         private float _legendAge;
 
         public IReadOnlyList<LegendRow> Legend => _legend;
+
+        /// <summary>The probe readout, mirrored onto the shell's preview overlay.</summary>
+        public string StatusOverlay => _s.InspectMode ? _s.InspectInfo : "";
 
         /// <summary>Rebuild the legend, at most a few times a second.
         ///
@@ -1322,6 +1441,28 @@ namespace EDes
             });
             ui.AddButton(sec, "Reset observed peaks", () => { _navPeakTrans = 0f; _navPeakRot = 0f; });
             ui.AddButton(sec, "Reset scene camera", () => _cam.Reset());
+            ui.AddButton(sec, "Rotate about: LOCAL / GLOBAL axes", () =>
+            {
+                _s.NavLocalAxes = !_s.NavLocalAxes;
+                _cam.LocalAxes  = _s.NavLocalAxes;
+            });
+            ui.AddLiveInfo(sec, () =>
+                "rotating about " + (_s.NavLocalAxes
+                    ? "the MODEL's local axes (turns with the board)"
+                    : "the DISPLAY's global axes (fixed to the volume)"), 0.3);
+
+            ui.AddInfo(sec, "Press BOTH puck buttons to switch between Camera mode and " +
+                            "Inspection mode. In inspection mode the puck moves a probe " +
+                            "through the volume, everything dims except what the probe is " +
+                            "over, and its details appear top-left.");
+            ui.AddButton(sec, "Toggle Camera / Inspection mode", ToggleInspect);
+            ui.AddSlider(sec, "Probe speed", 0.2, 12, _s.InspectRate,
+                         v => _s.InspectRate = (float)v, "F2");
+            ui.AddSlider(sec, "Dim for unhovered (1 = no dimming)", 0.1, 1.0, _s.InspectDim,
+                         v => _s.InspectDim = (float)v, "F2");
+            ui.AddLiveInfo(sec, () => _s.InspectMode
+                ? $"INSPECTION  probe {_s.InspectX:0.00}, {_s.InspectY:0.00}, {_s.InspectZ:0.00}"
+                : "CAMERA mode", 0.3);
             ui.AddLiveInfo(sec, () =>
                 $"yaw {_cam.Yaw:0.00}  pitch {_cam.Pitch:0.00}  roll {_cam.Roll:0.00}  zoom {_cam.Zoom:0.00}");
 

@@ -67,6 +67,33 @@ namespace EDes
         /// jump at the edge.</summary>
         public volatile float NavDeadzone = 0.08f;
 
+        /// <summary>Rotate about the scene's own axes (true) or the display's fixed ones.
+        /// Local is what "turn the board over" means once the board is already tilted;
+        /// global is easier when lining the board up with the volume itself.</summary>
+        public volatile bool  NavLocalAxes = true;
+
+        // ── Inspection mode ───────────────────────────────────────────────────
+        /// <summary>Both puck buttons together toggle this. In inspection mode the puck's
+        /// translation drives a probe inside the volume instead of panning the scene;
+        /// rotation still turns the scene, so you can look around what you are probing.
+        /// Everything dims except whatever the probe is over.</summary>
+        public volatile bool  InspectMode = false;
+
+        /// <summary>Probe position, in DISPLAY space, clamped to the volume. Display space
+        /// rather than scene space on purpose: the probe is a physical pointer in the box,
+        /// so it must stay put when the scene is rotated around it.</summary>
+        public volatile float InspectX = 0f, InspectY = 0f, InspectZ = 0f;
+
+        /// <summary>Brightness for everything the probe is NOT over. 0.75 = 25% darker.</summary>
+        public volatile float InspectDim = 0.75f;
+
+        /// <summary>Probe speed, world units per second at full deflection.</summary>
+        public volatile float InspectRate = 3.0f;
+
+        /// <summary>What the probe is over, formatted for the shell's overlay. Written by
+        /// the game thread, read by the UI; string assignment is atomic.</summary>
+        public string InspectInfo = "";
+
         // ── Education mode: the circuit ───────────────────────────────────────
         public volatile int    PresetIndex = 0;
         // float, not double: volatile requires a 32-bit type, and 24-bit float

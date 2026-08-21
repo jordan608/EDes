@@ -331,6 +331,7 @@ namespace EDes.UI
             if (_game != null && _game.ActiveMode != _shownMode) RefreshModePanel();
 
             RefreshLegend();
+            RefreshProbe();
         }
 
         // ── Splash ─────────────────────────────────────────────────────────────
@@ -370,6 +371,38 @@ namespace EDes.UI
         private void OnSaveClick (object? s, RoutedEventArgs e) => _s.Save();
         private void OnLoadClick (object? s, RoutedEventArgs e) { _s.Load(); RebuildActivePanel(); }
         private void OnResetClick(object? s, RoutedEventArgs e) { _s.Reset(); RebuildActivePanel(); }
+
+        // ── Probe readout ─────────────────────────────────────────────────────
+        // The game thread writes one preformatted string; this only splits the first line
+        // off as a heading. Formatting stays on the side that knows what a layer or a
+        // component actually is, so the shell needs no knowledge of the board model.
+        private string _probeShown = "\u0001";
+
+        private void RefreshProbe()
+        {
+            string info = _game?.StatusOverlay ?? "";
+            if (info == _probeShown) return;
+            _probeShown = info;
+
+            if (info.Length == 0)
+            {
+                ProbePanel.IsVisible = false;
+                return;
+            }
+
+            int nl = info.IndexOf('\n');
+            if (nl < 0)
+            {
+                ProbeTitle.Text = "INSPECTION MODE";
+                ProbeBody.Text  = info;
+            }
+            else
+            {
+                ProbeTitle.Text = info.Substring(0, nl);
+                ProbeBody.Text  = info.Substring(nl + 1).TrimEnd('\n');
+            }
+            ProbePanel.IsVisible = true;
+        }
 
         // ── Legend overlay ────────────────────────────────────────────────────
         // The row CONTROLS are rebuilt only when the set of rows changes; their state

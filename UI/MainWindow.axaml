@@ -137,6 +137,34 @@
                            HorizontalAlignment="Stretch"
                            VerticalAlignment="Stretch"/>
 
+                    <!-- Probe readout, top-left. Mirrors what the volume shows on its
+                         own HUD plane, because the operator is often looking at the
+                         display rather than the screen — and the same text in both places
+                         means neither has to be the authority. Not hit-testable: unlike
+                         the legend it has no controls, so it must not eat the orbit drag. -->
+                    <Border x:Name="ProbePanel"
+                            HorizontalAlignment="Left" VerticalAlignment="Top"
+                            Margin="10,10,0,0" Padding="8,6"
+                            Background="#C0000000"
+                            BorderBrush="#40FFFFFF" BorderThickness="1"
+                            CornerRadius="3"
+                            MaxWidth="340"
+                            IsHitTestVisible="False"
+                            IsVisible="False">
+                        <StackPanel Spacing="2">
+                            <TextBlock x:Name="ProbeTitle"
+                                       Text="INSPECTION MODE"
+                                       FontSize="11" FontWeight="Bold"
+                                       Foreground="#FF66DDFF"/>
+                            <TextBlock x:Name="ProbeBody"
+                                       Text=""
+                                       FontSize="10"
+                                       Opacity="0.9"
+                                       TextWrapping="Wrap"
+                                       FontFamily="Consolas,Menlo,monospace"/>
+                        </StackPanel>
+                    </Border>
+
                     <!-- Legend: what is on screen, in what colour, with a checkbox to
                          toggle it and a swatch to recolour it. An Avalonia overlay rather
                          than in-volume text on purpose — it costs no voxel budget, and a

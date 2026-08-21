@@ -110,6 +110,14 @@ namespace EDes
         /// would tear or throw mid-enumeration. Swap a fresh array in instead.</summary>
         IReadOnlyList<LegendRow> Legend => Array.Empty<LegendRow>();
 
+        /// <summary>Free text the shell overlays on the top-left of the preview, or empty
+        /// for none. Preformatted by the game: the first line is used as a heading.
+        ///
+        /// Goes through the contract rather than the shell reading the game's own settings,
+        /// so the shell stays independent of any particular game's state object — the same
+        /// reason Legend does.</summary>
+        string StatusOverlay => "";
+
         /// <summary>Show or hide what a legend row stands for. Called on the UI thread;
         /// implementations must be safe against a concurrent import.</summary>
         void SetLegendVisible(string key, bool visible) { }

@@ -77,9 +77,87 @@ namespace EDes.Sim
 
         public point3d Transform(point3d p) => Transform(p.x, p.y, p.z);
 
-        /// <summary>Rotate about the scene's OWN axes by three small angles (radians).
-        /// Every rotation in this class routes through here, so "local" is not an
-        /// option a caller can get wrong.</summary>
+        /// <summary>False to rotate about the DISPLAY's fixed axes instead of the scene's
+        /// own. Local is the default because it is what "turn the board over" means when
+        /// the board is already tilted; global is easier to reason about when lining an
+        /// object up with the volume itself.</summary>
+        public bool LocalAxes = true;
+
+        /// <summary>Rotate by three small angles, about whichever frame LocalAxes selects.
+        /// Callers that do not care which use this; the two explicit methods exist for the
+        /// places that genuinely mean one or the other.</summary>
+        public void Rotate(float aboutX, float aboutY, float aboutZ)
+        {
+            if (LocalAxes) RotateLocal(aboutX, aboutY, aboutZ);
+            else           RotateGlobal(aboutX, aboutY, aboutZ);
+        }
+
+        /// <summary>Rotate about the DISPLAY's fixed axes.
+        ///
+        /// The mirror image of RotateLocal: that one post-multiplies, which leaves the
+        /// scene's own axes as the axis of rotation, while this PRE-multiplies, i.e. it
+        /// turns each basis vector about a world axis. Same basis, opposite side of the
+        /// product — that single distinction is the whole difference between the two
+        /// modes.</summary>
+        public void RotateGlobal(float aboutX, float aboutY, float aboutZ)
+        {
+            if (aboutX != 0f)
+            {
+                float c = MathF.Cos(aboutX), sn = MathF.Sin(aboutX);
+                RotAxis(ref _uy, ref _uz, c, sn);
+                RotAxis(ref _vy, ref _vz, c, sn);
+                RotAxis(ref _wy, ref _wz, c, sn);
+            }
+            if (aboutY != 0f)
+            {
+                float c = MathF.Cos(aboutY), sn = MathF.Sin(aboutY);
+                RotAxis(ref _uz, ref _ux, c, sn);
+                RotAxis(ref _vz, ref _vx, c, sn);
+                RotAxis(ref _wz, ref _wx, c, sn);
+            }
+            if (aboutZ != 0f)
+            {
+                float c = MathF.Cos(aboutZ), sn = MathF.Sin(aboutZ);
+                RotAxis(ref _ux, ref _uy, c, sn);
+                RotAxis(ref _vx, ref _vy, c, sn);
+                RotAxis(ref _wx, ref _wy, c, sn);
+            }
+            Orthonormalise();
+        }
+
+        /// <summary>Rotate one 2D component pair — the plane perpendicular to the axis.</summary>
+        private static void RotAxis(ref float a, ref float b, float c, float sn)
+        {
+            float na = a * c - b * sn;
+            float nb = a * sn + b * c;
+            a = na; b = nb;
+        }
+
+        /// <summary>Display space → world space: the exact inverse of Transform.
+        ///
+        /// Needed so a cursor the user positions in the VOLUME can be asked what it is
+        /// pointing at, which is a question about the scene's own coordinates. Exact
+        /// rather than approximate because the basis is orthonormal, so its inverse is
+        /// its transpose — no matrix inversion and no drift.</summary>
+        public point3d InverseTransform(float dx, float dy, float dz)
+        {
+            // Undo the rotation with the transpose (rows become the dot products).
+            float x = _ux * dx + _uy * dy + _uz * dz;
+            float y = _vx * dx + _vy * dy + _vz * dz;
+            float z = _wx * dx + _wy * dy + _wz * dz;
+
+            float iz = Zoom > 1e-6f ? 1f / Zoom : 1f;
+            x = x * iz - PanX;
+            y = y * iz - PanY;
+            z = z * iz - PanZ;
+
+            if (!HORIZONTAL_IS_X) { (x, y) = (y, x); }
+            return new point3d(x, y, z);
+        }
+
+        public point3d InverseTransform(point3d p) => InverseTransform(p.x, p.y, p.z);
+
+        /// <summary>Rotate about the scene's OWN axes by three small angles (radians).</summary>
         public void RotateLocal(float aboutX, float aboutY, float aboutZ)
         {
             // Post-multiplying by a rotation about a basis axis just mixes the OTHER
@@ -139,7 +217,8 @@ namespace EDes.Sim
         /// actually reports, so each rotation is commented with the physical gesture
         /// it comes from. Change the three lines below to re-tune; nothing else needs
         /// to know.</summary>
-        public void ApplyNav(in NavState nav, float dt, float panRate, float rotRate, float zoomRate)
+        public void ApplyNav(in NavState nav, float dt, float panRate, float rotRate,
+                             float zoomRate, bool allowPan = true)
         {
             if (!nav.Present) return;
 
@@ -152,17 +231,23 @@ namespace EDes.Sim
             // is lift; on this puck they are the other way round, so binding them by name
             // made lifting the cap move the model in depth and pushing it forward move it
             // vertically. Bound by measured behaviour instead.
-            PanX += nav.Dx * panRate * dt;   // slide left / right  → scene left / right
-            PanY += nav.Dy * panRate * dt;   // push fore / aft     → scene depth
-            PanZ += nav.Dz * panRate * dt;   // lift up / down      → scene vertical
+            // Suppressed in inspection mode: the same three axes drive the probe there,
+            // and having them do both at once would move the probe and the scene under it
+            // together, so the probe could never actually reach anything.
+            if (allowPan)
+            {
+                PanX += nav.Dx * panRate * dt;   // slide left / right  → scene left / right
+                PanY += nav.Dy * panRate * dt;   // push fore / aft     → scene depth
+                PanZ += nav.Dz * panRate * dt;   // lift up / down      → scene vertical
+            }
 
             // All three rotations share rotRate, so the puck feels isotropic in rotation
             // exactly as translation does above. The Y term is negated: this axis reports
             // the opposite sense to the other two, so without it tilting left rolled the
             // scene right.
-            RotateLocal( nav.Ay * rotRate * dt,   // tilt forward / back → scene's own X
-                        -nav.Ax * rotRate * dt,   // tilt left / right   → scene's own Y
-                         nav.Az * rotRate * dt);  // twist left / right  → scene's own Z
+            Rotate( nav.Ay * rotRate * dt,   // tilt forward / back → X
+                   -nav.Ax * rotRate * dt,   // tilt left / right   → Y
+                    nav.Az * rotRate * dt);  // twist left / right  → Z
 
             // Zoom is on the two puck buttons. It used to be a gesture on the lift
             // axis, which fought the pan already bound to that same axis — pushing
@@ -174,10 +259,10 @@ namespace EDes.Sim
         }
 
         /// <summary>Keyboard orbit — also local, so WASD and the puck agree.</summary>
-        public void Orbit(float dYaw, float dPitch) => RotateLocal(dPitch, 0f, dYaw);
+        public void Orbit(float dYaw, float dPitch) => Rotate(dPitch, 0f, dYaw);
 
         /// <summary>Keyboard roll (Q/E), about the scene's own depth axis.</summary>
-        public void RollBy(float d) => RotateLocal(0f, d, 0f);
+        public void RollBy(float d) => Rotate(0f, d, 0f);
 
         public void ZoomBy(float factor) => Zoom = Math.Clamp(Zoom * factor, 0.2f, 5f);
 
