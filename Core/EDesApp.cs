@@ -919,10 +919,14 @@ namespace EDes
         }
 
         // ── Mode: scope ───────────────────────────────────────────────────────
-        // The scope owns the whole content band here: full width, full height.
+        // The scope owns the whole content band here: full width, full height, and
+        // nothing else drawn in the volume competes with it, so the face runs almost
+        // to the display wall instead of leaving a ring of empty volume around it.
+        private const float ScopeModeHalfWidth = 0.97f;
+
         private void DrawScopeMode()
         {
-            DrawScopePanel(_layout.ContentTopZ, _layout.ContentBottomZ, _radius * 0.88f);
+            DrawScopePanel(_layout.ContentTopZ, _layout.ContentBottomZ, _radius * ScopeModeHalfWidth);
 
             if (!_s.ShowLabels) return;
             ref TextStack f = ref _topText;
@@ -960,7 +964,7 @@ namespace EDes
             {
                 if ((_s.ScopeChannelMask & (1 << ch)) == 0) continue;
                 var st = _scopeRenderer.Stats[ch];
-                _hud.Text(new point3d(-_radius * 0.88f, _s.PlaneY, f.Row()), _textSize,
+                _hud.Text(new point3d(-_radius * ScopeModeHalfWidth, _s.PlaneY, f.Row()), _textSize,
                           ScopeRenderer.ChannelColour(ch),
                           "CH" + (ch + 1) +
                           "  VPP " + Hud.Eng(st.Vpp, "V") +
