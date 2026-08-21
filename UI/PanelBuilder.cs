@@ -170,6 +170,67 @@ namespace EDes.UI
             p.Children.Add(new Border    { Margin = new Thickness(10, 0, 10, 2), Child = row });
         }
 
+        // ── AddNumber — a validated numeric box with NO slider ────────────────
+        // Same validation and commit behaviour as AddSlider's box (filtered input,
+        // commit on Enter or blur, revert on nonsense) but without the track. A slider
+        // is for exploring a range; these are values you already know and want to type,
+        // where dragging to 150000 voxels or 0.08 dead-zone is the slow way round.
+        public void AddNumber(StackPanel p, string label, double initial,
+                              Action<double> onChange, string fmt = "F2")
+        {
+            bool allowDecimal = fmt != "F0";
+
+            var row = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("*,92"),
+                Margin            = new Thickness(10, 2, 10, 2),
+            };
+
+            var caption = new TextBlock
+            {
+                Text              = label,
+                FontSize          = 11,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+            };
+            Grid.SetColumn(caption, 0);
+
+            var box = new TextBox
+            {
+                Text                       = initial.ToString(fmt),
+                FontSize                   = 11,
+                Padding                    = new Thickness(4, 2),
+                MinHeight                  = 0,
+                HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+            };
+            Grid.SetColumn(box, 1);
+            RestrictNumeric(box, allowNeg: true, allowDecimal);
+
+            double last = initial;
+
+            void Commit()
+            {
+                if (double.TryParse(box.Text, out double v))
+                {
+                    last = v;
+                    onChange(v);
+                    _onChanged();
+                }
+                // Unparseable input reverts rather than silently applying a zero — a
+                // half-typed "-" or "." must not become a value.
+                box.Text = last.ToString(fmt);
+            }
+
+            box.KeyDown += (_, e) =>
+            {
+                if (e.Key == Avalonia.Input.Key.Enter) Commit();
+            };
+            box.LostFocus += (_, _) => Commit();
+
+            row.Children.Add(caption);
+            row.Children.Add(box);
+            p.Children.Add(row);
+        }
+
         // ── AddTextBox — free-text row (paths, port names) ────────────────────
         // Commits on Enter or focus loss, never per keystroke. Game input is already
         // suspended while any TextBox has focus (MainWindow wires GotFocus), so typing

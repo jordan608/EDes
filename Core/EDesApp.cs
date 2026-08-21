@@ -351,8 +351,6 @@ namespace EDes
             }
             catch { _navHostRc = -2; }
 
-            if (!_s.NavEnabled) { _navSource = "disabled"; return; }
-
             if (_navHostUsable)
             {
                 _navSource = "LedHost vxl_nav_read";
@@ -485,17 +483,43 @@ namespace EDes
             {
                 string d = sol.Designator.Length > 0 ? sol.Designator : sol.Name;
                 if (d.Length == 0 || !seen.Add(d)) continue;
-                rows.Add(new PickRow("Components", d, "3D", "comp:" + d, sol.Colour));
+                rows.Add(new PickRow(GroupFor(d), d, "3D", "comp:" + d, sol.Colour));
             }
             foreach (var c in _board.Components)
             {
                 if (c.Designator.Length == 0 || !seen.Add(c.Designator)) continue;
-                rows.Add(new PickRow("Components", c.Designator,
+                rows.Add(new PickRow(GroupFor(c.Designator), c.Designator,
                                      c.Value.Length > 0 ? c.Value : "placed",
-                                     "comp:" + c.Designator, 0xC8C8D0));
+                                     "comp:" + c.Designator, Palette.White));
             }
 
             _picks = rows.ToArray();
+        }
+
+        /// <summary>Which group a designator belongs in.
+        ///
+        /// By reference-designator prefix, which is the one naming convention every EDA
+        /// tool follows — TP for test points, J/P for connectors, U/IC for devices. Split
+        /// out because a flat list of every part on a board is a list nobody reads: when
+        /// you want a test point you want the test points, not to scroll past forty
+        /// resistors to find them.</summary>
+        private static string GroupFor(string designator)
+        {
+            if (designator.Length == 0) return "Components";
+
+            // Letters only, so R12 and R are the same prefix.
+            int i = 0;
+            while (i < designator.Length && char.IsLetter(designator[i])) i++;
+            string prefix = designator.Substring(0, i).ToUpperInvariant();
+
+            return prefix switch
+            {
+                "TP" or "TSTPNT" or "MP" => "Test points",
+                "J" or "P" or "CN" or "CON" or "X" => "Connectors",
+                "U" or "IC" or "Q" or "D" or "LED" => "Devices",
+                "R" or "C" or "L" or "FB" or "RN" => "Passives",
+                _ => "Components",
+            };
         }
 
         /// <summary>Advance the inspection stage: camera, signal, component, camera...
@@ -1622,9 +1646,9 @@ namespace EDes
             ui.AddInfo(sec, "Max voxels is a hard per-frame ceiling for EVERYTHING drawn, " +
                             "text included. Draw order is priority order: the backdrop is " +
                             "dropped first, then labels, then geometry.");
-            ui.AddSlider(sec, "Max voxels / frame", 5000, VoxelBatch.MAX_CAPACITY, _s.MaxVoxels,
+            ui.AddNumber(sec, "Max voxels / frame", _s.MaxVoxels,
                          v => _s.MaxVoxels = (int)v, "F0");
-            ui.AddSlider(sec, "Min voxels per glyph cell", 1.0, 4.0, _s.MinTextCellVoxels,
+            ui.AddNumber(sec, "Min voxels per glyph cell", _s.MinTextCellVoxels,
                          v => _s.MinTextCellVoxels = (float)v, "F1");
             ui.AddLiveInfo(sec, () =>
             {
@@ -1642,11 +1666,11 @@ namespace EDes
                             "better trade on a low-resolution display.");
             ui.AddToggle(sec, "Reduce voxels while moving if slow", _s.AdaptiveBudget,
                          v => _s.AdaptiveBudget = v);
-            ui.AddSlider(sec, "Throttle below VPS", 2, 30, _s.AdaptiveLowVps,
+            ui.AddNumber(sec, "Throttle below VPS", _s.AdaptiveLowVps,
                          v => _s.AdaptiveLowVps = (float)v, "F1");
-            ui.AddSlider(sec, "Recover above VPS", 2, 30, _s.AdaptiveGoodVps,
+            ui.AddNumber(sec, "Recover above VPS", _s.AdaptiveGoodVps,
                          v => _s.AdaptiveGoodVps = (float)v, "F1");
-            ui.AddSlider(sec, "Throttle floor (fraction)", 0.05, 1.0, _s.AdaptiveFloor,
+            ui.AddNumber(sec, "Throttle floor (fraction)", _s.AdaptiveFloor,
                          v => _s.AdaptiveFloor = (float)v, "F2");
             ui.AddInfo(sec, "The budget is only cut while the view is MOVING — a still " +
                             "frame that renders slowly is one you are studying, and " +
@@ -1656,16 +1680,19 @@ namespace EDes
             ui.AddLiveInfo(sec, () =>
                 $"budget scale {_budgetScale * 100f:0}%  ->  {(int)(_s.MaxVoxels * _budgetScale):N0} vox"
                 + $"   ({(_viewMoving ? "moving" : "still")}, {_engine?.LiveVps ?? 0f:0.0} VPS)", 0.3);
-            ui.AddSlider(sec, "Voxel density (shared with Simulator tab)", 0.25, 3.0,
+            ui.AddNumber(sec, "Voxel density (shared with Display panel)",
                          _engine.VoxelDensity, v => _engine.VoxelDensity = (float)v, "F2");
-            ui.AddSlider(sec, "Text size", 0.05, 0.6, _s.TextSize, v => _s.TextSize = (float)v, "F2");
-            ui.AddSlider(sec, "Text weight", 0.5, 3.0, _s.TextWeight, v => _s.TextWeight = (float)v, "F2");
+            ui.AddNumber(sec, "Text size", _s.TextSize, v => _s.TextSize = (float)v, "F2");
+            ui.AddNumber(sec, "Text weight", _s.TextWeight, v => _s.TextWeight = (float)v, "F2");
             ui.AddButton(sec, "Cycle font (Classic / Blocky / Bold)",
                          () => _s.FontIndex = (_s.FontIndex + 1) % 3);
             ui.AddToggle(sec, "Labels & readouts", _s.ShowLabels,   v => _s.ShowLabels = v);
             ui.AddToggle(sec, "Title / voxel readout", _s.ShowHudPanel, v => _s.ShowHudPanel = v);
-            ui.AddToggle(sec, "Backdrop (grid + rings)", _s.ShowBackdrop, v => _s.ShowBackdrop = v);
-            ui.AddSlider(sec, "Readout plane Y", -1.0, 1.0, _s.PlaneY, v => _s.PlaneY = (float)v, "F2");
+            // The backdrop toggle and the readout-plane control are gone from the panel.
+            // The backdrop is still there on the G key, which the controls list already
+            // documents, so removing the row loses the clutter and not the feature. The
+            // readout plane keeps its default: it exists so the HUD sits on ONE flat plane,
+            // and moving it is not a thing anyone needs mid-session.
             ui.AddLiveInfo(sec, () =>
                 $"Drawn {_lastVoxels} / {_s.MaxVoxels} voxels" +
                 (_lastDropped > 0 ? $", {_lastDropped} dropped" : "") +
@@ -1678,21 +1705,20 @@ namespace EDes
             ui.AddInfo(sec, "Left-drag the preview to orbit the simulator camera; " +
                             "Ctrl+wheel zooms it. WASD orbits the scene, Q/E rolls, " +
                             "comma/period zooms, R resets.");
-            ui.AddToggle(sec, "SpaceNavigator enabled", _s.NavEnabled, v => _s.NavEnabled = v);
             ui.AddInfo(sec, "ONE sensitivity for all three translation axes and ONE for all " +
                             "three rotation axes — so the puck feels the same in X, Y and Z, and " +
                             "rotation can be tuned independently of translation.");
-            ui.AddSlider(sec, "Translation sensitivity (units/s)", 0.1, 40, _s.NavPanRate,
+            ui.AddNumber(sec, "Translation sensitivity (units/s)", _s.NavPanRate,
                          v => _s.NavPanRate = (float)v, "F2");
-            ui.AddSlider(sec, "Rotation sensitivity (rad/s)", 0.1, 20, _s.NavRotRate,
+            ui.AddNumber(sec, "Rotation sensitivity (rad/s)", _s.NavRotRate,
                          v => _s.NavRotRate = (float)v, "F2");
-            ui.AddSlider(sec, "Button zoom rate", 0.1, 10, _s.NavZoomRate,
+            ui.AddNumber(sec, "Button zoom rate", _s.NavZoomRate,
                          v => _s.NavZoomRate = (float)v, "F2");
-            ui.AddSlider(sec, "Translation full scale (raw counts)", 1, 1000, _s.NavFullScaleTrans,
+            ui.AddNumber(sec, "Translation full scale (raw counts)", _s.NavFullScaleTrans,
                          v => _s.NavFullScaleTrans = (float)v, "F0");
-            ui.AddSlider(sec, "Rotation full scale (raw counts)", 1, 1000, _s.NavFullScaleRot,
+            ui.AddNumber(sec, "Rotation full scale (raw counts)", _s.NavFullScaleRot,
                          v => _s.NavFullScaleRot = (float)v, "F0");
-            ui.AddSlider(sec, "Nav dead-zone (fraction)", 0, 0.5, _s.NavDeadzone,
+            ui.AddNumber(sec, "Nav dead-zone (fraction)", _s.NavDeadzone,
                          v => _s.NavDeadzone = (float)v, "F3");
             ui.AddInfo(sec, "The driver reports RAW counts, not -1..1, and NOT the same range for " +
                             "translation as for rotation. The two full-scale values convert them, " +
@@ -1738,11 +1764,11 @@ namespace EDes
                             "through the volume, everything dims except what the probe is " +
                             "over, and its details appear top-left.");
             ui.AddButton(sec, "Cycle Camera / Signal / Component inspector", ToggleInspect);
-            ui.AddSlider(sec, "Probe speed", 0.2, 12, _s.InspectRate,
+            ui.AddNumber(sec, "Probe speed", _s.InspectRate,
                          v => _s.InspectRate = (float)v, "F2");
-            ui.AddSlider(sec, "Dim for unhovered (1 = no dimming)", 0.1, 1.0, _s.InspectDim,
+            ui.AddNumber(sec, "Dim for unhovered (1 = no dimming)", _s.InspectDim,
                          v => _s.InspectDim = (float)v, "F2");
-            ui.AddSlider(sec, "Probe snap reach", 0.1, 2.0, _s.InspectSnap,
+            ui.AddNumber(sec, "Probe snap reach", _s.InspectSnap,
                          v => _s.InspectSnap = (float)v, "F2");
             ui.AddInfo(sec, "The probe reaches for the nearest TRACE or PART and draws a " +
                             "line to it — vias and layers are not selectable, since a " +

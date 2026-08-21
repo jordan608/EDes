@@ -138,6 +138,13 @@
                                    FontSize="10" FontWeight="Bold"
                                    Opacity="0.55"
                                    Margin="0,0,0,4"/>
+                        <TextBox DockPanel.Dock="Top"
+                                 x:Name="PickSearch"
+                                 Watermark="filter..."
+                                 FontSize="10"
+                                 Padding="4,2"
+                                 MinHeight="0"
+                                 Margin="0,0,0,4"/>
                         <ScrollViewer VerticalScrollBarVisibility="Auto"
                                       HorizontalScrollBarVisibility="Disabled">
                             <StackPanel x:Name="PickItems" Spacing="1"/>

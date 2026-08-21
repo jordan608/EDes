@@ -266,7 +266,9 @@ namespace EDes.Sim
             {
                 PanX += nav.Dx * panRate * dt;   // slide left / right  → scene left / right
                 PanY += nav.Dy * panRate * dt;   // push fore / aft     → scene depth
-                PanZ += nav.Dz * panRate * dt;   // lift up / down      → scene vertical
+                // Negated: -Z is up in this app, so lifting the cap has to SUBTRACT
+                // from z for the model to rise with your hand.
+                PanZ -= nav.Dz * panRate * dt;   // lift up / down      → scene vertical
             }
 
             // All three rotations share rotRate, so the puck feels isotropic in rotation

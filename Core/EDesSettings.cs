@@ -72,7 +72,6 @@ namespace EDes
         public volatile float PlaneY       = 0.1f;  // the HUD + scope plane
 
         // ── Camera / SpaceNavigator ───────────────────────────────────────────
-        public volatile bool  NavEnabled  = true;
         public volatile bool  ShowNavDiag = false;   // SpaceNav readout in the volume (key V)
         /// <summary>One sensitivity for ALL THREE translation axes, one for ALL THREE
         /// rotation axes, one for the button zoom. Deliberately not per-axis: the puck
