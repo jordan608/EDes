@@ -166,7 +166,7 @@ per-layer object counts and the grouped drill table are in the PCB tab.
 
 A dense 4-layer board with pours can ask for far more voxels than the display can draw.
 Everything is drawn through one budgeted batch (**Render budget → Max voxels / frame**), and
-draw order is priority order, so what you lose first is the backdrop, then labels, then
+draw order is priority order, so what you lose first is labels, then
 geometry. If a board looks thin, either raise the budget or reduce what is drawn (turn off
 pours, isolate a layer, lower the mesh point budget). The on-glass readout shows
 `N VOX` and `+N DROPPED` so you can see it happening rather than guessing.

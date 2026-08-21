@@ -67,7 +67,6 @@ namespace EDes
         public volatile int   FontIndex   = 2;      // 0 Classic, 1 Blocky, 2 Bold
         public volatile float TextWeight  = 1.0f;
         public volatile bool  ShowLabels  = true;
-        public volatile bool  ShowBackdrop = true;  // grid floor + orientation rings
         public volatile bool  ShowHudPanel = true;  // title / totals / voxel readout
         public volatile float PlaneY       = 0.1f;  // the HUD + scope plane
 

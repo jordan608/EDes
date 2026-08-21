@@ -154,7 +154,7 @@ public static class RealBoardCheck
 
             // The flat-shaded fill is the expensive part. Its cost is total triangle
             // area / voxel area, so it can be predicted rather than discovered on the
-            // display when the backdrop silently vanishes.
+            // display when geometry silently starts vanishing.
             double triAreaMm = 0;
             int tris = 0;
             foreach (var sol in board.Solids)

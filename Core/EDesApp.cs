@@ -22,7 +22,7 @@
 //      SpaceNavigator, the keyboard, the controller, and the preview window's
 //      left-drag — so all four feel like the same control.
 //    • Draw order IS priority order: mode content, then HUD text, then the
-//      backdrop. When the budget runs out the decoration is what disappears.
+//      HUD text. When the budget runs out the text is what disappears.
 //
 //  Axes: -Z is up, X is the layout's left/right, Y is depth. The HUD and scope
 //  live on the constant-Y plane PlaneY (default 0.1) and are NOT camera-
@@ -211,7 +211,6 @@ namespace EDes
 
             if (Down(VX_KEYS.KB_V)) _s.ShowNavDiag  = !_s.ShowNavDiag;
             if (Down(VX_KEYS.KB_L)) _s.ShowLabels   = !_s.ShowLabels;
-            if (Down(VX_KEYS.KB_G)) _s.ShowBackdrop = !_s.ShowBackdrop;
             if (Down(VX_KEYS.KB_R)) _cam.Reset();
 
             switch ((EDesMode)_s.Mode)
@@ -678,9 +677,9 @@ namespace EDes
                 case EDesMode.Pcb:       DrawPcbMode();   break;
             }
 
-            // Probe and its readout come BEFORE the HUD panel and the backdrop: when the
-            // probe is what you are driving, it is the last thing that should disappear
-            // to a tight budget, not the first.
+            // Probe and its readout come BEFORE the HUD panel: when the probe is what you
+            // are driving, it is the last thing that should disappear to a tight budget,
+            // not the first.
             if (_s.InspectMode)
             {
                 DrawProbeLeader();
@@ -695,7 +694,6 @@ namespace EDes
             // information nobody is reading at that moment. The text band is only a few
             // rows tall, so anything kept is something else lost.
             if (_s.ShowHudPanel && !ProbeHasSelection) DrawHudPanel();
-            if (_s.ShowBackdrop)  DrawBackdrop();     // last: decoration is dropped first
 
             _batch.Flush(ledHost, ref vs);
 
@@ -1073,33 +1071,6 @@ namespace EDes
 
         private static string F(float v) => v.ToString("0.00");
 
-        /// <summary>Grid floor + three orthogonal rings: cheap orientation cues that
-        /// stop the scene reading as objects floating in a void.</summary>
-        private void DrawBackdrop()
-        {
-            float r = _radius * 0.96f;
-            float floorZ = _zHalf * 0.99f;      // the actual floor of the volume
-            var up = new point3d(1, 0, 0);
-            var rt = new point3d(0, 1, 0);
-
-            for (int i = 1; i <= 3; i++)
-                _batch.Ring(_cam.Transform(0, 0, floorZ), r * i / 3f, up, rt, Palette.GridFloor, 4f);
-
-            for (int i = 0; i < 8; i++)
-            {
-                float a = i * MathF.PI / 4f;
-                _batch.Line(_cam.Transform(0, 0, floorZ),
-                            _cam.Transform(MathF.Cos(a) * r, MathF.Sin(a) * r, floorZ),
-                            Palette.GridFloor, 4f);
-            }
-
-            // Three great circles at the volume wall, one per plane.
-            float gr = MathF.Min(r, _zHalf * 0.95f);
-            _batch.Ring(_cam.Transform(0, 0, 0), gr, new point3d(1, 0, 0), new point3d(0, 1, 0), Palette.Globe, 4f);
-            _batch.Ring(_cam.Transform(0, 0, 0), gr, new point3d(1, 0, 0), new point3d(0, 0, 1), Palette.Globe, 4f);
-            _batch.Ring(_cam.Transform(0, 0, 0), gr, new point3d(0, 1, 0), new point3d(0, 0, 1), Palette.Globe, 4f);
-        }
-
         // ── Settings tab ──────────────────────────────────────────────────────
 
         // Immutable snapshot handed to the shell, swapped by reference. Rebuilt on the
@@ -1461,7 +1432,7 @@ namespace EDes
             ui.AddInfo(sec, "Higher is denser. Hatch only applies with filled pours on. " +
                             "Pours and hatch are usually the biggest voxel consumers on a " +
                             "board, so these two are the first knobs to turn when the " +
-                            "budget runs out and the backdrop starts disappearing.");
+                            "budget runs out and geometry starts disappearing.");
             ui.AddToggle(sec, "STEP / CAD wireframe", _s.PcbCad,     v => _s.PcbCad = v);
             ui.AddSlider(sec, "CAD brightness", 0.2, 2.0, _s.PcbCadBright,
                          v => _s.PcbCadBright = (float)v, "F2");
@@ -1644,8 +1615,8 @@ namespace EDes
         {
             var sec = ui.AddSection(stack, "Render budget & text", group);
             ui.AddInfo(sec, "Max voxels is a hard per-frame ceiling for EVERYTHING drawn, " +
-                            "text included. Draw order is priority order: the backdrop is " +
-                            "dropped first, then labels, then geometry.");
+                            "text included. Draw order is priority order: labels are dropped " +
+                            "before geometry.");
             ui.AddNumber(sec, "Max voxels / frame", _s.MaxVoxels,
                          v => _s.MaxVoxels = (int)v, "F0");
             ui.AddNumber(sec, "Min voxels per glyph cell", _s.MinTextCellVoxels,
@@ -1688,11 +1659,12 @@ namespace EDes
                          () => _s.FontIndex = (_s.FontIndex + 1) % 3);
             ui.AddToggle(sec, "Labels & readouts", _s.ShowLabels,   v => _s.ShowLabels = v);
             ui.AddToggle(sec, "Title / voxel readout", _s.ShowHudPanel, v => _s.ShowHudPanel = v);
-            // The backdrop toggle and the readout-plane control are gone from the panel.
-            // The backdrop is still there on the G key, which the controls list already
-            // documents, so removing the row loses the clutter and not the feature. The
-            // readout plane keeps its default: it exists so the HUD sits on ONE flat plane,
-            // and moving it is not a thing anyone needs mid-session.
+            // No backdrop row, because there is no backdrop: the grid floor and
+            // orientation rings are gone entirely. They were decoration competing for
+            // budget with the board, and on a transparent display they also crossed
+            // everything else in the volume. The readout plane keeps its default too --
+            // it exists so the HUD sits on ONE flat plane, and moving it mid-session is
+            // not a thing anyone needs.
             ui.AddLiveInfo(sec, () =>
                 $"Drawn {_lastVoxels} / {_s.MaxVoxels} voxels" +
                 (_lastDropped > 0 ? $", {_lastDropped} dropped" : "") +
@@ -1817,7 +1789,7 @@ namespace EDes
                 };
 
                 return "GLOBAL\n" +
-                       "Tab mode   L labels   G backdrop   R reset camera   Esc quit\n" +
+                       "Tab mode   L labels   R reset camera   Esc quit\n" +
                        "\nCAMERA\n" +
                        "WASD orbit   Q/E roll   , / . zoom   left-drag preview\n" +
                        "SpaceNav 6DOF   both puck buttons = inspection mode\n" +
