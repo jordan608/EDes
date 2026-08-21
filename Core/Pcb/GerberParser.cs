@@ -17,6 +17,12 @@
 //    X..Y..I..J..D01/2/3 draw / move / flash
 //    M02                 end of file
 //
+//  Object attributes: %TO.N,<net>*% (and the G04 #@! comment form) are read when
+//  present and attached to the objects that follow, up to %TD*%. They are how a
+//  Gerber can carry real net names — but they are OPTIONAL and most exports omit
+//  them entirely, which is why PcbNets derives connectivity geometrically rather
+//  than relying on them.
+//
 //  Deliberately NOT supported: aperture macros (%AM), step-and-repeat (%SR),
 //  and block apertures (%AB). Each is recorded as a note so the operator knows
 //  something was skipped rather than silently seeing a board with holes in it.
@@ -37,6 +43,29 @@ namespace EDes.Pcb
 {
     public static class GerberParser
     {
+        /// <summary>Net name currently in force from a %TO.N attribute, or empty.
+        ///
+        /// Static because the flash and the draw paths live in different methods and both
+        /// need it; the parser is already single-threaded per import (PcbImporter walks
+        /// files one at a time on the game thread), and it is reset at the top of Parse so
+        /// one file cannot leak a name into the next.</summary>
+        private static string currentNet = "";
+
+        /// <summary>Net name out of a TO attribute, or empty if it is not TO.N.
+        ///
+        /// The form is TO.N,&lt;net&gt; — and a net name may itself contain commas that the
+        /// spec escapes, so everything after the first comma is taken rather than just the
+        /// second field.</summary>
+        private static string NetFromAttribute(string cmd)
+        {
+            if (!cmd.StartsWith("TO.N", StringComparison.OrdinalIgnoreCase)) return "";
+            int comma = cmd.IndexOf(',');
+            if (comma < 0 || comma + 1 >= cmd.Length) return "";
+            string net = cmd.Substring(comma + 1).Trim().TrimEnd('*');
+            // N/C means "not connected" — a placeholder, not a net to light up.
+            return net == "N/C" ? "" : net;
+        }
+
         private const float ARC_SEG_DEG = 6f;      // arc flattening resolution
         private const int   MAX_APERTURE = 1000;
 
@@ -71,6 +100,7 @@ namespace EDes.Pcb
 
             var apertures = new Aperture[MAX_APERTURE];
             int current   = -1;
+            currentNet = "";       // never let one file's attribute leak into the next
             float x = 0, y = 0;
             PcbRegion? region = null;
 
@@ -133,6 +163,17 @@ namespace EDes.Pcb
                         }
                         continue;
                     }
+                    // Object attributes. TO.N names the net the following objects belong
+                    // to; TD deletes the attribute state. Only .N matters here — .P and
+                    // .C name pins and components, which the placement file already gives
+                    // us more reliably.
+                    if (cmd.StartsWith("TO"))
+                    {
+                        currentNet = NetFromAttribute(cmd);
+                        continue;
+                    }
+                    if (cmd.StartsWith("TD")) { currentNet = ""; continue; }
+
                     continue;       // any other extended command: ignore
                 }
 
@@ -146,7 +187,22 @@ namespace EDes.Pcb
                     // "G04 #@! TF.GenerationSoftware,Altium Designer,25.8.1" style
                     // attributes; scanning those for coordinates finds stray D/X/Y
                     // letters and injects phantom geometry, so skip them outright.
-                    if (token.StartsWith("G04")) continue;
+                    if (token.StartsWith("G04"))
+                    {
+                        // KiCad writes X2 attributes as G04 comments rather than %...%
+                        // commands, so the same attribute has to be read in both forms or
+                        // net names would be found in one tool's output and not the other.
+                        int bang = token.IndexOf("#@!", StringComparison.Ordinal);
+                        if (bang >= 0)
+                        {
+                            string attr = token.Substring(bang + 3).Trim();
+                            if (attr.StartsWith("TO", StringComparison.Ordinal))
+                                currentNet = NetFromAttribute(attr);
+                            else if (attr.StartsWith("TD", StringComparison.Ordinal))
+                                currentNet = "";
+                        }
+                        continue;
+                    }
 
                     if (token.StartsWith("M02") || token.StartsWith("M0")) { }   // end / stop
 
@@ -259,6 +315,8 @@ namespace EDes.Pcb
                             {
                                 var ap = apertures[current];
                                 layer.Pads.Add(new PcbPad(nx, ny, ap.W, ap.H, ap.Shape));
+                                if (currentNet.Length > 0)
+                                    layer.SetPadNetName(layer.Pads.Count - 1, currentNet);
                             }
                             x = nx; y = ny;
                             break;
@@ -284,6 +342,7 @@ namespace EDes.Pcb
         {
             var s = new PcbSeg(x0, y0, x1, y1, w);
             layer.Segs.Add(s);
+            if (currentNet.Length > 0) layer.SetSegNetName(layer.Segs.Count - 1, currentNet);
             layer.TrackLength += s.Length;
             if (w < layer.MinWidth) layer.MinWidth = w;
         }

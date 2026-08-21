@@ -106,6 +106,33 @@ namespace EDes.Pcb
 
         public int ObjectCount => Segs.Count + Pads.Count + Regions.Count;
 
+        // Net names from Gerber X2 %TO.N attributes. SPARSE dictionaries rather than
+        // arrays because the attributes are optional and usually absent — most exports
+        // carry none at all, and a name array per layer would then be pure overhead.
+        private Dictionary<int, string>? _segNets;
+        private Dictionary<int, string>? _padNets;
+
+        /// <summary>True if this layer carried any real net names.</summary>
+        public bool HasNetNames => _segNets != null || _padNets != null;
+
+        public void SetSegNetName(int segIndex, string net)
+        {
+            if (string.IsNullOrEmpty(net)) return;
+            (_segNets ??= new Dictionary<int, string>())[segIndex] = net;
+        }
+
+        public void SetPadNetName(int padIndex, string net)
+        {
+            if (string.IsNullOrEmpty(net)) return;
+            (_padNets ??= new Dictionary<int, string>())[padIndex] = net;
+        }
+
+        public string SegNetName(int segIndex)
+            => _segNets != null && _segNets.TryGetValue(segIndex, out var n) ? n : "";
+
+        public string PadNetName(int padIndex)
+            => _padNets != null && _padNets.TryGetValue(padIndex, out var n) ? n : "";
+
         /// <summary>User-chosen colour, or null to use the kind's default. Separate from
         /// the default rather than overwriting it so "reset to default" stays possible and
         /// so a re-import can tell a deliberate choice from an untouched layer.</summary>
@@ -230,6 +257,11 @@ namespace EDes.Pcb
         public readonly List<PcbHole>   Holes  = new();
         public readonly List<MeshCloud> Meshes = new();
 
+        /// <summary>Derived copper connectivity, or null until it is built. Rebuilt after
+        /// an import rather than on demand: it depends on every copper layer and every
+        /// hole, so building it lazily from a draw call would mean doing it mid-frame.</summary>
+        public PcbNets? Nets { get; set; }
+
         /// <summary>CAD solids from STEP imports, as edge wireframes. Kept separate from
         /// Meshes because they are drawn differently on purpose: a mesh becomes a surface
         /// point cloud, a CAD solid becomes its feature edges.</summary>
@@ -279,6 +311,7 @@ namespace EDes.Pcb
             Holes.Clear();
             Meshes.Clear();
             Solids.Clear();
+            Nets = null;
             ImportLog.Clear();
             ImportMs = 0;
             Components.Clear();

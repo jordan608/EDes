@@ -29,11 +29,13 @@
     <Compile Include="$(PcbSrc)\XlsxReader.cs" />
     <Compile Include="$(PcbSrc)\CadModel.cs" />
     <Compile Include="$(PcbSrc)\StepParser.cs" />
+    <Compile Include="$(PcbSrc)\PcbNets.cs" />
     <Compile Include="TestData.cs" />
     <Compile Include="DesignTreeChecks.cs" />
     <Compile Include="RealBoardCheck.cs" />
     <Compile Include="StepChecks.cs" />
     <Compile Include="ViaSpanChecks.cs" />
+    <Compile Include="NetChecks.cs" />
   </ItemGroup>
 
   <ItemGroup>

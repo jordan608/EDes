@@ -116,6 +116,11 @@ namespace EDes
         /// <summary>Probe speed, world units per second at full deflection.</summary>
         public volatile float InspectRate = 3.0f;
 
+        /// <summary>How far the probe reaches for something to select, world units. A
+        /// reach rather than a hit test: traces are one voxel wide, so requiring the probe
+        /// to be exactly on one would make selection almost impossible by hand.</summary>
+        public volatile float InspectSnap = 0.6f;
+
         /// <summary>What the probe is over, formatted for the shell's overlay. Written by
         /// the game thread, read by the UI; string assignment is atomic.</summary>
         public string InspectInfo = "";

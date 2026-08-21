@@ -53,6 +53,8 @@ namespace EDes.Pcb
         public bool  Inspect;          // probe active: dim everything it is not over
         public float ProbeX, ProbeY, ProbeZ;   // probe position, DISPLAY space
         public float DimFactor;        // brightness for everything not under the probe
+        public float SnapRange;        // how far the probe reaches for a target, world units
+        public float Pulse;            // 0..1 cyan<->white phase for the net highlight
         public float CadAmbient;       // floor brightness, so unlit edges never vanish
         public float CadLightX, CadLightY, CadLightZ;   // light direction, board frame
         public bool  ShowCursor;
@@ -70,14 +72,18 @@ namespace EDes.Pcb
     public sealed class InspectHit
     {
         public bool   Hit;
-        public string Kind  = "";     // "layer", "component", "solid"
+        public string Kind  = "";     // "trace", "component", "solid"
         public int    Index = -1;
         public string Title = "";
         public readonly List<string> Lines = new();
 
+        /// <summary>Net the hit belongs to, or -1. Set for traces only.</summary>
+        public int Net = -1;
+
         public void Clear()
         {
             Hit = false; Kind = ""; Index = -1; Title = "";
+            Net = -1;
             Lines.Clear();
         }
     }
@@ -92,6 +98,10 @@ namespace EDes.Pcb
         /// as deliberate rather than as a clipping bug.</summary>
         private const int BLIND_VIA_COLOUR = 0x40D0E8;
 
+        /// <summary>How many voxels wide a highlighted net draws. Thick enough to read as
+        /// "this one", not so thick that a ground net floods the board.</summary>
+        private const float HIGHLIGHT_VOXELS = 5f;
+
         /// <summary>Z of each copper layer for the current frame's layout. Rebuilt every
         /// Draw because layer visibility and spacing are live UI settings.</summary>
         private readonly System.Collections.Generic.List<float> _copperZ = new();
@@ -102,6 +112,15 @@ namespace EDes.Pcb
         // Resolved once per Draw, then consulted by every draw pass so exactly one thing
         // is at full brightness.
         private int _hoverLayer = -1, _hoverSolid = -1, _hoverComponent = -1;
+        private int _hoverNet = -1;
+
+        /// <summary>Where the probe snapped to, in DISPLAY space, so the app can draw the
+        /// leader line from the probe to it. Valid when ProbeHasTarget.</summary>
+        public bool    ProbeHasTarget { get; private set; }
+        public point3d ProbeTarget    { get; private set; }
+
+        /// <summary>Net the probe is on, for the highlight and the readout.</summary>
+        public int HoverNet => _hoverNet;
 
         // ── Board-to-world mapping from the last Draw (the app quotes it in the HUD) ──
         public float Scale   { get; private set; } = 1f;   // world units per mm
@@ -150,6 +169,10 @@ namespace EDes.Pcb
                 DrawLayer(batch, cam, layer, col, z, cx, cy, opt);
                 if (batch.BudgetHit) return;
             }
+
+            // AFTER the layers so it lands on top of them, and BEFORE the vias and the
+            // rest so a tight budget cannot eat the one thing the operator selected.
+            if (_hoverNet >= 0) DrawNetHighlight(batch, cam, board, opt, cx, cy, z0);
 
             if (opt.ShowVias)  DrawVias(batch, cam, board, opt, cx, cy, z0, Spacing, slots);
             if (opt.ShowHoles) DrawHoles(batch, cam, board, cx, cy, z0, Spacing, slots, opt);
@@ -478,6 +501,78 @@ namespace EDes.Pcb
             }
         }
 
+        // ── Net highlight ─────────────────────────────────────────────────────
+        // The whole net, thick, pulsing cyan to white. Thickness comes from repeated
+        // passes offset PERPENDICULAR to each segment in its own layer plane — the same
+        // trick the normal track drawing uses, because there is no line-width to set on a
+        // display that draws points.
+        //
+        // The net came from PcbNets, which derives connectivity geometrically: plain
+        // Gerber carries no net names, so "the same trace" means "the copper this is
+        // physically joined to, through its vias" rather than a name lookup.
+        private void DrawNetHighlight(VoxelBatch batch, SceneCamera cam, PcbBoard board,
+                                      in PcbViewOptions opt, float cx, float cy, float z0)
+        {
+            var nets = board.Nets;
+            if (nets == null) return;
+
+            // Cyan to white and back. Only the red and green channels move — blue is
+            // already full in both, so lerping it would be a no-op that reads as noise.
+            float t = Math.Clamp(opt.Pulse, 0f, 1f);
+            int rg = (int)(60f + 195f * t);
+            int col = (rg << 16) | (rg << 8) | 0xFF;
+
+            int passes = Math.Clamp((int)MathF.Round(HIGHLIGHT_VOXELS), 1, 9);
+
+            int index = 0;
+            for (int li = 0; li < board.Layers.Count; li++)
+            {
+                var layer = board.Layers[li];
+                if (!layer.Visible) continue;
+                bool isolatedOut = opt.IsolateLayer >= 0 && opt.IsolateLayer != li;
+                float z = z0 + index * Spacing;
+                index++;
+                if (isolatedOut) continue;
+
+                for (int i = 0; i < layer.Segs.Count; i++)
+                {
+                    if (nets.SegNet(li, i) != _hoverNet) continue;
+
+                    var sg = layer.Segs[i];
+                    float ax = Wx(sg.X0, cx), ay = Wy(sg.Y0, cy);
+                    float bx = Wx(sg.X1, cx), by = Wy(sg.Y1, cy);
+
+                    // Perpendicular in the layer plane, normalised. A zero-length segment
+                    // (a pad drawn as a degenerate draw) has no direction, so it just gets
+                    // the centre pass.
+                    float dx = bx - ax, dy = by - ay;
+                    float len = MathF.Sqrt(dx * dx + dy * dy);
+                    float nx = len > 1e-6f ? -dy / len : 0f;
+                    float ny = len > 1e-6f ?  dx / len : 0f;
+
+                    for (int k = 0; k < passes; k++)
+                    {
+                        float off = (k - (passes - 1) * 0.5f) * batch.Spacing;
+                        batch.Line(cam.Transform(ax + nx * off, ay + ny * off, z),
+                                   cam.Transform(bx + nx * off, by + ny * off, z), col);
+                    }
+                    if (batch.BudgetHit) return;
+                }
+
+                // Pads on the net too — a net that stopped at its pads would look broken
+                // exactly where it matters, at the component it connects to.
+                for (int i = 0; i < layer.Pads.Count; i++)
+                {
+                    if (nets.PadNet(li, i) != _hoverNet) continue;
+                    var pd = layer.Pads[i];
+                    float r = MathF.Max(pd.W, pd.H) * 0.5f * Scale;
+                    CircleXY(batch, cam, Wx(pd.X, cx), Wy(pd.Y, cy), z,
+                             MathF.Max(r, batch.Spacing * 2f), col, fill: true);
+                    if (batch.BudgetHit) return;
+                }
+            }
+        }
+
         // ── CAD surfaces: flat shading ────────────────────────────────────────
         // Flat shading in the strict sense: ONE normal per face, so every sample on a
         // face takes the same brightness and the facets read as facets. That is what
@@ -717,37 +812,121 @@ namespace EDes.Pcb
             _inspecting = opt.Inspect;
             _dimFactor  = Math.Clamp(opt.DimFactor <= 0f ? 0.75f : opt.DimFactor, 0f, 1f);
             _hoverLayer = _hoverSolid = _hoverComponent = -1;
+            _hoverNet   = -1;
+            ProbeHasTarget = false;
             Probe.Clear();
 
             if (!opt.Inspect) return;
 
             var scene = cam.InverseTransform(opt.ProbeX, opt.ProbeY, opt.ProbeZ);
             float cx = board.CentreX, cy = board.CentreY;
+            float snap = opt.SnapRange > 1e-4f ? opt.SnapRange : 0.6f;
 
-            // Scene space back to board millimetres.
-            float mmX = Scale > 1e-9f ? scene.x / Scale + cx : cx;
-            float mmY = Scale > 1e-9f ? scene.y / Scale + cy : cy;
+            // Only TRACES and PARTS are selectable. Vias and whole layers are excluded on
+            // purpose: a layer is always within half a slot of the probe so it would win
+            // every time and mask everything, and a via is a feature OF a net rather than
+            // a thing you inspect — selecting its net gets you the via anyway.
+            float bestD = float.MaxValue;
+            int   bestKind = 0;              // 1 = trace, 2 = part, 3 = solid
+            int   bestLayer = -1, bestSeg = -1, bestItem = -1;
+            point3d bestPt = default;
 
-            Probe.Lines.Add($"probe  {mmX:0.00}, {mmY:0.00} mm");
+            // ── Traces ────────────────────────────────────────────────────────
+            int index = 0;
+            for (int li = 0; li < board.Layers.Count; li++)
+            {
+                var layer = board.Layers[li];
+                if (!layer.Visible) continue;
+                bool isolatedOut = opt.IsolateLayer >= 0 && opt.IsolateLayer != li;
+                float lz = z0 + index * Spacing;
+                index++;
+                if (isolatedOut) continue;
+                if (layer.Kind is not (PcbLayerKind.CopperTop or PcbLayerKind.CopperInner
+                                       or PcbLayerKind.CopperBottom)) continue;
 
-            // ── STEP solids ───────────────────────────────────────────────────
+                for (int i = 0; i < layer.Segs.Count; i++)
+                {
+                    var sg = layer.Segs[i];
+                    float ax = Wx(sg.X0, cx), ay = Wy(sg.Y0, cy);
+                    float bx = Wx(sg.X1, cx), by = Wy(sg.Y1, cy);
+
+                    float d = PointToSegment(scene.x, scene.y, scene.z,
+                                             ax, ay, lz, bx, by, lz,
+                                             out float px, out float py, out float pz);
+                    if (d >= bestD) continue;
+                    bestD = d; bestKind = 1;
+                    bestLayer = li; bestSeg = i;
+                    bestPt = new point3d(px, py, pz);
+                }
+            }
+
+            // ── Parts: STEP bodies, then placement markers ────────────────────
             float zBase = z0 + opt.CadZOffset;
             for (int i = 0; i < board.Solids.Count; i++)
             {
                 var sol = board.Solids[i];
                 if (!sol.Visible || !sol.HasGeometry) continue;
-                if (mmX < sol.MinX - 0.2f || mmX > sol.MaxX + 0.2f) continue;
-                if (mmY < sol.MinY - 0.2f || mmY > sol.MaxY + 0.2f) continue;
 
-                // The solid occupies zBase - MaxZ*Scale .. zBase - MinZ*Scale (-Z is up).
-                float zHi = zBase - sol.MaxZ * Scale;
-                float zLo = zBase - sol.MinZ * Scale;
-                if (scene.z < zHi - 0.1f || scene.z > zLo + 0.1f) continue;
+                // Distance to the solid's box centre in scene space, which is enough for
+                // snapping — the probe only has to pick a winner, not measure it.
+                float sx = Wx((sol.MinX + sol.MaxX) * 0.5f, cx);
+                float sy = Wy((sol.MinY + sol.MaxY) * 0.5f, cy);
+                float sz = zBase - (sol.MinZ + sol.MaxZ) * 0.5f * Scale;
+                float d = Dist3(scene.x, scene.y, scene.z, sx, sy, sz);
+                if (d >= bestD) continue;
+                bestD = d; bestKind = 3; bestItem = i;
+                bestPt = new point3d(sx, sy, sz);
+            }
 
-                _hoverSolid = i;
+            for (int i = 0; i < board.Components.Count; i++)
+            {
+                var c = board.Components[i];
+                float sx = Wx(c.X, cx), sy = Wy(c.Y, cy);
+                float sz = z0 - Spacing * 0.55f;
+                float d = Dist3(scene.x, scene.y, scene.z, sx, sy, sz);
+                if (d >= bestD) continue;
+                bestD = d; bestKind = 2; bestItem = i;
+                bestPt = new point3d(sx, sy, sz);
+            }
+
+            if (bestKind == 0 || bestD > snap)
+            {
+                Probe.Lines.Add("nothing within reach");
+                return;
+            }
+
+            ProbeTarget    = cam.Transform(bestPt);
+            ProbeHasTarget = true;
+
+            if (bestKind == 1)
+            {
+                var layer = board.Layers[bestLayer];
+                int net = board.Nets?.SegNet(bestLayer, bestSeg) ?? -1;
+                _hoverLayer = bestLayer;
+                _hoverNet   = net;
+
                 Probe.Hit   = true;
-                Probe.Kind  = "solid";
-                Probe.Index = i;
+                Probe.Kind  = "trace";
+                Probe.Index = bestSeg;
+                Probe.Net   = net;
+                Probe.Title = board.Nets?.Name(net) ?? "trace";
+
+                var sg = layer.Segs[bestSeg];
+                Probe.Lines.Add($"layer     {layer.Kind}{(layer.Bottom ? " (bottom)" : "")}");
+                Probe.Lines.Add($"width     {sg.W:0.000} mm");
+                Probe.Lines.Add($"length    {sg.Length:0.00} mm");
+                if (net >= 0 && board.Nets != null)
+                    Probe.Lines.Add($"net       {board.Nets.Size(net)} copper object(s)");
+                return;
+            }
+
+            if (bestKind == 3)
+            {
+                var sol = board.Solids[bestItem];
+                _hoverSolid = bestItem;
+                Probe.Hit   = true;
+                Probe.Kind  = "part";
+                Probe.Index = bestItem;
                 Probe.Title = sol.Name.Length > 0 ? sol.Name : "STEP solid";
                 Probe.Lines.Add($"3D body   {sol.Edges.Count} edge(s), {sol.Faces.Count} face(s)");
                 Probe.Lines.Add($"size      {sol.MaxX - sol.MinX:0.00} x " +
@@ -756,56 +935,36 @@ namespace EDes.Pcb
                 return;
             }
 
-            // ── Placement markers ─────────────────────────────────────────────
-            // Tolerance in mm from a few voxels, so the probe is as forgiving on a big
-            // board as on a small one rather than pixel-exact on neither.
-            float tolMm = Scale > 1e-9f ? 1.5f : 1.5f;
-            int best = -1;
-            float bestD = float.MaxValue;
-            for (int i = 0; i < board.Components.Count; i++)
-            {
-                var c = board.Components[i];
-                float d = MathF.Sqrt((c.X - mmX) * (c.X - mmX) + (c.Y - mmY) * (c.Y - mmY));
-                if (d < bestD && d <= tolMm) { bestD = d; best = i; }
-            }
-            if (best >= 0)
-            {
-                var c = board.Components[best];
-                _hoverComponent = best;
-                Probe.Hit   = true;
-                Probe.Kind  = "component";
-                Probe.Index = best;
-                Probe.Title = c.Designator;
-                AddComponentInfo(board, c.Designator);
-                return;
-            }
+            var comp = board.Components[bestItem];
+            _hoverComponent = bestItem;
+            Probe.Hit   = true;
+            Probe.Kind  = "part";
+            Probe.Index = bestItem;
+            Probe.Title = comp.Designator;
+            AddComponentInfo(board, comp.Designator);
+        }
 
-            // ── Layers ────────────────────────────────────────────────────────
-            int index = 0;
-            for (int li = 0; li < board.Layers.Count; li++)
-            {
-                var layer = board.Layers[li];
-                if (!layer.Visible) continue;
-                if (opt.IsolateLayer >= 0 && opt.IsolateLayer != li) { index++; continue; }
+        private static float Dist3(float ax, float ay, float az, float bx, float by, float bz)
+        {
+            float dx = ax - bx, dy = ay - by, dz = az - bz;
+            return MathF.Sqrt(dx * dx + dy * dy + dz * dz);
+        }
 
-                float z = z0 + index * Spacing;
-                index++;
-                if (MathF.Abs(scene.z - z) > Spacing * 0.5f) continue;
-
-                _hoverLayer = li;
-                Probe.Hit   = true;
-                Probe.Kind  = "layer";
-                Probe.Index = li;
-                Probe.Title = layer.Name;
-                Probe.Lines.Add($"kind      {layer.Kind}{(layer.Bottom ? " (bottom)" : "")}");
-                Probe.Lines.Add($"objects   {layer.Segs.Count} seg, {layer.Pads.Count} pad, " +
-                                $"{layer.Regions.Count} pour");
-                if (layer.MinWidth < float.MaxValue)
-                    Probe.Lines.Add($"min width {layer.MinWidth:0.000} mm");
-                if (layer.TrackLength > 0)
-                    Probe.Lines.Add($"track len {layer.TrackLength:0.0} mm");
-                return;
-            }
+        /// <summary>Distance from a point to a segment, and the closest point on it — so
+        /// the leader line lands ON the trace rather than at its nearest endpoint.</summary>
+        private static float PointToSegment(float px, float py, float pz,
+                                            float ax, float ay, float az,
+                                            float bx, float by, float bz,
+                                            out float qx, out float qy, out float qz)
+        {
+            float dx = bx - ax, dy = by - ay, dz = bz - az;
+            float len2 = dx * dx + dy * dy + dz * dz;
+            float t = len2 > 1e-12f
+                      ? ((px - ax) * dx + (py - ay) * dy + (pz - az) * dz) / len2
+                      : 0f;
+            t = Math.Clamp(t, 0f, 1f);
+            qx = ax + dx * t; qy = ay + dy * t; qz = az + dz * t;
+            return Dist3(px, py, pz, qx, qy, qz);
         }
 
         private void AddComponentInfo(PcbBoard board, string designator)

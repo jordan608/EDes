@@ -444,6 +444,19 @@ namespace EDes
             _s.InspectX = x; _s.InspectY = y; _s.InspectZ = z;
         }
 
+        /// <summary>Leader line from the probe to whatever it snapped to.
+        ///
+        /// Both ends are already in display space — the probe by definition, the target
+        /// because the renderer transformed it — so this must NOT be camera-transformed
+        /// again. Drawn thin and dim so it reads as a pointer rather than as board
+        /// geometry.</summary>
+        private void DrawProbeLeader()
+        {
+            if (!_pcb.ProbeHasTarget) return;
+            _batch.Line(new point3d(_s.InspectX, _s.InspectY, _s.InspectZ),
+                        _pcb.ProbeTarget, 0x6080A0, 2f);
+        }
+
         /// <summary>The probe itself, plus its readout. Drawn in DISPLAY space and NOT
         /// camera-transformed: it is a physical pointer in the box, so rotating the scene
         /// must move the board past the probe, not carry the probe along with it.</summary>
@@ -563,6 +576,7 @@ namespace EDes
             // to a tight budget, not the first.
             if (_s.InspectMode)
             {
+                DrawProbeLeader();
                 DrawProbe();
                 DrawProbeReadout();
             }
@@ -826,6 +840,11 @@ namespace EDes
                 ProbeY        = _s.InspectY,
                 ProbeZ        = _s.InspectZ,
                 DimFactor     = _s.InspectDim,
+                SnapRange     = _s.InspectSnap,
+                // Slow deliberately: a fast pulse on a volumetric display reads as flicker
+                // rather than as emphasis, and this runs for as long as something is
+                // selected rather than as a brief confirmation.
+                Pulse         = 0.5f + 0.5f * MathF.Sin(_anim * MathF.PI * 2f / 2.4f),
                 CadAmbient    = _s.PcbCadAmbient,
                 CadLightX     = _s.PcbCadLightX,
                 CadLightY     = _s.PcbCadLightY,
@@ -1603,6 +1622,23 @@ namespace EDes
                          v => _s.InspectRate = (float)v, "F2");
             ui.AddSlider(sec, "Dim for unhovered (1 = no dimming)", 0.1, 1.0, _s.InspectDim,
                          v => _s.InspectDim = (float)v, "F2");
+            ui.AddSlider(sec, "Probe snap reach", 0.1, 2.0, _s.InspectSnap,
+                         v => _s.InspectSnap = (float)v, "F2");
+            ui.AddInfo(sec, "The probe reaches for the nearest TRACE or PART and draws a " +
+                            "line to it — vias and layers are not selectable, since a " +
+                            "layer is always under the probe and a via comes with its net " +
+                            "anyway. Selecting a trace lights the whole net it is joined " +
+                            "to, through its vias, pulsing cyan.");
+            ui.AddLiveInfo(sec, () =>
+            {
+                var nets = _board.Nets;
+                if (nets == null || nets.NetCount == 0) return "no copper connectivity built";
+                return $"{nets.NetCount} net(s) derived from copper geometry"
+                     + (_pcb.HoverNet >= 0
+                        ? $"   selected: {nets.Name(_pcb.HoverNet)} "
+                          + $"({nets.Size(_pcb.HoverNet)} object(s))"
+                        : "");
+            }, 0.3);
             ui.AddLiveInfo(sec, () => _s.InspectMode
                 ? $"INSPECTION  probe {_s.InspectX:0.00}, {_s.InspectY:0.00}, {_s.InspectZ:0.00}"
                 : "CAMERA mode", 0.3);

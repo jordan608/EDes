@@ -401,6 +401,11 @@ namespace EDes.Pcb
             }
 
             int linked = LinkSolidsToComponents(board);
+
+            // Copper connectivity, once every layer and hole is in. Built here rather than
+            // on demand because it depends on the WHOLE board, so a lazy build would land
+            // in the middle of a draw call.
+            board.Nets = PcbNets.Build(board);
             board.ImportMs = (int)totalWatch.ElapsedMilliseconds;
             progress?.Invoke("");
 

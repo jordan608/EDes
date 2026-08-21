@@ -199,6 +199,62 @@ public static class RealBoardCheck
         CheckTrue("aperture library was NOT parsed as a layer",
                   !board.Layers.Exists(l => l.Name.EndsWith(".apr", StringComparison.OrdinalIgnoreCase) ||
                                             l.Name.EndsWith(".APR_LIB", StringComparison.OrdinalIgnoreCase)));
+        // ── Derived copper connectivity ──────────────────────────────────────
+        {
+            var nets = board.Nets;
+            CheckTrue("nets were built", nets != null);
+            if (nets != null)
+            {
+                int copperObjects = 0, biggest = 0, singletons = 0;
+                for (int n = 0; n < nets.NetCount; n++)
+                {
+                    int sz = nets.Size(n);
+                    copperObjects += sz;
+                    if (sz > biggest) biggest = sz;
+                    if (sz == 1) singletons++;
+                }
+
+                int copperSegs = 0, copperPads = 0;
+                foreach (var l in board.Layers)
+                    if (l.Kind is PcbLayerKind.CopperTop or PcbLayerKind.CopperInner
+                                 or PcbLayerKind.CopperBottom)
+                    { copperSegs += l.Segs.Count; copperPads += l.Pads.Count; }
+
+                Console.WriteLine($"nets: {nets.NetCount} over {copperObjects} copper objects " +
+                                  $"({copperSegs} seg + {copperPads} pad), biggest {biggest}, " +
+                                  $"{singletons} singleton(s)");
+
+                // Every copper object must land on exactly one net — none orphaned, none
+                // double-counted. This is the invariant that catches an indexing slip.
+                CheckTrue("every copper object is on exactly one net",
+                          copperObjects == copperSegs + copperPads);
+
+                // Sanity on the shape of the answer. One giant net would mean the joining
+                // is too eager (mid-span crossings, or pours swallowed); all singletons
+                // would mean it is joining nothing at all.
+                CheckTrue("more than one net was found", nets.NetCount > 1);
+                CheckTrue("no single net swallowed the whole board",
+                          biggest < copperObjects);
+                CheckTrue("at least some objects actually joined up",
+                          singletons < nets.NetCount);
+
+                // Names are derived here, because this export carries no TO.N attributes.
+                CheckTrue("derived names say they are derived",
+                          nets.Name(0).Contains("derived"));
+                CheckTrue("no layer claimed real net names",
+                          board.Layers.TrueForAll(l => !l.HasNetNames));
+
+                // Determinism: the same board must give the same numbering, or a net's
+                // label and colour would change between imports.
+                var again = PcbNets.Build(board);
+                bool same = again.NetCount == nets.NetCount;
+                for (int li = 0; li < board.Layers.Count && same; li++)
+                    for (int i = 0; i < board.Layers[li].Segs.Count; i++)
+                        if (again.SegNet(li, i) != nets.SegNet(li, i)) { same = false; break; }
+                CheckTrue("net numbering is deterministic across rebuilds", same);
+            }
+        }
+
         // ── Stack order is physically correct ────────────────────────────────
         // The bug this guards: PcbLayerKind has one Silkscreen kind for BOTH sides, so
         // before PcbLayer.Bottom existed the bottom silkscreen sorted to slot 0 and drew
