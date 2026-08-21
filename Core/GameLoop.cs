@@ -117,7 +117,8 @@ namespace EDes
             // MainWindow.axaml.cs's OnStatusTick and the button Click handlers.
             // Detection cannot distinguish VX2 from VX2XL (both expose the same
             // two USB boards) — swap VX2XL for VX2 below if you need VX2 defaults
-            // (only DefaultMotorRpm differs; both are otherwise identical here).
+            // (only Default
+            // Rpm differs; both are otherwise identical here).
             var spec = VoxonHardwareCheck.VX2XL;
             var preflightUi = VoxonPreflight.FromCallbacks(
                 showStatus:  (msg, warn) => { settings.SplashStatus = msg; settings.SplashWarning = warn; },

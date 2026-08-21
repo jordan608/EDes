@@ -93,10 +93,21 @@ namespace EDes.Sim
             => x * x + y * y <= Radius * Radius && z <= ZHalf && z >= -ZHalf;
 
         /// <summary>Add one voxel. Returns false if dropped (out of bounds or over budget).</summary>
+        /// <summary>Set false only if the display turns out to render intermediate
+        /// colours usefully. On a one-bit-per-channel unit it does not: a dark colour is
+        /// unreliable at best and invisible at worst, while costing the same budget as a
+        /// bright one.</summary>
+        public static bool SnapColours = true;
+
         public bool Add(float x, float y, float z, int col)
         {
             if (_n >= Limit || !InBounds(x, y, z)) { Dropped++; return false; }
-            _x[_n] = x; _y[_n] = y; _z[_n] = z; _c[_n] = col;
+            // Snapped HERE rather than at each call site. Every voxel the app draws passes
+            // through this method (invariant 8), so doing it once here means no renderer
+            // can leak an unshowable colour however it arrived at one -- including via a
+            // brightness scale or a lighting ramp that had no way of knowing better.
+            _x[_n] = x; _y[_n] = y; _z[_n] = z;
+            _c[_n] = SnapColours ? Palette.Snap(col) : col;
             _n++;
             return true;
         }

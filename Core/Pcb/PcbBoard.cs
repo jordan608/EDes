@@ -141,21 +141,47 @@ namespace EDes.Pcb
         /// <summary>Colour actually drawn (packed 0xRRGGBB).</summary>
         public int Colour => ColourOverride ?? DefaultColour;
 
-        /// <summary>Colour for this layer kind, ignoring any override.</summary>
+        /// <summary>Colour for this layer kind, ignoring any override.
+        ///
+        /// All seven of the display's colours and nothing else -- see Palette's header.
+        /// There are more layer kinds than colours, so the ones that must share a colour
+        /// are separated by DefaultPattern instead. That is also how the two SIDES of
+        /// silkscreen, mask and paste are told apart, since they share a kind.</summary>
         public int DefaultColour => Kind switch
         {
-            PcbLayerKind.CopperTop    => 0xFF5A3C,
-            PcbLayerKind.CopperBottom => 0x3C8CFF,
-            PcbLayerKind.CopperInner  => 0xC8A03C,
-            PcbLayerKind.Silkscreen   => 0xF0F0F0,
-            PcbLayerKind.SolderMask   => 0x2C7A4B,
-            PcbLayerKind.Paste        => 0x9AA0A6,
-            PcbLayerKind.PadMaster    => 0xD08A5A,
-            PcbLayerKind.Outline      => 0xFFE066,
-            PcbLayerKind.Mechanical   => 0x7A6ACF,
-            PcbLayerKind.Drill        => 0x808080,
-            PcbLayerKind.Mesh         => 0x66D9C0,
-            _                         => 0x8899AA,
+            PcbLayerKind.CopperTop    => Sim.Palette.Red,
+            PcbLayerKind.CopperBottom => Sim.Palette.Blue,
+            PcbLayerKind.CopperInner  => Sim.Palette.Green,
+            PcbLayerKind.Silkscreen   => Sim.Palette.White,
+            PcbLayerKind.SolderMask   => Sim.Palette.Cyan,
+            PcbLayerKind.Paste        => Sim.Palette.Magenta,
+            PcbLayerKind.PadMaster    => Sim.Palette.Yellow,
+            PcbLayerKind.Outline      => Sim.Palette.Yellow,
+            PcbLayerKind.Mechanical   => Sim.Palette.Magenta,
+            PcbLayerKind.Drill        => Sim.Palette.White,
+            PcbLayerKind.Mesh         => Sim.Palette.Cyan,
+            _                         => Sim.Palette.Magenta,
+        };
+
+        /// <summary>How this layer's tracks are stroked: 0 solid, 1 dashed, 2 dotted.
+        ///
+        /// The second axis of layer identity, because seven colours cannot label twelve
+        /// kinds across two sides. Colour says WHAT a layer is, pattern says which side or
+        /// which of a colour-sharing pair -- so Outline is solid yellow while PadMaster is
+        /// dotted yellow, and bottom-side layers dash where top-side layers do not.</summary>
+        public int Pattern => PatternOverride ?? DefaultPattern;
+
+        public int? PatternOverride;
+
+        public int DefaultPattern => Kind switch
+        {
+            PcbLayerKind.Silkscreen => Bottom ? 1 : 0,
+            PcbLayerKind.SolderMask => Bottom ? 1 : 0,
+            PcbLayerKind.Paste      => Bottom ? 2 : 0,
+            PcbLayerKind.PadMaster  => 2,
+            PcbLayerKind.Mechanical => 1,
+            PcbLayerKind.Drill      => 2,
+            _                       => 0,
         };
     }
 

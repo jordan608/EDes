@@ -174,11 +174,15 @@ namespace EDes.Pcb
                 var layer = board.Layers[li];
                 if (!LayerShown(layer, opt, li)) continue;
 
-                float z   = z0 + index * Spacing;
-                int   col = Palette.Scale(layer.Colour, opt.Brightness * Dim(_hoverLayer == li));
+                float z    = z0 + index * Spacing;
+                int   col  = layer.Colour;          // snapped at the batch; see Palette
+                // De-emphasis and brightness both act on SPACING now, for the same reason:
+                // colour scaling cannot express either on a seven-colour display.
+                float dimS = DimSpacing(_hoverLayer == li)
+                           / MathF.Max(0.05f, opt.Brightness);
                 index++;
 
-                DrawLayer(batch, cam, layer, col, z, cx, cy, opt);
+                DrawLayer(batch, cam, layer, col, z, cx, cy, opt, dimS);
                 if (batch.BudgetHit) return;
             }
 
@@ -199,7 +203,7 @@ namespace EDes.Pcb
 
         // ── One layer ─────────────────────────────────────────────────────────
         private void DrawLayer(VoxelBatch batch, SceneCamera cam, PcbLayer layer, int col, float z,
-                               float cx, float cy, in PcbViewOptions opt)
+                               float cx, float cy, in PcbViewOptions opt, float dimS)
         {
             // Tracks
             foreach (var s in layer.Segs)
@@ -216,10 +220,10 @@ namespace EDes.Pcb
                 for (int k = 0; k < passes; k++)
                 {
                     float off = (k - (passes - 1) * 0.5f) * batch.Spacing;
-                    batch.Line(
+                    PatternLine(batch,
                         cam.Transform(Wx(s.X0, cx) + px * off, Wy(s.Y0, cy) + py * off, z),
                         cam.Transform(Wx(s.X1, cx) + px * off, Wy(s.Y1, cy) + py * off, z),
-                        col);
+                        col, dimS, layer.Pattern);
                 }
                 if (batch.BudgetHit) return;
             }
@@ -278,6 +282,43 @@ namespace EDes.Pcb
                                                      Palette.Scale(col, 0.35f), opt);
                     if (batch.BudgetHit) return;
                 }
+            }
+        }
+
+        /// <summary>A line stroked solid, dashed or dotted.
+        ///
+        /// The second axis of layer identity. Seven colours cannot label twelve layer
+        /// kinds across two sides of a board, so colour says WHAT a layer is and pattern
+        /// says which side or which of a colour-sharing pair — dotted yellow is the pad
+        /// master where solid yellow is the outline, and bottom-side layers dash where
+        /// their top-side counterparts do not.
+        ///
+        /// Dash lengths are in VOXELS, not millimetres, so a dash never falls below the
+        /// display's resolution and collapse into a solid line at one board scale while
+        /// looking right at another.</summary>
+        private static void PatternLine(VoxelBatch batch, point3d a, point3d b,
+                                        int col, float spacingMul, int pattern)
+        {
+            if (pattern <= 0) { batch.Line(a, b, col, spacingMul); return; }
+
+            float dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+            float len = MathF.Sqrt(dx * dx + dy * dy + dz * dz);
+            if (len <= 1e-6f) { batch.Add(a, col); return; }
+
+            // dashed: 6 on, 4 off.   dotted: 2 on, 4 off.
+            float on  = batch.Spacing * (pattern == 1 ? 6f : 2f);
+            float off = batch.Spacing * 4f;
+            float period = on + off;
+            if (period <= 1e-6f) { batch.Line(a, b, col, spacingMul); return; }
+
+            for (float t = 0f; t < len; t += period)
+            {
+                float t1 = MathF.Min(t + on, len);
+                float f0 = t / len, f1 = t1 / len;
+                batch.Line(new point3d(a.x + dx * f0, a.y + dy * f0, a.z + dz * f0),
+                           new point3d(a.x + dx * f1, a.y + dy * f1, a.z + dz * f1),
+                           col, spacingMul);
+                if (batch.BudgetHit) return;
             }
         }
 
@@ -515,7 +556,12 @@ namespace EDes.Pcb
             // is printed on the board underneath the parts. z0 is the topmost layer plane,
             // and -Z is up, so subtracting height from it lifts the model clear.
             float zBase = z0 + opt.CadZOffset;
-            float bright = opt.CadBrightness > 0f ? opt.CadBrightness : opt.Brightness;
+            // Brightness as DENSITY. Scaling the colour cannot brighten anything (see
+            // Palette), but packing more voxels into the same area genuinely does look
+            // brighter on a volumetric display -- so the slider keeps its meaning and
+            // starts working again instead of being a no-op.
+            float bright   = opt.CadBrightness > 0f ? opt.CadBrightness : opt.Brightness;
+            float brightMul = 1f / MathF.Max(0.05f, bright);
 
             // Normalise the light once, not per edge. A zero vector would divide by zero
             // and blacken the model, so it falls back to lighting from above.
@@ -531,19 +577,30 @@ namespace EDes.Pcb
                 var solid = board.Solids[si];
                 if (!solid.Visible || solid.Edges.Count == 0) continue;
 
-                int baseCol = Palette.Scale(solid.Colour, bright * Dim(_hoverSolid == si));
+                // Colour is snapped at the batch, so scaling it here would achieve
+                // nothing; de-emphasis is the spacing multiplier folded in below.
+                int   baseCol = solid.Colour;
+                float solidDim = DimSpacing(_hoverSolid == si);
 
                 foreach (var e in solid.Edges)
                 {
-                    int col = baseCol;
+                    // Two-sided |N·L|: the SIGN is meaningless on a display with no
+                    // viewpoint, where every face is seen from both sides at once, so the
+                    // magnitude is what carries the shape.
+                    //
+                    // Expressed as SPACING, not brightness. A darker colour is not
+                    // available (see Palette): edges facing across the light are drawn
+                    // sparser instead, which reads as recessive and costs less budget
+                    // rather than the same.
+                    float mul = 1f;
                     if (opt.CadLighting && e.HasNormal)
                     {
-                        // Two-sided N·L: the sign of the dot is meaningless on a display
-                        // with no viewpoint, since every face is seen from both sides at
-                        // once. The magnitude is what carries the shape, so take |N·L|.
-                        float ndl = MathF.Abs(e.NX * lx + e.NY * ly + e.NZ * lz);
-                        col = Palette.Scale(baseCol, ambient + (1f - ambient) * ndl);
+                        float ndl   = MathF.Abs(e.NX * lx + e.NY * ly + e.NZ * lz);
+                        float shade = ambient + (1f - ambient) * ndl;
+                        mul = 1f / MathF.Max(0.15f, shade);
                     }
+                    mul *= solidDim * brightMul;
+                    int col = baseCol;
 
                     // A polyline, so consecutive points are joined — drawing the points
                     // alone would dot a long straight edge into two lonely voxels.
@@ -553,7 +610,7 @@ namespace EDes.Pcb
                                               zBase - e.Z[i - 1] * Scale);
                         var b = cam.Transform(Wx(e.X[i], cx), Wy(e.Y[i], cy),
                                               zBase - e.Z[i] * Scale);
-                        batch.Line(a, b, col);
+                        batch.Line(a, b, col, mul);
                     }
                     if (batch.BudgetHit) return;
                 }
@@ -651,7 +708,12 @@ namespace EDes.Pcb
                                   in PcbViewOptions opt, float cx, float cy, float z0)
         {
             float zBase = z0 + opt.CadZOffset;   // same anchor as the wireframe
-            float bright = opt.CadBrightness > 0f ? opt.CadBrightness : opt.Brightness;
+            // Brightness as DENSITY. Scaling the colour cannot brighten anything (see
+            // Palette), but packing more voxels into the same area genuinely does look
+            // brighter on a volumetric display -- so the slider keeps its meaning and
+            // starts working again instead of being a no-op.
+            float bright   = opt.CadBrightness > 0f ? opt.CadBrightness : opt.Brightness;
+            float brightMul = 1f / MathF.Max(0.05f, bright);
 
             float lx = opt.CadLightX, ly = opt.CadLightY, lz = opt.CadLightZ;
             float ll = MathF.Sqrt(lx * lx + ly * ly + lz * lz);
@@ -669,10 +731,20 @@ namespace EDes.Pcb
                 var solid = board.Solids[si];
                 if (!solid.Visible || solid.Faces.Count == 0) continue;
 
-                int baseCol = Palette.Scale(solid.Colour, bright * Dim(_hoverSolid == si));
+                int   baseCol  = solid.Colour;
+                float solidDim = DimSpacing(_hoverSolid == si);
 
                 foreach (var face in solid.Faces)
                 {
+                    // SIGNED max(0, N·L) here, unlike the edge pass: an edge is shared
+                    // by two faces pointing opposite ways so its sign means nothing,
+                    // whereas a face has one outward normal and the sign is exactly what
+                    // makes a face turned away from the light recede.
+                    //
+                    // And again as DENSITY: a lit face is sampled at the full step, a face
+                    // facing away is sampled sparsely. That is what flat shading looks like
+                    // on a display with seven colours and no brightness axis — it is
+                    // dithering, which is the honest way to get tone out of one bit.
                     float shade = ambient;
                     if (opt.CadLighting && face.HasNormalSet)
                     {
@@ -680,7 +752,8 @@ namespace EDes.Pcb
                         if (ndl < 0f) ndl = 0f;
                         shade = ambient + (1f - ambient) * ndl;
                     }
-                    int col = Palette.Scale(baseCol, shade);
+                    int   col      = baseCol;
+                    float faceStep = step / MathF.Max(0.12f, shade) * solidDim * brightMul;
 
                     for (int t = 0; t < face.TriCount; t++)
                     {
@@ -688,7 +761,7 @@ namespace EDes.Pcb
                         var a = cam.Transform(Wx(face.X[i],     cx), Wy(face.Y[i],     cy), zBase - face.Z[i]     * Scale);
                         var b = cam.Transform(Wx(face.X[i + 1], cx), Wy(face.Y[i + 1], cy), zBase - face.Z[i + 1] * Scale);
                         var c = cam.Transform(Wx(face.X[i + 2], cx), Wy(face.Y[i + 2], cy), zBase - face.Z[i + 2] * Scale);
-                        FillTri(batch, a, b, c, col, step);
+                        FillTri(batch, a, b, c, col, faceStep);
                         if (batch.BudgetHit) return;
                     }
                 }
@@ -865,13 +938,29 @@ namespace EDes.Pcb
             };
         }
 
-        /// <summary>Brightness multiplier: full for the thing under the probe, dimmed for
-        /// everything else, and untouched when not inspecting.</summary>
-        private float Dim(bool hovered)
+        /// <summary>De-emphasis as a SPACING multiplier: 1 for the thing under the probe,
+        /// larger for everything else, so unselected geometry is drawn SPARSER rather than
+        /// darker.
+        ///
+        /// It has to work this way. Brightness is not a dimension on a seven-colour
+        /// display — Palette.Snap sends a dimmed colour straight back to where it started,
+        /// so the old brightness-based dimming became a no-op the moment snapping was
+        /// added. Density is the dimension that survives, and it has the useful side
+        /// effect of GIVING BACK budget for the thing you are actually looking at rather
+        /// than spending the same on what you are not.</summary>
+        private float DimSpacing(bool hovered)
         {
-            if (!_inspecting) return 1f;
-            return hovered ? 1f : _dimFactor;
+            if (!_inspecting || hovered) return 1f;
+            // 0.75 dim -> 1.33x spacing, i.e. about half the voxels in 2D.
+            return 1f / MathF.Max(0.05f, _dimFactor);
         }
+
+        /// <summary>Kept for pads and outlines, which are drawn as shapes rather than
+        /// sampled lines and so have no spacing to stretch. Returns 1 or 0: below the
+        /// threshold an unselected shape is skipped entirely, which is the only "dimmer"
+        /// a fixed-colour shape has.</summary>
+        private bool DimVisible(bool hovered)
+            => !_inspecting || hovered || _dimFactor > 0.35f;
 
         private bool  _inspecting;
         private float _dimFactor = 0.75f;

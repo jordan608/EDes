@@ -1415,7 +1415,15 @@ namespace EDes
 
             ui.AddSlider(sec, "Layer spacing", 0.02, 1.5, _s.LayerSpacing, v => _s.LayerSpacing = (float)v, "F2");
             ui.AddSlider(sec, "Track width scale", 0.1, 6, _s.TrackScale, v => _s.TrackScale = (float)v, "F2");
-            ui.AddSlider(sec, "Brightness", 0.2, 2.0, _s.PcbBrightness, v => _s.PcbBrightness = (float)v, "F2");
+            ui.AddSlider(sec, "Brightness (voxel density)", 0.2, 3.0, _s.PcbBrightness,
+                         v => _s.PcbBrightness = (float)v, "F2");
+            ui.AddInfo(sec, "The display shows seven colours — red, green, blue, cyan, " +
+                            "magenta, yellow, white — and nothing else, so brightness is " +
+                            "not a dimension it has. It is DENSITY instead: more voxels in " +
+                            "the same area genuinely does look brighter, and a dark colour " +
+                            "would just be invisible while costing the same budget. Layers " +
+                            "that must share a colour are told apart by pattern (solid, " +
+                            "dashed, dotted) rather than by shade.");
             ui.AddSlider(sec, "Isolate layer (-1 = all)", -1, 31, _s.PcbIsolate, v => _s.PcbIsolate = (int)v, "F0");
             ui.AddToggle(sec, "Pads",             _s.PcbPads,        v => _s.PcbPads = v);
             ui.AddToggle(sec, "Copper pours",     _s.PcbRegions,     v => _s.PcbRegions = v);

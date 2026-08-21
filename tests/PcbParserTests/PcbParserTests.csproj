@@ -20,6 +20,10 @@
 
   <ItemGroup>
     <Compile Include="Program.cs" />
+    <!-- Palette only needs System, so pulling it in keeps ONE definition of the
+         display's seven colours instead of duplicating hex literals here, without
+         dragging in the Avalonia/Voxon chain this harness exists to avoid. -->
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Sim\Palette.cs" />
     <Compile Include="$(PcbSrc)\PcbBoard.cs" />
     <Compile Include="$(PcbSrc)\GerberParser.cs" />
     <Compile Include="$(PcbSrc)\ExcellonParser.cs" />
