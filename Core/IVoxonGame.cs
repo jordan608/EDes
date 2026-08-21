@@ -46,9 +46,22 @@ namespace EDes
         /// layer EXISTS and is hidden, rather than simply missing.</summary>
         public readonly bool   Hidden;
 
-        public LegendRow(string label, int colour, bool hidden = false)
+        /// <summary>Stable identifier the shell hands back when the row is toggled or
+        /// recoloured. A KEY rather than the row's index on purpose: an import can
+        /// replace the whole layer list between the snapshot the shell is showing and the
+        /// click it sends back, and an index would then land on a different layer.</summary>
+        public readonly string Key;
+
+        /// <summary>Whether this row offers a checkbox / a colour swatch. A row that
+        /// stands for a derived count rather than a drawable thing offers neither.</summary>
+        public readonly bool CanToggle;
+        public readonly bool CanRecolour;
+
+        public LegendRow(string label, int colour, bool hidden = false, string key = "",
+                         bool canToggle = false, bool canRecolour = false)
         {
             Label = label; Colour = colour; Hidden = hidden;
+            Key = key; CanToggle = canToggle; CanRecolour = canRecolour;
         }
     }
 
@@ -96,5 +109,12 @@ namespace EDes
         /// while the game thread is free to rebuild it, so handing back a live list
         /// would tear or throw mid-enumeration. Swap a fresh array in instead.</summary>
         IReadOnlyList<LegendRow> Legend => Array.Empty<LegendRow>();
+
+        /// <summary>Show or hide what a legend row stands for. Called on the UI thread;
+        /// implementations must be safe against a concurrent import.</summary>
+        void SetLegendVisible(string key, bool visible) { }
+
+        /// <summary>Recolour what a legend row stands for (packed 0xRRGGBB).</summary>
+        void SetLegendColour(string key, int colour) { }
     }
 }

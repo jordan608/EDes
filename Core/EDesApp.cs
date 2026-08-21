@@ -170,6 +170,10 @@ namespace EDes
             var sw = System.Diagnostics.Stopwatch.StartNew();
             bool ok = PcbImporter.Import(path, _board, Math.Max(1000, _s.MeshPointBudget),
                                          f => _s.PcbImportStatus = f);
+
+            // Before anything draws: an import resets every layer to its defaults, so the
+            // user's own visibility and colour choices have to be laid back over the top.
+            ApplyLayerPrefs();
             sw.Stop();
 
             var sb = new StringBuilder();
@@ -595,6 +599,7 @@ namespace EDes
                 CadLighting   = _s.PcbCadLighting,
                 CadSurfaces   = _s.PcbCadSurfaces,
                 CadSurfaceDensity = _s.PcbCadSurfaceDensity,
+                CadZOffset    = _s.PcbCadZOffset,
                 CadAmbient    = _s.PcbCadAmbient,
                 CadLightX     = _s.PcbCadLightX,
                 CadLightY     = _s.PcbCadLightY,
@@ -798,7 +803,9 @@ namespace EDes
                     var layer = _board.Layers[li];
                     bool isolatedOut = _s.PcbIsolate >= 0 && _s.PcbIsolate != li;
                     bool shown = layer.Visible && !isolatedOut;
-                    rows.Add(new LegendRow($"{layer.Kind}  {layer.Name}", layer.Colour, !shown));
+                    rows.Add(new LegendRow($"{layer.Kind}  {layer.Name}", layer.Colour, !shown,
+                                           key: "layer:" + layer.Name,
+                                           canToggle: true, canRecolour: true));
                 }
 
                 if (_s.PcbVias && _board.Holes.Count > 0)
@@ -810,18 +817,110 @@ namespace EDes
                         if (!PcbBoard.IsVia(h, _s.PcbViaMaxDia)) continue;
                         if (h.IsBlind(copper)) blind++; else through++;
                     }
-                    if (through > 0) rows.Add(new LegendRow($"via (through) x{through}", 0xE8A020));
-                    if (blind   > 0) rows.Add(new LegendRow($"via (blind/buried) x{blind}", 0x40D0E8));
+                    if (through > 0)
+                        rows.Add(new LegendRow($"via (through) x{through}", 0xE8A020,
+                                               key: "vias", canToggle: true));
+                    if (blind > 0)
+                        rows.Add(new LegendRow($"via (blind/buried) x{blind}", 0x40D0E8,
+                                               key: "vias", canToggle: true));
                 }
 
-                if (_s.PcbCad && _board.Solids.Count > 0)
-                    rows.Add(new LegendRow($"STEP wireframe x{_board.Solids.Count}", 0x9FC5E8));
+                if (_board.Solids.Count > 0)
+                    rows.Add(new LegendRow($"STEP model x{_board.Solids.Count}", 0x9FC5E8,
+                                           !_s.PcbCad, key: "cad", canToggle: true));
 
-                if (_s.PcbMeshes && _board.Meshes.Count > 0)
-                    rows.Add(new LegendRow($"mesh x{_board.Meshes.Count}", 0x66D9C0));
+                if (_board.Meshes.Count > 0)
+                    rows.Add(new LegendRow($"mesh x{_board.Meshes.Count}", 0x66D9C0,
+                                           !_s.PcbMeshes, key: "mesh", canToggle: true));
             }
 
             _legend = rows.ToArray();
+        }
+
+        // ── Legend write-back ─────────────────────────────────────────────────
+        // Called on the UI THREAD. Layers are looked up by name rather than index because
+        // an import can replace the whole list between the snapshot the shell drew and the
+        // click coming back; a stale index would silently hit the wrong layer, whereas a
+        // stale name simply finds nothing.
+
+        public void SetLegendVisible(string key, bool visible)
+        {
+            if (key == "vias") { _s.PcbVias   = visible; SaveLayerPrefs(); return; }
+            if (key == "cad")  { _s.PcbCad    = visible; SaveLayerPrefs(); return; }
+            if (key == "mesh") { _s.PcbMeshes = visible; SaveLayerPrefs(); return; }
+
+            var layer = FindLayer(key);
+            if (layer == null) return;
+            layer.Visible = visible;
+            SaveLayerPrefs();
+        }
+
+        public void SetLegendColour(string key, int colour)
+        {
+            var layer = FindLayer(key);
+            if (layer == null) return;
+            layer.ColourOverride = colour & 0xFFFFFF;
+            SaveLayerPrefs();
+        }
+
+        private PcbLayer? FindLayer(string key)
+        {
+            if (!key.StartsWith("layer:", StringComparison.Ordinal)) return null;
+            string name = key.Substring(6);
+            // Snapshot the count first: the game thread may be mid-import.
+            var layers = _board.Layers;
+            for (int i = 0; i < layers.Count; i++)
+            {
+                if (i >= layers.Count) break;
+                if (string.Equals(layers[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                    return layers[i];
+            }
+            return null;
+        }
+
+        /// <summary>Flatten the per-layer choices into the settings string.
+        ///
+        /// Persisted because a re-import rebuilds every layer from defaults, and the last
+        /// board is re-imported on every launch — so without this, recolouring a layer
+        /// would appear to work and then silently revert.</summary>
+        private void SaveLayerPrefs()
+        {
+            var sb = new StringBuilder();
+            var layers = _board.Layers;
+            for (int i = 0; i < layers.Count; i++)
+            {
+                var l = layers[i];
+                sb.Append(l.Name.Replace(';', '_').Replace('|', '_')).Append('|');
+                if (l.ColourOverride.HasValue) sb.Append(l.ColourOverride.Value.ToString("X6"));
+                sb.Append('|').Append(l.Visible ? '1' : '0').Append(';');
+            }
+            _s.PcbLayerPrefs = sb.ToString();
+        }
+
+        /// <summary>Re-apply saved choices to a freshly imported board.</summary>
+        private void ApplyLayerPrefs()
+        {
+            string prefs = _s.PcbLayerPrefs;
+            if (string.IsNullOrEmpty(prefs)) return;
+
+            foreach (string entry in prefs.Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var bits = entry.Split('|');
+                if (bits.Length < 3) continue;
+
+                foreach (var l in _board.Layers)
+                {
+                    if (!string.Equals(l.Name, bits[0], StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (bits[1].Length > 0 &&
+                        int.TryParse(bits[1], System.Globalization.NumberStyles.HexNumber,
+                                     System.Globalization.CultureInfo.InvariantCulture,
+                                     out int c))
+                        l.ColourOverride = c & 0xFFFFFF;
+                    l.Visible = bits[2] == "1";
+                    break;
+                }
+            }
         }
 
         /// <summary>The mode headers the shell draws across the top of the window.
@@ -1011,6 +1110,11 @@ namespace EDes
                          v => _s.PcbCadSurfaces = v);
             ui.AddSlider(sec, "Surface fill density", 0.1, 2.0, _s.PcbCadSurfaceDensity,
                          v => _s.PcbCadSurfaceDensity = (float)v, "F2");
+            ui.AddSlider(sec, "CAD Z offset", -3.0, 3.0, _s.PcbCadZOffset,
+                         v => _s.PcbCadZOffset = (float)v, "F2");
+            ui.AddInfo(sec, "0 seats the 3D model on the topmost layer of the stack, which " +
+                            "is where it belongs — the Gerbers are the board, the STEP model " +
+                            "is what is mounted on it.");
             ui.AddToggle(sec, "CAD lighting", _s.PcbCadLighting, v => _s.PcbCadLighting = v);
             ui.AddSlider(sec, "CAD ambient", 0, 1.0, _s.PcbCadAmbient,
                          v => _s.PcbCadAmbient = (float)v, "F2");

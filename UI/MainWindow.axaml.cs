@@ -372,10 +372,25 @@ namespace EDes.UI
         private void OnResetClick(object? s, RoutedEventArgs e) { _s.Reset(); RebuildActivePanel(); }
 
         // ── Legend overlay ────────────────────────────────────────────────────
-        // Rebuilt only when the CONTENT changes, not every tick. The status timer fires
-        // several times a second and this sits over a live preview, so rebuilding the
-        // visual tree unconditionally would churn layout for no visible difference.
+        // The row CONTROLS are rebuilt only when the set of rows changes; their state
+        // (checked, colour, label) is updated in place on every tick.
+        //
+        // That split is load-bearing, not an optimisation. The colour picker fires a
+        // change per mouse-move, each of which changes a row's colour — so if a colour
+        // change rebuilt the visual tree, the picker would be destroyed underneath the
+        // cursor on the first drag and never be usable.
         private string _legendKey = "\u0001";
+        private bool   _legendSyncing;
+
+        private sealed class LegendRowUi
+        {
+            public string    Key = "";
+            public CheckBox  Box = null!;
+            public Button    Swatch = null!;
+            public TextBlock Label = null!;
+        }
+
+        private readonly List<LegendRowUi> _legendUi = new();
 
         private void RefreshLegend()
         {
@@ -387,49 +402,131 @@ namespace EDes.UI
                 return;
             }
 
-            var sb = new StringBuilder(rows.Count * 16);
+            // Identity of the row SET only — deliberately excludes colour and checked
+            // state, which are synced in place below.
+            var sb = new StringBuilder(rows.Count * 24);
             foreach (var r in rows)
-                sb.Append(r.Label).Append('|').Append(r.Colour).Append(r.Hidden ? '-' : '+')
-                  .Append(';');
+                sb.Append(r.Key).Append('\u001f').Append(r.Label).Append('\u001e');
             string key = sb.ToString();
-            if (key == _legendKey) { LegendPanel.IsVisible = true; return; }
-            _legendKey = key;
 
+            if (key != _legendKey)
+            {
+                _legendKey = key;
+                RebuildLegendRows(rows);
+            }
+
+            SyncLegendState(rows);
+            LegendPanel.IsVisible = true;
+        }
+
+        private void RebuildLegendRows(IReadOnlyList<LegendRow> rows)
+        {
             LegendItems.Children.Clear();
+            _legendUi.Clear();
+
             foreach (var r in rows)
             {
-                var swatch = new Border
+                string key = r.Key;
+
+                var box = new CheckBox
                 {
-                    Width = 11, Height = 11,
-                    CornerRadius = new CornerRadius(2),
-                    Background = new SolidColorBrush(Color.FromRgb(
-                        (byte)((r.Colour >> 16) & 0xFF),
-                        (byte)((r.Colour >> 8)  & 0xFF),
-                        (byte)(r.Colour         & 0xFF))),
-                    BorderBrush = new SolidColorBrush(Color.Parse("#50FFFFFF")),
-                    BorderThickness = new Thickness(1),
+                    IsVisible = r.CanToggle,
+                    MinWidth  = 0,
+                    Padding   = new Thickness(0),
+                    Margin    = new Thickness(0, 0, 2, 0),
                     VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
-                    // A hidden layer keeps its colour but loses its solidity, so the row
-                    // still says WHICH colour that layer is when it comes back.
-                    Opacity = r.Hidden ? 0.25 : 1.0,
                 };
+                box.IsCheckedChanged += (_, _) =>
+                {
+                    if (_legendSyncing) return;      // our own sync, not a user click
+                    _game?.SetLegendVisible(key, box.IsChecked == true);
+                    DebounceSave();
+                };
+
+                // A Button rather than a bare Border so it is focusable and obviously
+                // clickable, with the colour picker hanging off it as a flyout.
+                var swatch = new Button
+                {
+                    Width = 15, Height = 15,
+                    Padding = new Thickness(0),
+                    BorderBrush = new SolidColorBrush(Color.Parse("#60FFFFFF")),
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(2),
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                    IsEnabled = r.CanRecolour,
+                };
+                if (r.CanRecolour)
+                    ToolTip.SetTip(swatch, "Click to change this layer's colour");
+
+                if (r.CanRecolour)
+                {
+                    var picker = new ColorPicker
+                    {
+                        Color = Rgb(r.Colour),
+                        Width = 280,
+                    };
+                    picker.ColorChanged += (_, e) =>
+                    {
+                        if (_legendSyncing) return;
+                        int packed = (e.NewColor.R << 16) | (e.NewColor.G << 8) | e.NewColor.B;
+                        _game?.SetLegendColour(key, packed);
+                        DebounceSave();
+                    };
+                    swatch.Flyout = new Flyout { Content = picker, Placement = PlacementMode.Left };
+                }
 
                 var label = new TextBlock
                 {
                     Text       = r.Label,
                     FontSize   = 10,
-                    Opacity    = r.Hidden ? 0.45 : 0.95,
                     FontFamily = new FontFamily("Consolas,Menlo,monospace"),
                     VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
                 };
 
-                var row = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, Spacing = 6 };
-                row.Children.Add(swatch);
-                row.Children.Add(label);
-                LegendItems.Children.Add(row);
+                var line = new StackPanel
+                {
+                    Orientation = Avalonia.Layout.Orientation.Horizontal,
+                    Spacing = 5,
+                };
+                line.Children.Add(box);
+                line.Children.Add(swatch);
+                line.Children.Add(label);
+                LegendItems.Children.Add(line);
+
+                _legendUi.Add(new LegendRowUi
+                {
+                    Key = key, Box = box, Swatch = swatch, Label = label,
+                });
             }
-            LegendPanel.IsVisible = true;
         }
+
+        private void SyncLegendState(IReadOnlyList<LegendRow> rows)
+        {
+            if (_legendUi.Count != rows.Count) return;
+
+            _legendSyncing = true;
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i];
+                var ui = _legendUi[i];
+
+                bool shown = !r.Hidden;
+                if (ui.Box.IsChecked != shown) ui.Box.IsChecked = shown;
+
+                // Hidden keeps its hue but loses solidity, so the row still says WHICH
+                // colour the layer is when it comes back.
+                ui.Swatch.Background = new SolidColorBrush(Rgb(r.Colour));
+                ui.Swatch.Opacity    = r.Hidden ? 0.3 : 1.0;
+                ui.Label.Opacity     = r.Hidden ? 0.45 : 0.95;
+                if (ui.Label.Text != r.Label) ui.Label.Text = r.Label;
+            }
+            _legendSyncing = false;
+        }
+
+        private static Color Rgb(int packed)
+            => Color.FromRgb((byte)((packed >> 16) & 0xFF),
+                             (byte)((packed >> 8)  & 0xFF),
+                             (byte)(packed         & 0xFF));
 
         // ─────────────────────────────────────────────────────────────────────
         // Mode headers

@@ -199,6 +199,39 @@ public static class RealBoardCheck
         CheckTrue("aperture library was NOT parsed as a layer",
                   !board.Layers.Exists(l => l.Name.EndsWith(".apr", StringComparison.OrdinalIgnoreCase) ||
                                             l.Name.EndsWith(".APR_LIB", StringComparison.OrdinalIgnoreCase)));
+        // ── Stack order is physically correct ────────────────────────────────
+        // The bug this guards: PcbLayerKind has one Silkscreen kind for BOTH sides, so
+        // before PcbLayer.Bottom existed the bottom silkscreen sorted to slot 0 and drew
+        // above the top copper and above the 3D components.
+        {
+            int Slot(string ext)
+                => board.Layers.FindIndex(l => l.Name.EndsWith(ext, StringComparison.OrdinalIgnoreCase));
+
+            int gto = Slot(".GTO"), gtp = Slot(".GTP"), gts = Slot(".GTS");
+            int gtl = Slot(".GTL"), gbl = Slot(".GBL");
+            int gbs = Slot(".GBS"), gbo = Slot(".GBO");
+            Console.WriteLine($"stack: GTO {gto}, GTP {gtp}, GTS {gts}, GTL {gtl}, " +
+                              $"GBL {gbl}, GBS {gbs}, GBO {gbo}");
+
+            CheckTrue("top silkscreen is above top copper", gto >= 0 && gtl >= 0 && gto < gtl);
+            CheckTrue("top paste is between silk and copper", gtp > gto && gtp < gtl);
+            CheckTrue("top mask is between paste and copper", gts > gtp && gts < gtl);
+            CheckTrue("top copper is above bottom copper", gtl < gbl);
+            CheckTrue("bottom mask is BELOW bottom copper", gbs > gbl);
+            CheckTrue("bottom silkscreen is BELOW bottom copper (the actual bug)",
+                      gbo > gbl);
+            CheckTrue("bottom silkscreen is the outermost bottom layer", gbo > gbs);
+            CheckTrue("the two silkscreens are on opposite sides of the copper",
+                      gto < gtl && gbo > gbl);
+
+            CheckTrue("sides were classified", board.Layers.Exists(l => l.Bottom) &&
+                                               board.Layers.Exists(l => !l.Bottom));
+            var gboLayer = board.Layers.Find(l => l.Name.EndsWith(".GBO", StringComparison.OrdinalIgnoreCase));
+            CheckTrue("bottom silk is flagged as bottom", gboLayer != null && gboLayer.Bottom);
+            var gtoLayer = board.Layers.Find(l => l.Name.EndsWith(".GTO", StringComparison.OrdinalIgnoreCase));
+            CheckTrue("top silk is NOT flagged as bottom", gtoLayer != null && !gtoLayer.Bottom);
+        }
+
         CheckTrue("mechanical drawing layers default to hidden",
                   board.Layers.TrueForAll(l => l.Kind != PcbLayerKind.Mechanical || !l.Visible));
 

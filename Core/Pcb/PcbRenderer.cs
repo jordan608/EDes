@@ -47,6 +47,7 @@ namespace EDes.Pcb
         public bool  CadLighting;      // shade edges by their adjacent-face normals
         public bool  CadSurfaces;     // flat-shaded fill on the planar faces
         public float CadSurfaceDensity;// 1 = one sample per voxel; lower is sparser
+        public float CadZOffset;       // nudge the 3D model along Z, world units
         public float CadAmbient;       // floor brightness, so unlit edges never vanish
         public float CadLightX, CadLightY, CadLightZ;   // light direction, board frame
         public bool  ShowCursor;
@@ -121,9 +122,9 @@ namespace EDes.Pcb
 
             if (opt.ShowVias)  DrawVias(batch, cam, board, opt, cx, cy, z0, Spacing, slots);
             if (opt.ShowHoles) DrawHoles(batch, cam, board, cx, cy, z0, Spacing, slots, opt);
-            if (opt.ShowCad)    DrawCadSolids(batch, cam, board, opt, cx, cy);
+            if (opt.ShowCad)    DrawCadSolids(batch, cam, board, opt, cx, cy, z0);
             if (opt.ShowCad && opt.CadSurfaces)
-                DrawCadFaces(batch, cam, board, opt, cx, cy);
+                DrawCadFaces(batch, cam, board, opt, cx, cy, z0);
             if (opt.ShowMeshes) DrawMeshes(batch, cam, board, cx, cy, opt);
             if (opt.ShowComponents) DrawComponents(batch, hud, cam, board, opt, cx, cy, z0, slots);
             if (opt.ShowCursor) DrawCursor(batch, cam, board, opt, cx, cy, z0, Spacing, slots);
@@ -393,8 +394,14 @@ namespace EDes.Pcb
         // Z uses the same convention as mesh clouds: the model frame has Z up, the
         // display has -Z up, so heights are negated on the way through.
         private void DrawCadSolids(VoxelBatch batch, SceneCamera cam, PcbBoard board,
-                                   in PcbViewOptions opt, float cx, float cy)
+                                   in PcbViewOptions opt, float cx, float cy, float z0)
         {
+            // The 3D model sits ON TOP of the exploded Gerber stack, not through the middle
+            // of it. Anchored at z=0 the model rose from the stack's CENTRE, which put the
+            // TOP silkscreen above the components — physically backwards, since silkscreen
+            // is printed on the board underneath the parts. z0 is the topmost layer plane,
+            // and -Z is up, so subtracting height from it lifts the model clear.
+            float zBase = z0 + opt.CadZOffset;
             float bright = opt.CadBrightness > 0f ? opt.CadBrightness : opt.Brightness;
 
             // Normalise the light once, not per edge. A zero vector would divide by zero
@@ -429,9 +436,9 @@ namespace EDes.Pcb
                     for (int i = 1; i < e.Count; i++)
                     {
                         var a = cam.Transform(Wx(e.X[i - 1], cx), Wy(e.Y[i - 1], cy),
-                                              -e.Z[i - 1] * Scale);
+                                              zBase - e.Z[i - 1] * Scale);
                         var b = cam.Transform(Wx(e.X[i], cx), Wy(e.Y[i], cy),
-                                              -e.Z[i] * Scale);
+                                              zBase - e.Z[i] * Scale);
                         batch.Line(a, b, col);
                     }
                     if (batch.BudgetHit) return;
@@ -457,8 +464,9 @@ namespace EDes.Pcb
         // real 2-layer export, 1143 mm^2 of planar face is ~42,000 voxels at full density,
         // so the density knob is not decoration.
         private void DrawCadFaces(VoxelBatch batch, SceneCamera cam, PcbBoard board,
-                                  in PcbViewOptions opt, float cx, float cy)
+                                  in PcbViewOptions opt, float cx, float cy, float z0)
         {
+            float zBase = z0 + opt.CadZOffset;   // same anchor as the wireframe
             float bright = opt.CadBrightness > 0f ? opt.CadBrightness : opt.Brightness;
 
             float lx = opt.CadLightX, ly = opt.CadLightY, lz = opt.CadLightZ;
@@ -492,9 +500,9 @@ namespace EDes.Pcb
                     for (int t = 0; t < face.TriCount; t++)
                     {
                         int i = t * 3;
-                        var a = cam.Transform(Wx(face.X[i],     cx), Wy(face.Y[i],     cy), -face.Z[i]     * Scale);
-                        var b = cam.Transform(Wx(face.X[i + 1], cx), Wy(face.Y[i + 1], cy), -face.Z[i + 1] * Scale);
-                        var c = cam.Transform(Wx(face.X[i + 2], cx), Wy(face.Y[i + 2], cy), -face.Z[i + 2] * Scale);
+                        var a = cam.Transform(Wx(face.X[i],     cx), Wy(face.Y[i],     cy), zBase - face.Z[i]     * Scale);
+                        var b = cam.Transform(Wx(face.X[i + 1], cx), Wy(face.Y[i + 1], cy), zBase - face.Z[i + 1] * Scale);
+                        var c = cam.Transform(Wx(face.X[i + 2], cx), Wy(face.Y[i + 2], cy), zBase - face.Z[i + 2] * Scale);
                         FillTri(batch, a, b, c, col, step);
                         if (batch.BudgetHit) return;
                     }

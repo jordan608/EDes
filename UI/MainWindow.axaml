@@ -137,20 +137,28 @@
                            HorizontalAlignment="Stretch"
                            VerticalAlignment="Stretch"/>
 
-                    <!-- Legend: what is on screen and in what colour. An Avalonia
-                         overlay rather than in-volume text on purpose — it costs no
-                         voxel budget, and a colour SWATCH is the whole point, which
-                         voxel text cannot render. IsHitTestVisible=False so it never
-                         steals the drag that orbits the volume. -->
+                    <!-- Legend: what is on screen, in what colour, with a checkbox to
+                         toggle it and a swatch to recolour it. An Avalonia overlay rather
+                         than in-volume text on purpose — it costs no voxel budget, and a
+                         clickable colour SWATCH is the whole point, which voxel text
+                         cannot render.
+
+                         This one IS hit-testable, unlike the rest of the preview overlay:
+                         a drag starting on the panel goes to its controls instead of
+                         orbiting the volume. That is the intended trade, and it is why the
+                         panel stays small and cornered. -->
                     <Border x:Name="LegendPanel"
                             HorizontalAlignment="Right" VerticalAlignment="Bottom"
                             Margin="0,0,10,10" Padding="8,6"
-                            Background="#B0000000"
+                            Background="#D0000000"
                             BorderBrush="#30FFFFFF" BorderThickness="1"
                             CornerRadius="3"
-                            IsHitTestVisible="False"
+                            MaxHeight="320"
                             IsVisible="False">
-                        <StackPanel x:Name="LegendItems" Spacing="2"/>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel x:Name="LegendItems" Spacing="1"/>
+                        </ScrollViewer>
                     </Border>
                 </Grid>
             </Border>

@@ -318,8 +318,9 @@ namespace EDes.Pcb
 
                 if (Array.IndexOf(GerberExtensions, ext) >= 0 || LooksLikeGerber(file))
                 {
-                    var kind  = ClassifyLayer(file);
+                    var kind  = ClassifyLayer(file, out bool onBottom);
                     var layer = board.GetOrAddLayer(name, kind);
+                    layer.Bottom = onBottom;
 
                     // Mechanical/drawing layers are dimension art — often the largest
                     // file in the set. They load, but start hidden so they cannot eat
@@ -381,7 +382,14 @@ namespace EDes.Pcb
             }
 
             // Stack copper layers top-to-bottom, everything else around them.
-            board.Layers.Sort((a, b) => StackOrder(a.Kind).CompareTo(StackOrder(b.Kind)));
+            board.Layers.Sort((a, b) =>
+            {
+                int oa = StackOrder(a.Kind, a.Bottom), ob = StackOrder(b.Kind, b.Bottom);
+                // Name as the tie-break so the order is stable rather than dependent on
+                // the order the files happened to be enumerated in.
+                return oa != ob ? oa.CompareTo(ob)
+                                : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            });
             board.ComputeBounds();
 
             if (gerbers + drills + meshes + parts == 0)
@@ -739,27 +747,35 @@ namespace EDes.Pcb
             return linked;
         }
 
-        private static int StackOrder(PcbLayerKind k) => k switch
+        /// <summary>Position in the stack, top of the board first.
+        ///
+        /// The side matters and used to be ignored: silkscreen, mask and paste share one
+        /// PcbLayerKind per type regardless of side, so every silkscreen layer sorted to
+        /// slot 0 and the BOTTOM silkscreen ended up above the top copper — and above the
+        /// 3D components. The physical order is what this now follows: outward layers on
+        /// the top, then copper, then the mirror of those on the bottom.</summary>
+        private static int StackOrder(PcbLayerKind k, bool bottom) => k switch
         {
-            PcbLayerKind.Silkscreen   => 0,
-            PcbLayerKind.Paste        => 1,
-            PcbLayerKind.SolderMask   => 2,
-            PcbLayerKind.PadMaster    => 3,
-            PcbLayerKind.CopperTop    => 3,
-            PcbLayerKind.CopperInner  => 4,
-            PcbLayerKind.CopperBottom => 5,
-            PcbLayerKind.Outline      => 6,
-            PcbLayerKind.Mechanical   => 7,
-            PcbLayerKind.Drill        => 8,
-            _                         => 9,
+            PcbLayerKind.Silkscreen   => bottom ? 10 : 0,
+            PcbLayerKind.Paste        => bottom ?  9 : 1,
+            PcbLayerKind.SolderMask   => bottom ?  8 : 2,
+            PcbLayerKind.PadMaster    => bottom ?  7 : 3,
+            PcbLayerKind.CopperTop    => 4,
+            PcbLayerKind.CopperInner  => 5,
+            PcbLayerKind.CopperBottom => 6,
+            PcbLayerKind.Outline      => 11,
+            PcbLayerKind.Mechanical   => 12,
+            PcbLayerKind.Drill        => 13,
+            _                         => 14,
         };
 
         // ── Classification ────────────────────────────────────────────────────
 
-        private static PcbLayerKind ClassifyLayer(string file)
+        private static PcbLayerKind ClassifyLayer(string file, out bool bottom)
         {
             string name = Path.GetFileNameWithoutExtension(file).ToLowerInvariant();
             string ext  = Path.GetExtension(file).ToLowerInvariant();
+            bottom = false;
 
             bool Has(params string[] keys)
             {
@@ -782,18 +798,21 @@ namespace EDes.Pcb
             if (Has("f_silks", "f.silks", "silkscreen_top", "topsilk", "silktop") || ext is ".gto" or ".plc")
                 return PcbLayerKind.Silkscreen;
             if (Has("b_silks", "b.silks", "bottomsilk", "silkbottom") || ext is ".gbo" or ".pls")
-                return PcbLayerKind.Silkscreen;
+            { bottom = true; return PcbLayerKind.Silkscreen; }
 
             if (Has("f_mask", "f.mask", "topmask", "soldermask_top") || ext is ".gts" or ".stc")
                 return PcbLayerKind.SolderMask;
             if (Has("b_mask", "b.mask", "bottommask", "soldermask_bottom") || ext is ".gbs" or ".sts")
-                return PcbLayerKind.SolderMask;
+            { bottom = true; return PcbLayerKind.SolderMask; }
 
-            if (Has("paste", "f_paste", "b_paste") || ext is ".gtp" or ".gbp")
+            if (Has("b_paste", "b.paste", "bottompaste", "pastebottom") || ext is ".gbp")
+            { bottom = true; return PcbLayerKind.Paste; }
+            if (Has("paste", "f_paste", "f.paste") || ext is ".gtp")
                 return PcbLayerKind.Paste;
 
             // Pad master = a composite of the pads already present on the copper layer.
-            if (ext is ".gpt" or ".gpb" || Has("padmaster", "pad_master"))
+            if (ext is ".gpb") { bottom = true; return PcbLayerKind.PadMaster; }
+            if (ext is ".gpt" || Has("padmaster", "pad_master"))
                 return PcbLayerKind.PadMaster;
 
             if (Has("f_cu", "f.cu", "topcopper", "top_copper", "toplayer", "gtl") ||
@@ -801,7 +820,7 @@ namespace EDes.Pcb
                 return PcbLayerKind.CopperTop;
             if (Has("b_cu", "b.cu", "bottomcopper", "bottom_copper", "bottomlayer", "gbl") ||
                 ext is ".gbl" or ".sol")
-                return PcbLayerKind.CopperBottom;
+            { bottom = true; return PcbLayerKind.CopperBottom; }
             if (Has("in1_cu", "in2_cu", "in3_cu", "in4_cu", "internalplane", "inner") ||
                 ext is ".g1" or ".g2" or ".g3" or ".g4")
                 return PcbLayerKind.CopperInner;

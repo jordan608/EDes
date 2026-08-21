@@ -142,6 +142,11 @@ namespace EDes
         /// its own back faces through its front.</summary>
         public volatile bool   PcbCadSurfaces = true;
         public volatile float  PcbCadSurfaceDensity = 0.6f;
+
+        /// <summary>Nudge the 3D model along Z, world units. 0 seats it on the topmost
+        /// layer of the exploded stack, which is where it physically belongs — the Gerber
+        /// layers are the board, the STEP model is what is mounted on it.</summary>
+        public volatile float  PcbCadZOffset = 0f;
         public volatile float  PcbCadAmbient  = 0.35f;
         public volatile float  PcbCadLightX   = 0.3f;
         public volatile float  PcbCadLightY   = 0.2f;
@@ -156,6 +161,14 @@ namespace EDes
         public volatile bool   PcbComponentLabels = true;    // designators beside them
         public volatile int    PcbLabelLimit      = 150;     // skip labels above this part count
         public volatile bool   PcbShowDocs        = true;    // document inventory in the volume
+
+        /// <summary>Per-layer visibility and colour choices, keyed by layer file name:
+        /// "name|RRGGBB|1;name||0" — an empty colour field means "keep the default".
+        ///
+        /// Persisted because a re-import rebuilds every layer from scratch, and the last
+        /// board is re-imported on every launch. Without this, changing a layer colour
+        /// would look like it silently failed the next time the app opened.</summary>
+        public string PcbLayerPrefs = "";
 
         /// <summary>Set by the UI to ask the game thread to (re)import PcbPath.
         /// The game thread clears it — imports never run on the UI thread.</summary>

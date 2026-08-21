@@ -87,6 +87,14 @@ namespace EDes.Pcb
         public PcbLayerKind Kind    = PcbLayerKind.Unknown;
         public bool         Visible = true;
 
+        /// <summary>Which side of the board this layer belongs to.
+        ///
+        /// Needed because PcbLayerKind does NOT distinguish sides for silkscreen, mask or
+        /// paste — there is one Silkscreen kind for both. Without this the stack order put
+        /// every silkscreen layer at the same height, so the BOTTOM silkscreen sorted to
+        /// the very top of the stack and appeared above the components.</summary>
+        public bool         Bottom;
+
         public readonly List<PcbSeg>    Segs    = new();
         public readonly List<PcbPad>    Pads    = new();
         public readonly List<PcbRegion> Regions = new();
@@ -98,8 +106,16 @@ namespace EDes.Pcb
 
         public int ObjectCount => Segs.Count + Pads.Count + Regions.Count;
 
-        /// <summary>Default colour for this layer kind (packed 0xRRGGBB).</summary>
-        public int Colour => Kind switch
+        /// <summary>User-chosen colour, or null to use the kind's default. Separate from
+        /// the default rather than overwriting it so "reset to default" stays possible and
+        /// so a re-import can tell a deliberate choice from an untouched layer.</summary>
+        public int? ColourOverride;
+
+        /// <summary>Colour actually drawn (packed 0xRRGGBB).</summary>
+        public int Colour => ColourOverride ?? DefaultColour;
+
+        /// <summary>Colour for this layer kind, ignoring any override.</summary>
+        public int DefaultColour => Kind switch
         {
             PcbLayerKind.CopperTop    => 0xFF5A3C,
             PcbLayerKind.CopperBottom => 0x3C8CFF,
