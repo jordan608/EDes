@@ -201,7 +201,14 @@ namespace EDes
         public volatile float  TrackScale    = 1.0f;
         public volatile bool   PcbPads       = true;
         public volatile bool   PcbRegions    = true;
-        public volatile bool   PcbFillRegions = false;
+        /// <summary>Cross-hatch copper pours. ON by default, because outline-only made
+        /// them effectively invisible: the full-board ground pour's outline runs 0.58 mm
+        /// inside the board edge -- about three voxels -- so it lands on top of the outline
+        /// layer and reads as the board perimeter rather than as a plane of copper. The
+        /// hatch costs about 7,100 voxels for the 965 mm2 of pour on a real 2-layer board,
+        /// roughly 5% of the default budget, which is a cheap price for the largest
+        /// feature on the board being visible at all.</summary>
+        public volatile bool   PcbFillRegions = true;
         /// <summary>Sampling density for pour OUTLINES (1 = the frame voxel spacing) and
         /// for the HATCH inside a filled pour (1 = a line every 6 voxels). Both are
         /// multipliers where higher means denser, and both are clamped in the renderer —

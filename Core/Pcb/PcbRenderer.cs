@@ -115,6 +115,10 @@ namespace EDes.Pcb
         /// "this one", not so thick that a ground net floods the board.</summary>
         private const float HIGHLIGHT_VOXELS = 5f;
 
+        /// <summary>Minimum Z extent for through-board features, so they stay visible when
+        /// layer spacing is zero or near it. See where it is assigned in Draw.</summary>
+        private float _featureZ = 0.1f;
+
         /// <summary>Z of each copper layer for the current frame's layout. Rebuilt every
         /// Draw because layer visibility and spacing are live UI settings.</summary>
         private readonly System.Collections.Generic.List<float> _copperZ = new();
@@ -155,7 +159,24 @@ namespace EDes.Pcb
             foreach (var l in board.Layers) if (l.Visible) layerCount++;
             VisibleLayers = layerCount;
             int slots = Math.Max(1, layerCount);
-            Spacing = MathF.Min(opt.LayerSpacing, zHalf * 1.5f / slots);
+            // Zero and NEGATIVE are both allowed. Zero collapses the stack into one
+            // plane, which is the right view when you want the board as fabricated rather
+            // than exploded; negative reverses it, so the bottom layer draws on top --
+            // which is exactly what you want when reading the board from underneath.
+            //
+            // The height limit still applies, but to the MAGNITUDE: MathF.Min alone would
+            // have let a large negative through unclamped, since -50 is less than any
+            // positive ceiling.
+            float maxSpan = zHalf * 1.5f / slots;
+            Spacing = MathF.Sign(opt.LayerSpacing) *
+                      MathF.Min(MathF.Abs(opt.LayerSpacing), maxSpan);
+
+            // Minimum Z extent for features that are physically THROUGH the board -- drill
+            // bores, via barrels, the cursor, component markers. At spacing 0 every layer
+            // shares a plane, and scaling those off the spacing would collapse them to
+            // zero length: a drill would become a single voxel and a via would vanish
+            // entirely, which is not what "put the layers together" should mean.
+            _featureZ = MathF.Max(MathF.Abs(Spacing), batch.Spacing * 4f);
 
             float cx = board.CentreX, cy = board.CentreY;
             float z0 = -(slots - 1) * 0.5f * Spacing;      // first layer highest (-Z is up)
@@ -422,8 +443,11 @@ namespace EDes.Pcb
                                float cx, float cy, float z0, float spacing, int slots,
                                in PcbViewOptions opt)
         {
-            float zTop = z0 - spacing * 0.35f;
-            float zBot = z0 + (slots - 1) * spacing + spacing * 0.35f;
+            // Overhang from _featureZ, not from spacing, so a coplanar stack still shows
+            // a bore rather than a dot.
+            float over = _featureZ * 0.35f;
+            float zTop = MathF.Min(z0, z0 + (slots - 1) * spacing) - over;
+            float zBot = MathF.Max(z0, z0 + (slots - 1) * spacing) + over;
 
             foreach (var h in board.Holes)
             {
@@ -498,6 +522,17 @@ namespace EDes.Pcb
                 float zTop = _copperZ[first - 1];
                 float zBot = _copperZ[last - 1];
                 if (zBot < zTop) (zTop, zBot) = (zBot, zTop);
+
+                // A via connecting coplanar copper has zero height, and a zero-length
+                // barrel is a single voxel -- the connection would be there in the data and
+                // invisible on the display. Given a minimum height it still reads as a via
+                // standing between the layers it joins, whatever the spacing.
+                if (zBot - zTop < _featureZ)
+                {
+                    float mid = (zTop + zBot) * 0.5f;
+                    zTop = mid - _featureZ * 0.5f;
+                    zBot = mid + _featureZ * 0.5f;
+                }
 
                 int col = h.IsBlind(copperCount) ? blind : through;
 
@@ -832,8 +867,9 @@ namespace EDes.Pcb
                                     in PcbViewOptions opt, float cx, float cy, float z0, int slots)
         {
             // Top parts sit just above the top layer, bottom parts just below the last.
-            float zTop    = z0 - Spacing * 0.55f;
-            float zBottom = z0 + (slots - 1) * Spacing + Spacing * 0.55f;
+            float lastZ   = z0 + (slots - 1) * Spacing;
+            float zTop    = MathF.Min(z0, lastZ) - _featureZ * 0.55f;
+            float zBottom = MathF.Max(z0, lastZ) + _featureZ * 0.55f;
 
             float arm   = MathF.Max(batch.Spacing * 2f, 0.8f * Scale);   // ~1.6 mm part
             bool  label = opt.ShowLabels && board.Components.Count <= Math.Max(1, opt.LabelLimit);
@@ -873,8 +909,11 @@ namespace EDes.Pcb
                                 float z0, float spacing, int slots)
         {
             float x = Wx(opt.CursorXmm, cx), y = Wy(opt.CursorYmm, cy);
-            float zTop = z0 - spacing;
-            float zBot = z0 + slots * spacing;
+            // Spans the stack whichever way it runs, with a minimum height so the cursor
+            // is still a line and not a point when the layers are coplanar.
+            float lastZ = z0 + (slots - 1) * spacing;
+            float zTop  = MathF.Min(z0, lastZ) - _featureZ;
+            float zBot  = MathF.Max(z0, lastZ) + _featureZ;
             float arm  = batch.Radius * 0.06f;
 
             batch.Line(cam.Transform(x, y, zTop), cam.Transform(x, y, zBot), Palette.TextHilite);
@@ -1055,7 +1094,7 @@ namespace EDes.Pcb
             {
                 var c = board.Components[i];
                 float sx = Wx(c.X, cx), sy = Wy(c.Y, cy);
-                float sz = z0 - Spacing * 0.55f;
+                float sz = z0 - _featureZ * 0.55f;
                 float d = Dist3(scene.x, scene.y, scene.z, sx, sy, sz);
                 if (d >= bestD) continue;
                 bestD = d; bestKind = 2; bestItem = i;

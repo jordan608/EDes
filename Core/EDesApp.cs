@@ -1452,7 +1452,14 @@ namespace EDes
                             "that appears nowhere was never enumerated at all.");
             ui.AddLiveInfo(sec, ImportInventory, 0.5);
 
-            ui.AddSlider(sec, "Layer spacing", 0.02, 1.5, _s.LayerSpacing, v => _s.LayerSpacing = (float)v, "F2");
+            ui.AddNumber(sec, "Layer spacing (0 = coplanar, negative = flipped)",
+                         _s.LayerSpacing, v => _s.LayerSpacing = (float)v, "F3");
+            ui.AddInfo(sec, "0 collapses the stack into a single plane -- the board as " +
+                            "fabricated rather than exploded. Negative reverses the order, " +
+                            "so the bottom layer draws on top, which is what you want when " +
+                            "reading the board from underneath. Drills, vias, the cursor and " +
+                            "component markers keep a minimum height either way, or they " +
+                            "would collapse to nothing at exactly 0.");
             ui.AddSlider(sec, "Track width scale", 0.1, 6, _s.TrackScale, v => _s.TrackScale = (float)v, "F2");
             ui.AddSlider(sec, "Brightness (voxel density)", 0.2, 3.0, _s.PcbBrightness,
                          v => _s.PcbBrightness = (float)v, "F2");
@@ -1467,6 +1474,31 @@ namespace EDes
             ui.AddToggle(sec, "Pads",             _s.PcbPads,        v => _s.PcbPads = v);
             ui.AddToggle(sec, "Copper pours",     _s.PcbRegions,     v => _s.PcbRegions = v);
             ui.AddToggle(sec, "Cross-hatch pours", _s.PcbFillRegions, v => _s.PcbFillRegions = v);
+            ui.AddLiveInfo(sec, () =>
+            {
+                int n = 0;
+                double area = 0;
+                foreach (var l in _board.Layers)
+                {
+                    if (l.Kind is not (PcbLayerKind.CopperTop or PcbLayerKind.CopperInner
+                                       or PcbLayerKind.CopperBottom)) continue;
+                    foreach (var r in l.Regions)
+                    {
+                        n++;
+                        double a = 0;
+                        for (int i = 0; i < r.Count; i++)
+                        {
+                            int j = (i + 1) % r.Count;
+                            a += r.X[i] * (double)r.Y[j] - r.X[j] * (double)r.Y[i];
+                        }
+                        area += Math.Abs(a) * 0.5;
+                    }
+                }
+                return n == 0 ? "no copper pours on this board"
+                              : $"{n} copper pour(s), {area:0.#} mm2"
+                                + (_s.PcbFillRegions ? " (cross-hatched)"
+                                                     : " (OUTLINE ONLY - hard to see)");
+            }, 1.0);
             ui.AddToggle(sec, "Drills",           _s.PcbHoles,       v => _s.PcbHoles = v);
             ui.AddToggle(sec, "Vias",             _s.PcbVias,        v => _s.PcbVias = v);
             ui.AddSlider(sec, "Pour outline density", 0.2, 4.0, _s.PcbPourDensity,

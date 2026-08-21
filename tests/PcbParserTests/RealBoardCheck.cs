@@ -261,6 +261,106 @@ public static class RealBoardCheck
             }
         }
 
+        // ── Copper pour geometry ─────────────────────────────────────────────
+        // Dumped rather than asserted: "I cannot see the pours" needs the numbers before
+        // it needs a test. A pour with 2 points is a degenerate polygon, and one whose box
+        // is a sliver is a boundary artefact rather than a plane of copper.
+        {
+            Console.WriteLine();
+            Console.WriteLine("--- copper pours ---");
+            foreach (var l in board.Layers)
+            {
+                if (l.Regions.Count == 0) continue;
+                Console.WriteLine($"  {l.Kind} {l.Name}  ({l.Regions.Count} region(s))");
+                for (int i = 0; i < l.Regions.Count; i++)
+                {
+                    var r = l.Regions[i];
+                    float minx = float.MaxValue, miny = float.MaxValue;
+                    float maxx = float.MinValue, maxy = float.MinValue;
+                    for (int k = 0; k < r.Count; k++)
+                    {
+                        if (r.X[k] < minx) minx = r.X[k];
+                        if (r.X[k] > maxx) maxx = r.X[k];
+                        if (r.Y[k] < miny) miny = r.Y[k];
+                        if (r.Y[k] > maxy) maxy = r.Y[k];
+                    }
+                    double w = maxx - minx, h = maxy - miny;
+                    Console.WriteLine($"    [{i}] {r.Count,4} pts   " +
+                                      $"x {minx,8:0.###}..{maxx,8:0.###}  " +
+                                      $"y {miny,8:0.###}..{maxy,8:0.###}   " +
+                                      $"{w,7:0.##} x {h,7:0.##} mm" +
+                                      (r.Count < 3 ? "   <-- DEGENERATE" : "") +
+                                      (w < 0.3 || h < 0.3 ? "   <-- SLIVER" : ""));
+                }
+            }
+        }
+
+        // What a cross-hatch of those pours actually costs, so defaulting it ON is a
+        // measurement rather than a hope.
+        {
+            double areaMm = 0;
+            foreach (var l in board.Layers)
+            {
+                if (l.Kind is not (PcbLayerKind.CopperTop or PcbLayerKind.CopperInner
+                                   or PcbLayerKind.CopperBottom)) continue;
+                foreach (var r in l.Regions)
+                {
+                    // Shoelace: the real polygon area, not its bounding box, since a pour
+                    // is board-shaped with cut-outs and the box overstates it.
+                    double a = 0;
+                    for (int i = 0; i < r.Count; i++)
+                    {
+                        int j = (i + 1) % r.Count;
+                        a += r.X[i] * (double)r.Y[j] - r.X[j] * (double)r.Y[i];
+                    }
+                    areaMm += Math.Abs(a) * 0.5;
+                }
+            }
+
+            double scale = 4.0 * 0.88 / (0.5 * Math.Sqrt(
+                board.WidthMm * board.WidthMm + board.HeightMm * board.HeightMm));
+            double voxelMm  = 0.03 / scale;         // one voxel, in mm
+            double lineGap  = voxelMm * 10.0;       // hatch spacing: 10 voxels
+            double lengthMm = areaMm / lineGap * 2; // two families
+            double voxels   = lengthMm / voxelMm;
+
+            Console.WriteLine($"pour area {areaMm:0.#} mm^2 -> cross-hatch ~{voxels:N0} voxels " +
+                              $"(gap {lineGap:0.##} mm)");
+            CheckTrue("cross-hatching every copper pour is affordable", voxels < 40_000);
+        }
+
+        // ── Layer spacing of 0 and negative ──────────────────────────────────
+        // The stack Z is computed as z0 + index * spacing, with z0 = -(slots-1)*0.5*spacing.
+        // Both degenerate cases have to stay sane: 0 must collapse every layer onto one
+        // plane (not produce NaN or an inverted span), and negative must reverse the order
+        // rather than escaping the volume.
+        {
+            int slots = 0;
+            foreach (var l in board.Layers) if (l.Visible) slots++;
+            slots = Math.Max(1, slots);
+
+            foreach (float sp in new[] { 0f, -0.35f, 0.35f })
+            {
+                float z0 = -(slots - 1) * 0.5f * sp;
+                float first = z0, last = z0 + (slots - 1) * sp;
+                bool finite = !float.IsNaN(z0) && !float.IsInfinity(z0) &&
+                              !float.IsNaN(last) && !float.IsInfinity(last);
+                Console.WriteLine($"spacing {sp,6}: slot 0 at {first,7:0.###}, " +
+                                  $"slot {slots - 1} at {last,7:0.###}");
+                CheckTrue($"spacing {sp} gives finite layer Z", finite);
+                if (sp == 0f)
+                    CheckTrue("spacing 0 puts every layer on ONE plane",
+                              Math.Abs(first - last) < 1e-6f);
+                // -Z is UP, so "reversed" means the last slot ends up at a SMALLER z than
+                // the first, i.e. physically above it. Asserting last > first had the
+                // display's axis convention backwards.
+                if (sp < 0f)
+                    CheckTrue("negative spacing reverses the stack", last < first);
+                if (sp > 0f)
+                    CheckTrue("positive spacing keeps the stack in order", last > first);
+            }
+        }
+
         // ── Stack order is physically correct ────────────────────────────────
         // The bug this guards: PcbLayerKind has one Silkscreen kind for BOTH sides, so
         // before PcbLayer.Bottom existed the bottom silkscreen sorted to slot 0 and drew
