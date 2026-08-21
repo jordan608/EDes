@@ -129,10 +129,12 @@ namespace EDes.UI
             RefreshModePanel();
 
             // ── Motor buttons ─────────────────────────────────────────────────
-            // The same spec constant GameLoop auto-starts from. Hardcoding 600 here
-            // meant pressing Motor On SLOWED a VX2-XL down from its 900 RPM default.
+            // The same one constant GameLoop starts from, so Motor On cannot command a
+            // different speed than startup did. This was previously read off a per-model
+            // spec, and a hardcoded 600 before that -- which meant pressing Motor On
+            // SLOWED the platter down from the speed it had come up at.
             BtnMotorStart.Click += (_, _) =>
-                _s.MotorRpmRequest = VoxonHardwareCheck.VX2XL.DefaultMotorRpm;
+                _s.MotorRpmRequest = VoxonHardwareCheck.StartupRpm;
             BtnMotorStop .Click += (_, _) => _s.MotorRpmRequest = 0;
 
             // ── Ctrl+[ / Ctrl+] — zoom in / out ──────────────────────────────

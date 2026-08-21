@@ -184,20 +184,27 @@ namespace EDes
                 ledHost.Init(ref vs);
                 App.Log("[GameLoop] LedHost initialized");
 
-                // Start the platter motor at the RPM from LedHost.ini — but only if
-                // the pre-flight check actually confirmed hardware. LoadIni writes
-                // vs.rpm but the motor stays stopped until SetRPM either way; in
-                // Simulator mode we deliberately never call it.
-                int targetRpm = ledHost.GetIntendedRPM();
-                if (hardwareConfirmed && targetRpm > 0)
-                {
-                    App.Log($"[GameLoop] Starting motor at {targetRpm} RPM");
-                    ledHost.SetRPM(ref vs, targetRpm);
-                }
-                else
-                {
-                    App.Log("[GameLoop] WARNING: intended RPM = 0 — check LedHost.ini rpm= setting");
-                }
+                // The motor is NOT started here any more.
+                //
+                // It used to be, from LedHost.ini's rpm=, and then step 6b immediately
+                // requested a different speed -- so the platter span up to whatever the
+                // ini said and was commanded to a second value moments later. Two
+                // SetRPM calls a few hundred milliseconds apart is a spin-up followed by
+                // a correction, which is exactly the startup behaviour being complained
+                // about. One command, from one place: see step 6b.
+                //
+                // The ini value is still LOGGED, because it is genuinely useful to see
+                // what the SDK was configured for when the observed speed disagrees.
+                int iniRpm = ledHost.GetIntendedRPM();
+                App.Log($"[GameLoop] LedHost.ini intends {iniRpm} RPM; "
+                      + $"this app starts at {VoxonHardwareCheck.StartupRpm} RPM"
+                      + (hardwareConfirmed ? "" : " (simulator: motor never commanded)"));
+
+                // SetIntendedRPM so the SDK's own ToggleMotor -- which restarts at
+                // intendedRPM, not at ours -- agrees with the speed we chose. Without
+                // this, anything routed through the SDK's toggle would quietly revert to
+                // the ini value.
+                ledHost.SetIntendedRPM(VoxonHardwareCheck.StartupRpm);
             }
             catch (Exception ex)
             {
@@ -263,8 +270,8 @@ namespace EDes
             // and reporting a live RPM there would be a readout that means nothing.
             if (hardwareConfirmed)
             {
-                settings.MotorRpmRequest = spec.DefaultMotorRpm;
-                App.Log($"[GameLoop] Auto-starting motor at {spec.DefaultMotorRpm} RPM");
+                settings.MotorRpmRequest = VoxonHardwareCheck.StartupRpm;
+                App.Log($"[GameLoop] Auto-starting motor at {VoxonHardwareCheck.StartupRpm} RPM");
             }
 
             // ── Step 7: main game loop ────────────────────────────────────────

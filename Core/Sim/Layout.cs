@@ -67,8 +67,16 @@ namespace EDes.Sim
     {
         public readonly float TopZ, BottomZ;      // usable extremes (-Z is up)
         public readonly float Step;               // one text row
-        public readonly float HeaderZ;            // title row
-        public readonly float SubHeaderZ;         // voxel/status row
+        // There is deliberately NO HeaderZ/SubHeaderZ any more.
+        //
+        // They were fixed positions for the title and the voxel readout, handed out
+        // ALONGSIDE the row cursor rather than from it. Once the text band was moved to
+        // start at TopZ exactly, those two fixed rows became the cursor's first two rows
+        // as well, and two blocks drew into the same voxels -- the cyan mode line under
+        // the yellow status line, the red budget warning through the readouts. The whole
+        // point of this file is that vertical space is ALLOCATED; a second mechanism that
+        // hands out positions without telling the allocator defeats it. Everything now
+        // takes rows from Readout(), in draw order.
         public readonly float ContentTopZ;        // first free row under ALL the text
         public readonly float ContentBottomZ;     // last free row (the volume floor)
         public readonly float ReadoutTopZ;        // first readout row, under the header
@@ -87,9 +95,6 @@ namespace EDes.Sim
             TopZ    = Math.Clamp(topZ, -zHalf, MathF.Max(-zHalf, zHalf - step));
             BottomZ =  zHalf;
             Step    = step;
-
-            HeaderZ    = TopZ;
-            SubHeaderZ = TopZ + step;
 
             // The text band starts at TopZ EXACTLY -- the HUD anchor, clamped above. It
             // used to start below a reserved header block, which left the top few rows of

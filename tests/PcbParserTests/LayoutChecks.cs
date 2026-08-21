@@ -14,6 +14,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 using System;
+using System.Collections.Generic;
 using EDes.Sim;
 
 namespace PcbParserTests
@@ -103,6 +104,36 @@ namespace PcbParserTests
                 Ok("and they are genuinely different world positions",
                    Math.Abs(vx2.TopZ - xl.TopZ) > 1f);
             }
+            // ── ONE source of rows, which is the whole point of the file ──────
+            {
+                // The overlap bug was not a bad number, it was a second mechanism:
+                // FrameLayout also exposed fixed HeaderZ/SubHeaderZ positions, handed out
+                // ALONGSIDE the cursor rather than from it. Once the band moved to start
+                // at TopZ, those two fixed rows WERE the cursor's first two rows, so the
+                // title and the readout drew into the same voxels as the status line --
+                // cyan through yellow, red through cyan. Deleting them is the fix, so
+                // their absence is the thing worth asserting.
+                var t = typeof(FrameLayout);
+                bool leftovers = t.GetField("HeaderZ") != null
+                              || t.GetField("SubHeaderZ") != null
+                              || t.GetProperty("HeaderZ") != null
+                              || t.GetProperty("SubHeaderZ") != null;
+                Ok("FrameLayout exposes no fixed row positions beside the cursor",
+                   !leftovers);
+
+                // And the cursor itself never repeats a row.
+                var st = new FrameLayout(zHalf, step, 2, 6, -zHalf).Readout();
+                var seen = new List<float>();
+                for (int i = 0; i < 8; i++) seen.Add(st.Row());
+                bool dupe = false;
+                for (int i = 1; i < seen.Count; i++)
+                    if (seen[i] <= seen[i - 1] + 1e-6f) dupe = true;
+                Ok($"eight consecutive rows are strictly distinct "
+                 + $"({seen[0]:0.##} .. {seen[^1]:0.##})", !dupe);
+                Ok($"and one step apart, so glyphs cannot touch ({step:0.###})",
+                   Math.Abs((seen[1] - seen[0]) - step) < 1e-5f);
+            }
+
             return _failures;
         }
     }

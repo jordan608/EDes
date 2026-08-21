@@ -33,12 +33,19 @@ namespace Voxon
         IReadOnlyList<string> NameMatches,
         IReadOnlyList<string> HardwareIdMatches);
 
-    /// <summary>Identification + defaults for one Voxon hardware model.</summary>
+    /// <summary>Identification for one Voxon hardware model.
+    ///
+    /// No longer carries a motor RPM. It used to hold a per-model DefaultMotorRpm --
+    /// 600 for the VX2XL, 900 for the VX2 -- which was a guess dressed up as a fact:
+    /// USB detection cannot tell the two models apart (they expose the same two
+    /// boards), so the value picked depended on which spec the code happened to name.
+    /// It also contradicted itself, with a comment at the Motor On button saying the
+    /// VX2XL's default was 900 while the table said 600. One constant now answers it
+    /// -- see VoxonHardwareCheck.StartupRpm.</summary>
     public sealed record VoxonHardwareSpec(
         string ModelName,
         int    RequiredDeviceCount,
-        IReadOnlyList<VoxonBoard> Boards,
-        int    DefaultMotorRpm);
+        IReadOnlyList<VoxonBoard> Boards);
 
     /// <summary>Outcome of a check, including diagnostics for the caller.</summary>
     public sealed class HardwareCheckResult
@@ -62,10 +69,16 @@ namespace Voxon
 
     public static class VoxonHardwareCheck
     {
+        /// <summary>The RPM the platter is started at, and the RPM the Motor On button
+        /// commands. One number, deliberately: it is the speed the operator wants on this
+        /// bench, and it was previously derived from which hardware spec the code named,
+        /// which detection cannot actually establish.</summary>
+        public const int StartupRpm = 900;
+
         // Confirmed Voxon device identifiers. Both VX2 and VX2XL expose the SAME
         // two USB boards — detection alone cannot tell the models apart, which is
         // exactly why the caller asks the operator when no hardware is present.
-        // Only the spec's DefaultMotorRpm differs between models.
+        // The two specs are otherwise identical; the motor speed is StartupRpm above.
         public static readonly VoxonBoard FtdiBridge = new(
             DisplayName:       "FTDI USB 3.0 data bridge (FT600)",
             NameMatches:       new[] { "FTDI SuperSpeed-FIFO Bridge", "FTDI FT600" },
@@ -81,14 +94,12 @@ namespace Voxon
         public static readonly VoxonHardwareSpec VX2XL = new(
             ModelName:           "VX2XL",
             RequiredDeviceCount: Boards.Length,
-            Boards:              Boards,
-            DefaultMotorRpm:     600);
+            Boards:              Boards);
 
         public static readonly VoxonHardwareSpec VX2 = new(
             ModelName:           "VX2",
             RequiredDeviceCount: Boards.Length,
-            Boards:              Boards,
-            DefaultMotorRpm:     900);
+            Boards:              Boards);
 
         /// <summary>Single-shot enumeration. WMI typically takes ~0.5–1.5 s on first
         /// call. Each board is evaluated independently so the caller can name which

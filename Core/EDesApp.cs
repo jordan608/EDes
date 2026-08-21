@@ -612,25 +612,37 @@ namespace EDes
             }
         }
 
-        /// <summary>Row one: which board, and which mode. Always drawn, because "what am I
-        /// looking at and what mode am I in" is the one thing that is never not worth a
-        /// line — and it is the anchor everything below it reads relative to.</summary>
+        /// <summary>Row one: what am I looking at, and what mode am I in.
+        ///
+        /// Drawn for EVERY mode, and it is the only line that says so. There used to be a
+        /// second one -- DrawHudPanel printed its own "PCB &lt;name&gt;" title at a fixed
+        /// row -- which both duplicated this and collided with it once the text band was
+        /// moved to the very top of the volume. One line, taken from the shared row
+        /// cursor like everything else.</summary>
         private void DrawStatusHeader()
         {
-            string mode = ((EDesInspect)_s.InspectStage) switch
+            string what = ((EDesMode)_s.Mode) switch
+            {
+                EDesMode.Education => "EDUCATION  " + _scene.Active.Name.ToUpperInvariant(),
+                EDesMode.Scope     => "OSCILLOSCOPE",
+                _                  => BoardName() + "   " + InspectStageName(),
+            };
+
+            _hud.Text(new point3d(TextLeftX, _planeY, _topText.Row()), _textSize,
+                      Palette.TextHilite, what);
+        }
+
+        private string BoardName()
+            => (_board.HasGeometry || _board.Solids.Count > 0
+                ? _board.SourceName : "(no board)").ToUpperInvariant();
+
+        private string InspectStageName()
+            => ((EDesInspect)_s.InspectStage) switch
             {
                 EDesInspect.Signal    => "INSPECTOR MODE: SIGNALS",
                 EDesInspect.Component => "INSPECTOR MODE: COMPONENTS",
                 _                     => "CAMERA MODE",
             };
-
-            string board = _board.HasGeometry || _board.Solids.Count > 0
-                           ? _board.SourceName
-                           : "(no board)";
-
-            _hud.Text(new point3d(TextLeftX, _planeY, _topText.Row()), _textSize,
-                      Palette.TextHilite, board.ToUpperInvariant() + "   " + mode);
-        }
 
         /// <summary>True when an inspector is active AND the probe is actually on
         /// something. Both halves matter: with nothing selected the normal readouts are
@@ -725,7 +737,10 @@ namespace EDes
             // Reserve vertical space BEFORE drawing anything: two header rows at the
             // top, and a footer sized to the rows this mode will actually need. Blocks
             // then draw into their own band and cannot collide. See Sim/Layout.cs.
-            int headerRows = _s.ShowHudPanel ? 2 : 0;
+            // One for the status line, which is always drawn, plus one for the voxel
+            // readout when it is on. Reserved BEFORE anything draws, so geometry can
+            // never start inside them.
+            int headerRows = 1 + (_s.ShowHudPanel && !ProbeHasSelection ? 1 : 0);
             _layout = new FrameLayout(_zHalf, _step, headerRows, ReadoutRowsForMode(),
                                       _hudTopZ);
 
@@ -735,8 +750,11 @@ namespace EDes
             _topText = _layout.Readout();
 
             // FIRST, so it owns the top row of the display and everything else stacks
-            // beneath it.
-            if ((EDesMode)_s.Mode == EDesMode.Pcb) DrawStatusHeader();
+            // beneath it. Then the voxel readout, so the two chrome rows are adjacent
+            // and mode content starts below both -- rather than the readout drawing last
+            // at a fixed position and landing back on top of row one.
+            DrawStatusHeader();
+            if (_s.ShowHudPanel && !ProbeHasSelection) DrawHudPanel();
 
             switch ((EDesMode)_s.Mode)
             {
@@ -761,7 +779,6 @@ namespace EDes
             // selection sits at the very top of the display instead of under two rows of
             // information nobody is reading at that moment. The text band is only a few
             // rows tall, so anything kept is something else lost.
-            if (_s.ShowHudPanel && !ProbeHasSelection) DrawHudPanel();
 
             _batch.Flush(ledHost, ref vs);
 
@@ -1139,24 +1156,19 @@ namespace EDes
         }
 
         // ── Shared HUD ────────────────────────────────────────────────────────
+        /// <summary>The voxel budget readout, and nothing else. The mode title it used to
+        /// print as well is now DrawStatusHeader's single line -- printing it twice, once
+        /// here and once there, is what put cyan text through the yellow header.
+        ///
+        /// Left-aligned from the shared cursor rather than centred at a fixed row, so it
+        /// cannot land on top of anything and it lines up with the rest of the band.</summary>
         private void DrawHudPanel()
         {
-            float size = _textSize;
-
-            string mode = ((EDesMode)_s.Mode) switch
-            {
-                EDesMode.Education => "EDUCATION  " + _scene.Active.Name,
-                EDesMode.Scope     => "OSCILLOSCOPE",
-                _                  => "PCB  " + _board.SourceName.ToUpperInvariant(),
-            };
-            _hud.TextCentred(TextShiftX, _planeY, _layout.HeaderZ, size, Palette.Text, mode);
-
-            // Voxel budget readout — the single most useful number when tuning a
-            // scene for this display, so it is on the glass, not just in the UI.
             string budget = _lastVoxels + " / " + _s.MaxVoxels + " VOX";
             if (_lastDropped > 0) budget += "   +" + _lastDropped + " DROPPED";
-            _hud.TextCentred(TextShiftX, _planeY, _layout.SubHeaderZ, size * 0.8f,
-                             _lastDropped > 0 ? Palette.Warning : Palette.TextDim, budget);
+
+            _hud.Text(new point3d(TextLeftX, _planeY, _topText.Row()), _textSize * 0.8f,
+                      _lastDropped > 0 ? Palette.Warning : Palette.TextDim, budget);
         }
 
         /// <summary>SpaceNavigator readout in the volume: detection, the three
