@@ -26,6 +26,25 @@ namespace EDes
         /// <summary>Hard per-frame voxel ceiling. Everything the app draws is counted
         /// against this, HUD text included.</summary>
         public volatile int   MaxVoxels   = 150_000;
+
+        // ── Adaptive budget ───────────────────────────────────────────────────
+        /// <summary>Cut the voxel budget temporarily while the view is MOVING and the
+        /// display cannot keep up.
+        ///
+        /// Only while moving, on purpose: a still frame that renders slowly is one you are
+        /// studying, and quietly throwing away half of it is the wrong answer. A frame you
+        /// are dragging around is one where smoothness matters more than completeness.</summary>
+        public volatile bool  AdaptiveBudget = true;
+
+        /// <summary>Throttle below this VPS, recover above AdaptiveGoodVps. The gap is
+        /// hysteresis: with one threshold the budget would oscillate around it, which reads
+        /// as flicker rather than as a frame-rate save.</summary>
+        public volatile float AdaptiveLowVps  = 10f;
+        public volatile float AdaptiveGoodVps = 15f;
+
+        /// <summary>Floor for the throttle, as a fraction of MaxVoxels. Not zero — the
+        /// point is to stay usable while moving, not to blank the display.</summary>
+        public volatile float AdaptiveFloor = 0.15f;
         public volatile float TextSize    = 0.20f;
         public volatile int   FontIndex   = 2;      // 0 Classic, 1 Blocky, 2 Bold
         public volatile float TextWeight  = 1.0f;

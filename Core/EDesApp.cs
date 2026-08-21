@@ -127,6 +127,7 @@ namespace EDes
             DriveCamera(input, dt);
             Sync();
             RebuildLegend(dt);
+            TrackViewMotion();
 
             if (_s.PcbImportRequested) ImportBoard();
 
@@ -439,7 +440,11 @@ namespace EDes
 
             float size = _textSize * 0.85f;
             float x    = -_radius * 0.95f;
-            var   st   = new TextStack(-_zHalf * 0.92f, Hud.LineStep(size));
+
+            // Shares the frame's single top-of-display cursor rather than picking its own
+            // fraction of the height — a hand-picked -0.92 * zHalf is exactly how two
+            // blocks end up in the same voxels once one of them grows a line.
+            ref TextStack st = ref _topText;
 
             _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.TextHilite,
                       "INSPECTION MODE");
@@ -503,13 +508,18 @@ namespace EDes
             ReadBounds(ledHost, ref vs);
             ApplyNavigator(ledHost);
 
-            _batch.BeginFrame(_s.MaxVoxels, _radius, _zHalf, _spacing);
+            _batch.BeginFrame(EffectiveVoxelBudget(), _radius, _zHalf, _spacing);
 
             // Reserve vertical space BEFORE drawing anything: two header rows at the
             // top, and a footer sized to the rows this mode will actually need. Blocks
             // then draw into their own band and cannot collide. See Sim/Layout.cs.
             int headerRows = _s.ShowHudPanel ? 2 : 0;
-            _layout = new FrameLayout(_zHalf, _step, headerRows, FooterRowsForMode());
+            _layout = new FrameLayout(_zHalf, _step, headerRows, ReadoutRowsForMode());
+
+            // ONE cursor for every text block this frame, handed out first-come. That is
+            // what keeps two blocks from writing into the same rows now that they all
+            // share the top band instead of being split between the two ends.
+            _topText = _layout.Readout();
 
             switch ((EDesMode)_s.Mode)
             {
@@ -537,6 +547,65 @@ namespace EDes
             _lastVoxels  = _batch.Count;
             _lastDropped = _batch.Dropped;
             _engine.LiveVoxelCount = _lastVoxels;
+        }
+
+        // ── Adaptive budget ───────────────────────────────────────────────────
+        // Tracked individually rather than as a combined signature: summing the seven
+        // values into one number would let two simultaneous changes cancel and report the
+        // view as still while it was moving.
+        private float _lastPanX, _lastPanY, _lastPanZ, _lastZoom;
+        private float _lastYaw, _lastPitch, _lastRoll;
+        private float _budgetScale = 1f;
+        private bool  _viewMoving;
+
+        /// <summary>The budget to actually draw with this frame.
+        ///
+        /// Decay and recovery are per-SECOND, not per-frame. Per-frame rates would make
+        /// the throttle behave differently at 30 VPS than at 5 — and 5 is precisely when it
+        /// matters, so the slow case would get the weakest response. Recovery is
+        /// deliberately gentler than decay: rescue quickly, come back carefully, or the
+        /// budget pumps up and down across the threshold.</summary>
+        private int EffectiveVoxelBudget()
+        {
+            if (!_s.AdaptiveBudget)
+            {
+                _budgetScale = 1f;
+                return _s.MaxVoxels;
+            }
+
+            float vps   = _engine?.LiveVps ?? 0f;
+            float floor = Math.Clamp(_s.AdaptiveFloor, 0.02f, 1f);
+            float dt    = MathF.Max(1e-4f, _lastDt);
+
+            // A VPS of 0 means the loop has not measured one yet; treat it as healthy
+            // rather than throttling the very first frames to the floor.
+            bool struggling = vps > 0.01f && vps < _s.AdaptiveLowVps;
+            bool recovered  = vps <= 0.01f || vps > _s.AdaptiveGoodVps;
+
+            if (_viewMoving && struggling) _budgetScale -= dt * 1.5f;
+            else if (recovered || !_viewMoving) _budgetScale += dt * 0.5f;
+
+            _budgetScale = Math.Clamp(_budgetScale, floor, 1f);
+            return Math.Max(1_000, (int)(_s.MaxVoxels * _budgetScale));
+        }
+
+        /// <summary>Has the view moved since the last frame? Any of pan, zoom or
+        /// orientation counts.</summary>
+        private void TrackViewMotion()
+        {
+            const float eps = 1e-5f;
+            _viewMoving =
+                MathF.Abs(_cam.PanX  - _lastPanX)  > eps ||
+                MathF.Abs(_cam.PanY  - _lastPanY)  > eps ||
+                MathF.Abs(_cam.PanZ  - _lastPanZ)  > eps ||
+                MathF.Abs(_cam.Zoom  - _lastZoom)  > eps ||
+                MathF.Abs(_cam.Yaw   - _lastYaw)   > eps ||
+                MathF.Abs(_cam.Pitch - _lastPitch) > eps ||
+                MathF.Abs(_cam.Roll  - _lastRoll)  > eps;
+
+            _lastPanX = _cam.PanX; _lastPanY = _cam.PanY; _lastPanZ = _cam.PanZ;
+            _lastZoom = _cam.Zoom;
+            _lastYaw  = _cam.Yaw;  _lastPitch = _cam.Pitch; _lastRoll = _cam.Roll;
         }
 
         /// <summary>Read the display's true extents from the SDK every frame. The
@@ -568,19 +637,30 @@ namespace EDes
             _step     = Hud.LineStep(_textSize);
         }
 
-        /// <summary>Footer rows this mode needs — reserved before anything is drawn so
-        /// a readout can never land on top of the content above it.</summary>
-        private int FooterRowsForMode()
+        /// <summary>The single top-of-display text cursor for this frame. Every text block
+        /// draws from it, which is what stops two of them landing in the same rows now that
+        /// they all share one band instead of being split top and bottom.</summary>
+        private TextStack _topText;
+
+        /// <summary>Rows the top band needs this frame — reserved BEFORE anything draws,
+        /// so geometry can never start inside the text.</summary>
+        private int ReadoutRowsForMode()
         {
-            if (!_s.ShowLabels) return 0;
+            // The optional blocks share the same top band, so their rows have to be
+            // reserved here as well — otherwise the geometry band starts inside them.
+            int extra = 0;
+            if (_s.InspectMode) extra += 9;   // heading + probe line + up to 7 detail rows
+            if (_s.ShowNavDiag) extra += 5;
+
+            if (!_s.ShowLabels) return extra;
             switch ((EDesMode)_s.Mode)
             {
                 case EDesMode.Education:
-                    return 3;                                    // law + totals + V=IR
+                    return extra + 3;                                    // law + totals + V=IR
                 case EDesMode.Scope:
-                    return 1 + (_s.ScopeMeasurements ? EnabledChannelCount() : 0);
+                    return extra + 1 + (_s.ScopeMeasurements ? EnabledChannelCount() : 0);
                 default:
-                    return 2 + VisibleLayerRows()
+                    return extra + 2 + VisibleLayerRows()
                              + ((_s.PcbShowDocs && _board.Documents.Count > 0) ? 1 : 0)
                              + (_s.PcbCursor ? 1 : 0);
             }
@@ -625,7 +705,7 @@ namespace EDes
             if (!_s.ShowLabels) return;
 
             // Footer: the law this circuit demonstrates, then its solved totals.
-            var f = _layout.Footer();
+            ref TextStack f = ref _topText;
             _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.TextHilite,
                              _scene.Active.Law);
             _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.Text,
@@ -643,7 +723,7 @@ namespace EDes
             DrawScopePanel(_layout.ContentTopZ, _layout.ContentBottomZ, _radius * 0.88f);
 
             if (!_s.ShowLabels) return;
-            var f = _layout.Footer();
+            ref TextStack f = ref _topText;
             _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize * 0.85f, Palette.TextDim,
                 _scope.Identity.Length > 0 ? _scope.Identity : _scope.Status);
             if (_s.ScopeMeasurements) DrawScopeMeasurements(ref f);
@@ -735,7 +815,7 @@ namespace EDes
 
             if (!_s.ShowLabels) return;
 
-            var f = _layout.Footer();
+            ref TextStack f = ref _topText;
 
             if (!_board.HasGeometry)
             {
@@ -834,7 +914,7 @@ namespace EDes
         {
             float size = _textSize * 0.8f;
             float x    = -_radius * 0.92f;
-            var   st   = new TextStack(_layout.ContentTopZ, Hud.LineStep(size));
+            ref TextStack st = ref _topText;   // shared top-of-display cursor
 
             bool detected = _nav.Present || _navHostUsable || _nav.Devices > 0;
             _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size,
@@ -1391,6 +1471,22 @@ namespace EDes
                             "dropped first, then labels, then geometry.");
             ui.AddSlider(sec, "Max voxels / frame", 5000, VoxelBatch.MAX_CAPACITY, _s.MaxVoxels,
                          v => _s.MaxVoxels = (int)v, "F0");
+            ui.AddToggle(sec, "Reduce voxels while moving if slow", _s.AdaptiveBudget,
+                         v => _s.AdaptiveBudget = v);
+            ui.AddSlider(sec, "Throttle below VPS", 2, 30, _s.AdaptiveLowVps,
+                         v => _s.AdaptiveLowVps = (float)v, "F1");
+            ui.AddSlider(sec, "Recover above VPS", 2, 30, _s.AdaptiveGoodVps,
+                         v => _s.AdaptiveGoodVps = (float)v, "F1");
+            ui.AddSlider(sec, "Throttle floor (fraction)", 0.05, 1.0, _s.AdaptiveFloor,
+                         v => _s.AdaptiveFloor = (float)v, "F2");
+            ui.AddInfo(sec, "The budget is only cut while the view is MOVING — a still " +
+                            "frame that renders slowly is one you are studying, and " +
+                            "silently dropping half of it would be the wrong answer. " +
+                            "Recovery is slower than the cut so the budget does not pump " +
+                            "up and down across the threshold.");
+            ui.AddLiveInfo(sec, () =>
+                $"budget scale {_budgetScale * 100f:0}%  ->  {(int)(_s.MaxVoxels * _budgetScale):N0} vox"
+                + $"   ({(_viewMoving ? "moving" : "still")}, {_engine?.LiveVps ?? 0f:0.0} VPS)", 0.3);
             ui.AddSlider(sec, "Voxel density (shared with Simulator tab)", 0.25, 3.0,
                          _engine.VoxelDensity, v => _engine.VoxelDensity = (float)v, "F2");
             ui.AddSlider(sec, "Text size", 0.05, 0.6, _s.TextSize, v => _s.TextSize = (float)v, "F2");

@@ -15,6 +15,12 @@
 //
 //  Remember -Z is up: rows advance by ADDING to z, and the volume runs from
 //  z = -zHalf (top) to z = +zHalf (bottom), with the origin at the centre.
+//
+//  ALL text lives at the TOP. The readout band used to sit at the bottom, which
+//  split the reading between two ends of the volume — and on a display you walk
+//  around, having to look in two places to read one machine is worse than having
+//  slightly less room for geometry. So the header and the readouts are one
+//  contiguous block at the top and the geometry gets everything below it.
 // ═══════════════════════════════════════════════════════════════════════════
 
 using System;
@@ -63,11 +69,11 @@ namespace EDes.Sim
         public readonly float Step;               // one text row
         public readonly float HeaderZ;            // title row
         public readonly float SubHeaderZ;         // voxel/status row
-        public readonly float ContentTopZ;        // first free row under the header
-        public readonly float ContentBottomZ;     // last free row above the footer
-        public readonly float FooterTopZ;         // first footer row
+        public readonly float ContentTopZ;        // first free row under ALL the text
+        public readonly float ContentBottomZ;     // last free row (the volume floor)
+        public readonly float ReadoutTopZ;        // first readout row, under the header
 
-        public FrameLayout(float zHalf, float step, int headerRows, int footerRows)
+        public FrameLayout(float zHalf, float step, int headerRows, int readoutRows)
         {
             // Use the FULL height of the volume: z runs -zHalf .. +zHalf.
             TopZ    = -zHalf;
@@ -77,12 +83,28 @@ namespace EDes.Sim
             HeaderZ    = TopZ;
             SubHeaderZ = TopZ + step;
 
-            ContentTopZ    = TopZ + step * (headerRows + 0.5f);
-            FooterTopZ     = BottomZ - step * Math.Max(0, footerRows);
-            ContentBottomZ = FooterTopZ - step * 0.5f;
+            // Header, then readouts, then geometry — all text contiguous at the top.
+            ReadoutTopZ = TopZ + step * (headerRows + 0.25f);
+
+            // The text band is CAPPED to the top half. Without this it can swallow the
+            // whole volume: inspection mode alone asks for nine rows, and on a shallow
+            // display that pushed ContentTopZ past the floor, so the board disappeared
+            // to make room for text about the board. When the two cannot both fit, the
+            // geometry wins and the surplus text runs over it — overlapping text is
+            // ugly, no geometry is useless.
+            float textFloor = TopZ + (BottomZ - TopZ) * 0.5f;
+            float wanted    = ReadoutTopZ + step * (Math.Max(0, readoutRows) + 0.5f);
+
+            ContentTopZ    = MathF.Min(wanted, textFloor);
+            ContentBottomZ = BottomZ;
         }
 
         public float ContentHeight => MathF.Max(0f, ContentBottomZ - ContentTopZ);
+
+        /// <summary>How many readout rows actually fit above the content band. Fewer than
+        /// asked for means the surplus is drawing over the geometry.</summary>
+        public int ReadoutRowsThatFit
+            => Step > 1e-6f ? Math.Max(0, (int)((ContentTopZ - ReadoutTopZ) / Step)) : 0;
 
         /// <summary>Split the content band: the first `fraction` goes to the upper
         /// block (e.g. the circuit), the rest to the lower one (e.g. the scope).</summary>
@@ -100,6 +122,9 @@ namespace EDes.Sim
             lowerBottom = ContentBottomZ;
         }
 
-        public TextStack Footer() => new TextStack(FooterTopZ, Step);
+        /// <summary>A cursor over the readout band at the top. Named for what it is
+        /// rather than where it used to be — calling a block at the top of the display a
+        /// "footer" would be actively misleading to the next reader.</summary>
+        public TextStack Readout() => new TextStack(ReadoutTopZ, Step);
     }
 }

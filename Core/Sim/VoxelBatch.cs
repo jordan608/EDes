@@ -25,14 +25,28 @@ namespace EDes.Sim
 {
     public sealed class VoxelBatch
     {
-        /// <summary>Hard ceiling on the settings slider — sizes the scratch arrays.</summary>
-        public const int MAX_CAPACITY = 400_000;
+        /// <summary>Hard ceiling on the settings slider.
+        ///
+        /// The scratch arrays are NOT sized to this. At 5M the four of them would be 80 MB
+        /// of pinned-ish Large Object Heap allocated at construction whether or not the
+        /// budget was ever raised, which is a real cost for a ceiling most boards never
+        /// approach. They grow to whatever BeginFrame asks for instead, and never shrink —
+        /// so memory tracks what is actually being drawn, and a busy frame does not pay
+        /// for a reallocation twice.</summary>
+        public const int MAX_CAPACITY = 5_000_000;
 
-        private readonly float[] _x = new float[MAX_CAPACITY];
-        private readonly float[] _y = new float[MAX_CAPACITY];
-        private readonly float[] _z = new float[MAX_CAPACITY];
-        private readonly int[]   _c = new int[MAX_CAPACITY];
+        /// <summary>Starting capacity — enough for a typical board without a single
+        /// resize, so the common case never allocates after startup.</summary>
+        private const int INITIAL_CAPACITY = 200_000;
+
+        private float[] _x = new float[INITIAL_CAPACITY];
+        private float[] _y = new float[INITIAL_CAPACITY];
+        private float[] _z = new float[INITIAL_CAPACITY];
+        private int[]   _c = new int[INITIAL_CAPACITY];
         private int _n;
+
+        /// <summary>Voxels the scratch arrays can currently hold.</summary>
+        public int Capacity => _x.Length;
 
         // ── Live frame parameters (set by BeginFrame) ─────────────────────────
         public int   Limit   { get; private set; } = MAX_CAPACITY;
@@ -54,6 +68,24 @@ namespace EDes.Sim
             Radius  = radius;
             ZHalf   = zHalf;
             Spacing = MathF.Max(0.002f, spacing);
+
+            // Grow to the requested budget, never shrink. Shrinking would mean
+            // reallocating every time an adaptive throttle eased off, i.e. exactly when
+            // the frame is already struggling.
+            if (_x.Length < Limit) Grow(Limit);
+        }
+
+        private void Grow(int need)
+        {
+            // Round up in powers of two from the current size, so repeatedly nudging the
+            // budget slider does not reallocate on every step.
+            int cap = _x.Length;
+            while (cap < need && cap < MAX_CAPACITY) cap = Math.Min(MAX_CAPACITY, cap * 2);
+
+            _x = new float[cap];
+            _y = new float[cap];
+            _z = new float[cap];
+            _c = new int[cap];
         }
 
         /// <summary>True if the point is inside the physical display volume.</summary>
