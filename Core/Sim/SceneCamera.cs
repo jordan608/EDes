@@ -83,11 +83,34 @@ namespace EDes.Sim
         /// object up with the volume itself.</summary>
         public bool LocalAxes = true;
 
+        /// <summary>Blocks ALL rotation, whatever the per-axis locks say. Set while
+        /// inspecting: the probe is positioned in display space, so a scene that kept
+        /// turning would slide the board out from under a stationary pointer.</summary>
+        public bool RotationLocked;
+
+        /// <summary>Per-axis rotation locks, in whichever frame LocalAxes selects — so a
+        /// lock means the same thing as the axis it is named after, rather than silently
+        /// referring to the other frame.</summary>
+        public bool LockRotX, LockRotY, LockRotZ;
+
         /// <summary>Rotate by three small angles, about whichever frame LocalAxes selects.
-        /// Callers that do not care which use this; the two explicit methods exist for the
-        /// places that genuinely mean one or the other.</summary>
+        ///
+        /// This is the ONLY funnel every input path uses — ApplyNav, Orbit and RollBy all
+        /// come through here — which is why the locks live here rather than at each call
+        /// site. Put them anywhere else and the next input path added would quietly
+        /// bypass them. RotateLocal/RotateGlobal remain the unlocked primitives.</summary>
         public void Rotate(float aboutX, float aboutY, float aboutZ)
         {
+            if (RotationLocked) return;
+
+            if (LockRotX) aboutX = 0f;
+            if (LockRotY) aboutY = 0f;
+            if (LockRotZ) aboutZ = 0f;
+
+            // Everything locked out, or nothing asked for: skip the work AND the
+            // re-orthonormalisation, so a locked camera cannot drift.
+            if (aboutX == 0f && aboutY == 0f && aboutZ == 0f) return;
+
             if (LocalAxes) RotateLocal(aboutX, aboutY, aboutZ);
             else           RotateGlobal(aboutX, aboutY, aboutZ);
         }
@@ -151,7 +174,12 @@ namespace EDes.Sim
             y = y * iz - PanY;
             z = z * iz - PanZ;
 
+            // Mirrors Transform's swap so this stays a true inverse if HORIZONTAL_IS_X is
+            // ever flipped. Unreachable while the const is true, hence the suppression —
+            // deleting it would silently break the inverse the day the switch moves.
+#pragma warning disable 162
             if (!HORIZONTAL_IS_X) { (x, y) = (y, x); }
+#pragma warning restore 162
             return new point3d(x, y, z);
         }
 

@@ -284,6 +284,11 @@ namespace EDes
         {
             const float KeyRot = 1.2f, KeyZoom = 0.9f;
 
+            // Pushed here as well as in the puck path: DriveCamera runs FIRST, so relying
+            // on the puck path to have set the policy would leave one frame of keyboard
+            // rotation escaping the locks every time one was toggled.
+            ApplyCameraLocks();
+
             float yaw = 0, pitch = 0;
             if (IsDown(VX_KEYS.KB_A)) yaw   -= KeyRot * dt;
             if (IsDown(VX_KEYS.KB_D)) yaw   += KeyRot * dt;
@@ -368,7 +373,7 @@ namespace EDes
                 if (bothNow && !bothPrev) ToggleInspect();
                 _prevNavButtons = raw.Buttons;
 
-                _cam.LocalAxes = _s.NavLocalAxes;
+                ApplyCameraLocks();
 
                 // Zoom is on the individual buttons, and both-at-once already cancels
                 // there, so the mode switch cannot also zoom.
@@ -377,6 +382,24 @@ namespace EDes
 
                 if (_s.InspectMode) DriveProbe(_navLive, _lastDt);
             }
+        }
+
+        /// <summary>Push the rotation policy onto the camera. Called from the input path
+        /// every frame rather than only when a toggle changes, so the camera cannot be left
+        /// holding a stale policy after a settings load or reset.</summary>
+        private void ApplyCameraLocks()
+        {
+            _cam.LocalAxes = _s.NavLocalAxes;
+
+            // Inspection mode locks rotation outright. The probe is positioned in DISPLAY
+            // space and deliberately not camera-transformed, so a scene that kept turning
+            // would drag the board out from under a pointer that had not moved — the
+            // reading would change while the operator held still.
+            _cam.RotationLocked = _s.InspectMode;
+
+            _cam.LockRotX = _s.LockRotX;
+            _cam.LockRotY = _s.LockRotY;
+            _cam.LockRotZ = _s.LockRotZ;
         }
 
         private void ToggleInspect()
@@ -394,6 +417,13 @@ namespace EDes
         }
 
         /// <summary>Move the probe, clamped inside the physical volume.
+        ///
+        /// Motion is in GLOBAL (display) coordinates, never the board's. The puck axes map
+        /// straight onto the display axes with the camera taking no part, so pushing right
+        /// moves the probe right on the display no matter how the board happens to be
+        /// oriented. Driving it in board space instead would mean the same push went a
+        /// different direction for every orientation, which is unusable for a pointer —
+        /// and it is also why rotation is locked while inspecting.
         ///
         /// Clamped to the CYLINDER, not a box: the display is round in XY, so a box clamp
         /// would let the probe sit in a corner where nothing is ever drawn — it would
@@ -1537,6 +1567,23 @@ namespace EDes
             });
             ui.AddButton(sec, "Reset observed peaks", () => { _navPeakTrans = 0f; _navPeakRot = 0f; });
             ui.AddButton(sec, "Reset scene camera", () => _cam.Reset());
+            ui.AddInfo(sec, "Lock an axis to stop it rotating in normal camera mode — " +
+                            "useful for keeping a board flat while turning it. The axes " +
+                            "follow the LOCAL/GLOBAL choice below. Inspection mode locks " +
+                            "all three on its own, because the probe would otherwise have " +
+                            "the board slide out from under it.");
+            ui.AddToggle(sec, "Lock X rotation", _s.LockRotX, v => _s.LockRotX = v);
+            ui.AddToggle(sec, "Lock Y rotation", _s.LockRotY, v => _s.LockRotY = v);
+            ui.AddToggle(sec, "Lock Z rotation", _s.LockRotZ, v => _s.LockRotZ = v);
+            ui.AddLiveInfo(sec, () =>
+            {
+                if (_s.InspectMode) return "rotation LOCKED (inspection mode)";
+                bool any = _s.LockRotX || _s.LockRotY || _s.LockRotZ;
+                if (!any) return "all three axes free";
+                return "locked: " + (_s.LockRotX ? "X " : "") + (_s.LockRotY ? "Y " : "")
+                                  + (_s.LockRotZ ? "Z" : "");
+            }, 0.3);
+
             ui.AddButton(sec, "Rotate about: LOCAL / GLOBAL axes", () =>
             {
                 _s.NavLocalAxes = !_s.NavLocalAxes;

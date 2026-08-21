@@ -91,6 +91,13 @@ namespace EDes
         /// global is easier when lining the board up with the volume itself.</summary>
         public volatile bool  NavLocalAxes = true;
 
+        /// <summary>Lock rotation about an individual axis during normal camera mode.
+        /// The axes are whichever frame NavLocalAxes selects, so a lock always means the
+        /// axis it is named after. Inspection mode locks all three regardless.</summary>
+        public volatile bool  LockRotX = false;
+        public volatile bool  LockRotY = false;
+        public volatile bool  LockRotZ = false;
+
         // ── Inspection mode ───────────────────────────────────────────────────
         /// <summary>Both puck buttons together toggle this. In inspection mode the puck's
         /// translation drives a probe inside the volume instead of panning the scene;
