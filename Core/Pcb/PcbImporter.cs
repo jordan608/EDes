@@ -421,10 +421,15 @@ namespace EDes.Pcb
             });
             board.ComputeBounds();
 
-            if (gerbers + drills + meshes + parts == 0)
+            // Solids count as geometry. They did not, which meant a plain STEP file -- no
+            // Gerbers, no drill, just a model -- was rejected here as "no geometry" and
+            // returned BEFORE connectivity and designator linking ever ran. A STEP file on
+            // its own is a perfectly reasonable thing to want to look at.
+            if (gerbers + drills + meshes + parts + solids == 0)
             {
                 board.Notes.Add("No geometry found — expected Gerber (.gbr/.gtl/...), " +
-                                "drill (.drl), mesh (.stl/.glb) or a placement file." +
+                                "drill (.drl), mesh (.stl/.glb), STEP (.step/.stp) or a " +
+                                "placement file." +
                                 (docs > 0 ? $" ({docs} document(s) were catalogued.)" : ""));
                 return docs > 0;
             }

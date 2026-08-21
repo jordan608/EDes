@@ -371,6 +371,20 @@ namespace EDes.Pcb
                     for (int i = 0; i < r.Count; i++) Hit(r.X[i], r.Y[i]);
             }
 
+            // A STEP-only import has no layers at all, so the solids ARE the extents.
+            // Folded in whenever there is no outline: with a board outline present the
+            // outline is the authority (a tall connector would otherwise inflate the
+            // footprint), but with no outline the model is all there is, and leaving it
+            // out left the bounds empty — which reads downstream as "no geometry" and
+            // nothing draws.
+            if (!haveOutline)
+                foreach (var sol in Solids)
+                {
+                    if (!sol.Visible || !sol.HasGeometry) continue;
+                    Hit(sol.MinX, sol.MinY);
+                    Hit(sol.MaxX, sol.MaxY);
+                }
+
             // Drills and parts are inside the outline by definition; only fold them in
             // when there is no outline to trust.
             if (!haveOutline)

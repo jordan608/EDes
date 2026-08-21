@@ -308,6 +308,36 @@ END-ISO-10303-21;
             Ok("garbage input reports rather than throws", m == null && notes.Count > 0);
         }
 
+        // ── A STEP file on its own, with no Gerbers ──────────────────────────
+        // The case that used to be rejected: PcbImporter counted gerbers, drills, meshes
+        // and parts as "geometry" but not SOLIDS, so a plain model returned early as "no
+        // geometry" -- before connectivity and designator linking even ran. And
+        // ComputeBounds ignored solids, so the extents stayed empty, which reads
+        // downstream as no geometry too and draws nothing.
+        {
+            var board = new PcbBoard();
+            string only = Write("standalone.step", RectSolid(".MILLI.", 12, 7));
+            bool ok = PcbImporter.Import(only, board, 60_000);
+
+            Ok("a bare STEP file imports at all", ok);
+            Ok($"the solid came through ({board.Solids.Count})", board.Solids.Count == 1);
+            Ok("and it counts as geometry, so something will draw", board.HasGeometry);
+            Ok($"bounds come from the solid ({board.WidthMm:0.##} x {board.HeightMm:0.##} mm)",
+               Math.Abs(board.WidthMm - 12) < 0.01 && Math.Abs(board.HeightMm - 7) < 0.01);
+            Ok("no layers, as expected", board.Layers.Count == 0);
+            Ok("the import log records it as STEP",
+               board.ImportLog.Exists(f => f.Role == "STEP" && f.Used));
+
+            // A folder holding only a STEP must work the same way.
+            string dir = Path.Combine(Path.GetTempPath(), "edes_step_only");
+            Directory.CreateDirectory(dir);
+            File.Copy(only, Path.Combine(dir, "model.step"), overwrite: true);
+            var fromDir = new PcbBoard();
+            Ok("a folder containing only a STEP file also imports",
+               PcbImporter.Import(dir, fromDir, 60_000) && fromDir.Solids.Count == 1 &&
+               fromDir.HasGeometry);
+        }
+
         // ── The real Altium export, when configured ──────────────────────────
         // Found by searching the configured fixture folder, so neither the machine's
         // paths nor the project's name appear in this repository.
@@ -377,6 +407,17 @@ END-ISO-10303-21;
             }
         Ok($"all triangles lie in their face plane (worst {worstOffPlane:0.0000} mm)",
            worstOffPlane < 0.01);
+
+        // And the real assembly, imported on its own with no Gerbers alongside it.
+        {
+            var solo = new PcbBoard();
+            bool ok = PcbImporter.Import(real, solo, 60_000);
+            Console.WriteLine($"      standalone import: {ok}, {solo.Solids.Count} solid(s), " +
+                              $"{solo.WidthMm:0.##} x {solo.HeightMm:0.##} mm");
+            Ok("the real STEP imports standalone", ok && solo.Solids.Count > 10);
+            Ok("with usable bounds from the model alone",
+               solo.HasGeometry && solo.WidthMm > 1 && solo.HeightMm > 1);
+        }
 
         Ok($"found the 27 B-rep solids ({big.SolidCount})", big.SolidCount >= 20);
         Ok($"edge count is the right order ({big.TotalEdges})",
