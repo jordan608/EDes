@@ -1295,6 +1295,27 @@ namespace EDes
                             "See docs/PCB_IMPORT.md.");
             ui.AddTextBox(sec, "Path (folder or file)", _s.PcbPath, v => _s.PcbPath = v.Trim('"', ' '));
             ui.AddButton(sec, "Import / reload", () => _s.PcbImportRequested = true);
+
+            // Toggling this RE-IMPORTS. Tessellation happens at import time, so flipping
+            // the flag on its own would change nothing on screen until the next import —
+            // which reads as a dead button rather than as a setting that needs applying.
+            ui.AddButton(sec, "STEP mode: wireframe <-> tessellated STL", () =>
+            {
+                _s.PcbTessellate = !_s.PcbTessellate;
+                if (_s.PcbPath.Length > 0) _s.PcbImportRequested = true;
+            });
+            ui.AddLiveInfo(sec, () =>
+            {
+                if (!_s.PcbTessellate)
+                    return "STEP: WIREFRAME — exact edges, planar faces filled, curved "
+                         + "faces left empty (no external tool needed)";
+
+                string tool = StepConverter.Discover(_s.PcbTessellator, out string how);
+                return tool.Length > 0
+                    ? "STEP: TESSELLATED STL — curved surfaces filled and lit, via "
+                      + System.IO.Path.GetFileName(tool)
+                    : "STEP: TESSELLATED requested, but " + how;
+            }, 1.0);
             ui.AddButton(sec, "Clear board", () =>
             {
                 _s.PcbPath = "";
@@ -1329,8 +1350,6 @@ namespace EDes
             ui.AddToggle(sec, "STEP / CAD wireframe", _s.PcbCad,     v => _s.PcbCad = v);
             ui.AddSlider(sec, "CAD brightness", 0.2, 2.0, _s.PcbCadBright,
                          v => _s.PcbCadBright = (float)v, "F2");
-            ui.AddToggle(sec, "Tessellate STEP (curved surfaces)", _s.PcbTessellate,
-                         v => _s.PcbTessellate = v);
             ui.AddSlider(sec, "Tessellation detail (mm)", 0.05, 3.0, _s.PcbTessellateTol,
                          v => _s.PcbTessellateTol = (float)v, "F2");
             ui.AddTextBox(sec, "Tessellator command (blank = auto)", _s.PcbTessellator,
