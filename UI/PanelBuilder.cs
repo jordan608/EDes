@@ -197,6 +197,14 @@ namespace EDes.UI
         // built once, so a static AddInfo would show whatever was true at build time.
         // Polled at 1 Hz on the UI thread; the supplied func must only read volatile
         // or atomically-assigned state.
+        //
+        // Teardown must be driven by DetachedFromVisualTree, NOT by polling
+        // GetVisualRoot() inside Tick: this panel is built (behind a collapsed
+        // Expander, or even before MainWindow is shown past the hardware-preflight
+        // splash) well before it is ever attached to a Window, so a "root is null"
+        // check on the first tick reads as "torn down" and kills the timer
+        // permanently before the reader ever sees a live value. Detach only fires on
+        // a genuine removal (e.g. the settings panel is rebuilt for a new mode).
         public void AddLiveInfo(StackPanel p, Func<string> text, double intervalSeconds = 1.0)
         {
             var tb = new TextBlock
@@ -212,12 +220,9 @@ namespace EDes.UI
             {
                 Interval = TimeSpan.FromSeconds(intervalSeconds),
             };
-            timer.Tick += (_, _) =>
-            {
-                if (tb.GetVisualRoot() == null) { timer.Stop(); return; }   // panel replaced
-                tb.Text = text();
-            };
+            timer.Tick += (_, _) => tb.Text = text();
             timer.Start();
+            tb.DetachedFromVisualTree += (_, _) => timer.Stop();
             p.Children.Add(tb);
         }
 
