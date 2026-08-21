@@ -91,12 +91,23 @@ namespace EDes.Sim.Scpi
         {
             if (_stream == null) throw new InvalidOperationException("not open");
             var sb = new StringBuilder(64);
+
+            // Leading terminators are SKIPPED rather than treated as an empty reply.
+            // No SCPI query answers with nothing, so a leading newline can only be a
+            // leftover from the previous reply — and returning "" for it turns one
+            // mis-framed read into a failure of the NEXT command, which is where the
+            // symptom used to appear and the cause did not.
             for (int i = 0; i < 64 * 1024; i++)
             {
                 int b = _stream.ReadByte();
                 if (b < 0) break;                 // closed
-                if (b == '\n') break;
-                if (b != '\r') sb.Append((char)b);
+                if (b == '\n' || b == '\r')
+                {
+                    if (sb.Length == 0) continue; // still waiting for the reply to start
+                    if (b == '\n') break;
+                    continue;                     // bare CR inside a reply
+                }
+                sb.Append((char)b);
             }
             return sb.ToString();
         }
@@ -130,10 +141,32 @@ namespace EDes.Sim.Scpi
                 got += n;
             }
 
-            // Drain any payload that did not fit, plus the trailing newline, so the
-            // next command does not read this reply's leftovers.
+            // Drain any payload that did not fit.
             for (int i = want; i < length; i++) _stream.ReadByte();
-            if (_stream.DataAvailable) _stream.ReadByte();
+
+            // Then the response terminator, with a BLOCKING read.
+            //
+            // This used to be `if (_stream.DataAvailable) _stream.ReadByte()`, which only
+            // consumed the terminator when it had ALREADY arrived. DataAvailable is a
+            // snapshot of the receive buffer, and an instrument routinely sends the block
+            // and its terminator in separate packets — so most of the time the terminator
+            // had not landed yet, was left in the stream, and became the first byte of the
+            // NEXT reply. ReadLine then returned an empty string, the following query
+            // failed to parse, and the read came back null. Intermittently: it depended
+            // entirely on packet timing, which is why it looked like flakiness rather than
+            // a defect.
+            //
+            // IEEE-488.2 always terminates a definite-length block response, so waiting
+            // for it is correct rather than optimistic. Wrapped because a device that
+            // omits it would otherwise hit the socket timeout and throw away a payload
+            // that is already complete and correct.
+            try
+            {
+                int b = _stream.ReadByte();
+                if (b == '\r') _stream.ReadByte();      // CRLF
+            }
+            catch (System.IO.IOException) { /* no terminator: the payload still stands */ }
+
             return got;
         }
 

@@ -726,9 +726,10 @@ namespace EDes
                 case EDesMode.Scope:
                     return extra + 1 + (_s.ScopeMeasurements ? EnabledChannelCount() : 0);
                 default:
-                    return extra + 2 + VisibleLayerRows()
-                             + ((_s.PcbShowDocs && _board.Documents.Count > 0) ? 1 : 0)
-                             + (_s.PcbCursor ? 1 : 0);
+                    // Two summary rows plus the cursor row when it is on. The layer legend
+                    // and document inventory are no longer drawn, so reserving their rows
+                    // would push the geometry down for text that never appears.
+                    return extra + 2 + (_s.PcbCursor ? 1 : 0);
             }
         }
 
@@ -738,18 +739,6 @@ namespace EDes
             for (int ch = 0; ch < ScopeSource.MAX_CHANNELS; ch++)
                 if ((_s.ScopeChannelMask & (1 << ch)) != 0 && ch < _scope.ChannelCount) n++;
             return Math.Max(1, n);
-        }
-
-        private int VisibleLayerRows()
-        {
-            int n = 0;
-            for (int i = 0; i < _board.Layers.Count && n < 6; i++)
-            {
-                if (!_board.Layers[i].Visible) continue;
-                if (_s.PcbIsolate >= 0 && _s.PcbIsolate != i) continue;
-                n++;
-            }
-            return n;
         }
 
         // ── Mode: education ───────────────────────────────────────────────────
@@ -910,57 +899,16 @@ namespace EDes
                 "MIN TRACK " + _board.MinTrackWidth().ToString("0.000") + "MM   " +
                 "MIN DRILL " + _board.MinDrill().ToString("0.000") + "MM");
 
-            // Layer legend: which plane in the stack is which file.
-            int shown = 0;
-            for (int i = 0; i < _board.Layers.Count && shown < 6; i++)
-            {
-                var l = _board.Layers[i];
-                if (!l.Visible) continue;
-                if (_s.PcbIsolate >= 0 && _s.PcbIsolate != i) continue;
-                _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize * 0.85f, l.Colour,
-                                 l.Kind.ToString().ToUpperInvariant() + "  " + l.ObjectCount);
-                shown++;
-            }
-
-            if (_s.PcbShowDocs && _board.Documents.Count > 0)
-                _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize * 0.85f, Palette.TextDim,
-                                 DesignInventoryLine());
+            // The layer legend and the document inventory used to print here. Both are
+            // now redundant: the window's legend overlay shows every layer with its
+            // colour and a visibility box, and the import inventory lists the documents
+            // in full. Reprinting them in the volume spent most of a very short text band
+            // on information that is better presented on screen.
 
             if (_s.PcbCursor)
                 _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.TextHilite,
                     "CURSOR X " + _s.PcbCursorX.ToString("0.00") +
                     "  Y " + _s.PcbCursorY.ToString("0.00") + " MM");
-        }
-
-        /// <summary>One line summarising what the design package contains, so the
-        /// display says whether the folder is complete, not just what is drawable.</summary>
-        private string DesignInventoryLine()
-        {
-            int sch = 0, dwg = 0, net = 0, cad = 0, bom = 0, sheets = 0;
-            foreach (var d in _board.Documents)
-            {
-                switch (d.Kind)
-                {
-                    case DocKind.Schematic: sch++; sheets += d.Pages; break;
-                    case DocKind.Drawing:   dwg++; break;
-                    case DocKind.Netlist:   net++; break;
-                    case DocKind.Cad3D:     cad++; break;
-                    case DocKind.Bom:       bom++; break;
-                }
-            }
-
-            var sb = new StringBuilder();
-            if (sch > 0) sb.Append("SCH ").Append(sch)
-                           .Append(sheets > 0 ? "/" + sheets + "SH" : "").Append("  ");
-            if (dwg > 0) sb.Append("DWG ").Append(dwg).Append("  ");
-            if (cad > 0) sb.Append("3D ").Append(cad).Append("  ");
-            if (net > 0) sb.Append("NET ").Append(net).Append("  ");
-            if (bom > 0) sb.Append("BOM ").Append(_board.BomLines.Count).Append("  ");
-            if (_board.Drc.Parsed)
-                sb.Append("DRC ").Append(_board.Drc.Violations)
-                  .Append('/').Append(_board.Drc.Rules).Append("  ");
-            if (sb.Length == 0) sb.Append(_board.Documents.Count).Append(" DOCS");
-            return sb.ToString().TrimEnd();
         }
 
         // ── Shared HUD ────────────────────────────────────────────────────────

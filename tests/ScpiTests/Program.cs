@@ -139,10 +139,20 @@ var server = Task.Run(async () =>
                 var payload = new byte[POINTS];
                 for (int i = 0; i < POINTS; i++) payload[i] = (byte)(i % 256);
 
+                // Header, payload and TERMINATOR are sent as three separate packets
+                // with a deliberate pause before the terminator. A real instrument splits
+                // them whenever it feels like it, which made the client's terminator
+                // handling fail roughly one run in six — the timing decided it, so the
+                // bug looked like flakiness. Forcing the split makes the client either
+                // right every run or wrong every run.
                 var head = Encoding.ASCII.GetBytes($"#9{POINTS:000000000}");
                 await stream.WriteAsync(head);
+                await stream.FlushAsync();
                 await stream.WriteAsync(payload);
+                await stream.FlushAsync();
+                await Task.Delay(30);
                 await stream.WriteAsync(Encoding.ASCII.GetBytes("\n"));
+                await stream.FlushAsync();
             }
             // Anything else is a set-command with no reply.
         }
@@ -183,9 +193,26 @@ try
         CheckTrue("entire 1400-point block decoded without offset", ramp);
     }
 
-    // A second read on the same link must work (modal state, no re-open).
+    // A second read on the same link must work (modal state, no re-open). This is the
+    // check that used to fail intermittently: the previous block's terminator was left in
+    // the stream and became an empty reply to this read's first query.
     var wf2 = scope.ReadChannel(2);
     CheckTrue("second channel read on the same connection", wf2 != null && wf2.Count == POINTS);
+
+    // A THIRD, so a fix that merely shifts the leftover by one reply is caught too.
+    var wf3 = scope.ReadChannel(1);
+    CheckTrue("third read still frames correctly", wf3 != null && wf3.Count == POINTS);
+
+    if (wf3 != null)
+    {
+        bool ramp3 = true;
+        for (int i = 0; i < POINTS; i++)
+        {
+            double expect = ((i % 256) - (-100) - 127) * 0.008;
+            if (Math.Abs(wf3.Volts[i] - expect) > 1e-5) { ramp3 = false; break; }
+        }
+        CheckTrue("and its payload is not offset by a stray terminator", ramp3);
+    }
 }
 catch (Exception ex)
 {
