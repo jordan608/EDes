@@ -168,6 +168,10 @@ Console.WriteLine("=== via layer spans ===");
 failures += PcbParserTests.ViaSpanChecks.Run();
 
 Console.WriteLine();
+Console.WriteLine("=== STL / STEP tessellation ===");
+failures += PcbParserTests.StlChecks.Run();
+
+Console.WriteLine();
 Console.WriteLine("=== STEP ===");
 failures += PcbParserTests.StepChecks.Run();
 

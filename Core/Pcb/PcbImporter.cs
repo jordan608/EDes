@@ -92,8 +92,18 @@ namespace EDes.Pcb
         /// tells the difference between "still parsing this 80 MB STEP" and "hung". A
         /// status set afterwards would name the last file that FINISHED, which is exactly
         /// the wrong one to know about.</summary>
+        /// <summary>Tessellation settings for STEP surfaces. Passed as a struct so adding
+        /// another knob later does not change the signature every caller uses.</summary>
+        public struct StepOptions
+        {
+            public bool   Tessellate;
+            public float  ToleranceMm;
+            public string Command;
+        }
+
         public static bool Import(string path, PcbBoard board, int meshPointBudget,
-                                  Action<string>? progress = null)
+                                  Action<string>? progress = null,
+                                  StepOptions step = default)
         {
             board.Clear();
             if (string.IsNullOrWhiteSpace(path))
@@ -217,10 +227,29 @@ namespace EDes.Pcb
                     var cad = StepParser.TryLoad(file, board.Notes);
                     if (cad != null)
                     {
+                        // Curved faces need a real kernel, so if a tessellator is available
+                        // its mesh REPLACES the analytically-filled faces. The exact edges
+                        // from StepParser are kept either way: they are sharper than
+                        // anything a tessellation gives back.
+                        string extra = "";
+                        if (step.Tessellate)
+                        {
+                            string? stl = StepConverter.EnsureStl(
+                                file, step.ToleranceMm <= 0f ? 0.4f : step.ToleranceMm,
+                                step.Command ?? "", board.Notes, progress);
+
+                            if (stl != null)
+                            {
+                                var faces = StlMesh.TryLoad(stl, board.Notes);
+                                if (faces != null && faces.Count > 0)
+                                    extra = AttachTessellation(cad, faces);
+                            }
+                        }
+
                         board.Solids.AddRange(cad.Solids);
                         solids += cad.SolidCount;
-                        Note(file, "STEP", $"{cad.SolidCount} solid(s), {cad.TotalEdges} edge(s)",
-                             true);
+                        Note(file, "STEP", $"{cad.SolidCount} solid(s), {cad.TotalEdges} edge(s)"
+                                           + extra, true);
                     }
                     else
                     {
@@ -718,6 +747,49 @@ namespace EDes.Pcb
         ///
         /// Returns how many solids were matched, so the caller can report it rather than
         /// leave the user guessing whether the link worked.</summary>
+        /// <summary>Hang a tessellated mesh onto the parsed model.
+        ///
+        /// The mesh comes back as ONE body with no assembly structure — a tessellator
+        /// flattens the tree — so it cannot be split back across the individual solids.
+        /// It goes onto a single carrier solid instead, and the per-solid analytic faces
+        /// are dropped so the two do not both draw the same surfaces at slightly different
+        /// positions, which reads as z-fighting even on a display that has no z-buffer.
+        /// The per-solid EDGES stay: they are exact, and they are what makes the model
+        /// readable.</summary>
+        private static string AttachTessellation(CadModel cad, List<CadFace> faces)
+        {
+            int tris = 0;
+            foreach (var f in faces) tris += f.TriCount;
+
+            foreach (var s in cad.Solids) s.Faces.Clear();
+
+            var carrier = new CadSolid
+            {
+                Name    = "tessellated surfaces",
+                Colour  = 0x9FC5E8,
+                Visible = true,
+                MinX = float.MaxValue, MinY = float.MaxValue, MinZ = float.MaxValue,
+                MaxX = float.MinValue, MaxY = float.MinValue, MaxZ = float.MinValue,
+            };
+
+            foreach (var f in faces)
+            {
+                carrier.Faces.Add(f);
+                for (int i = 0; i < f.TriCount * 3; i++)
+                {
+                    if (f.X[i] < carrier.MinX) carrier.MinX = f.X[i];
+                    if (f.X[i] > carrier.MaxX) carrier.MaxX = f.X[i];
+                    if (f.Y[i] < carrier.MinY) carrier.MinY = f.Y[i];
+                    if (f.Y[i] > carrier.MaxY) carrier.MaxY = f.Y[i];
+                    if (f.Z[i] < carrier.MinZ) carrier.MinZ = f.Z[i];
+                    if (f.Z[i] > carrier.MaxZ) carrier.MaxZ = f.Z[i];
+                }
+            }
+
+            cad.Solids.Add(carrier);
+            return $", {tris} tessellated triangle(s) in {faces.Count} group(s)";
+        }
+
         private static int LinkSolidsToComponents(PcbBoard board)
         {
             if (board.Solids.Count == 0 || board.Components.Count == 0) return 0;

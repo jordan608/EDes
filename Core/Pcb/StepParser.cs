@@ -1057,6 +1057,7 @@ namespace EDes.Pcb
                 {
                     X = fx, Y = fy, Z = fz,
                     TriCount = tris.Count / 3,
+                    HasNormalSet = true,
                     NX = (float)(xf.XX * nx + xf.XY * ny + xf.XZ * nz),
                     NY = (float)(xf.YX * nx + xf.YY * ny + xf.YZ * nz),
                     NZ = (float)(xf.ZX * nx + xf.ZY * ny + xf.ZZ * nz),

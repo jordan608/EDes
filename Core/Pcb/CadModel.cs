@@ -62,6 +62,11 @@ namespace EDes.Pcb
         public float[] Z = System.Array.Empty<float>();
         public int     TriCount;
         public float   NX, NY, NZ;
+
+        /// <summary>True once a usable normal has been computed. Distinguishes "faces the
+        /// +X direction" from "no normal was available", which are different for lighting
+        /// and would otherwise both read as a zero vector.</summary>
+        public bool    HasNormalSet;
     }
 
     /// <summary>One solid from the STEP assembly — a component body, or the board.</summary>

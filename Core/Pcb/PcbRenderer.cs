@@ -617,7 +617,7 @@ namespace EDes.Pcb
                 foreach (var face in solid.Faces)
                 {
                     float shade = ambient;
-                    if (opt.CadLighting)
+                    if (opt.CadLighting && face.HasNormalSet)
                     {
                         float ndl = face.NX * lx + face.NY * ly + face.NZ * lz;
                         if (ndl < 0f) ndl = 0f;

@@ -198,6 +198,21 @@ namespace EDes
         /// 42,000 voxels for the 1143 mm2 of planar face on a real 2-layer export at full
         /// density -- and because the display is transparent, so a solid fill also shows
         /// its own back faces through its front.</summary>
+        /// <summary>Convert STEP to a mesh with an external tessellator so CURVED faces
+        /// can be filled and lit. StepParser fills planar faces without a kernel, but a
+        /// round part is mostly curved faces, so it comes out as a sparse cage with nothing
+        /// to light. Off means wireframe-only, which is still perfectly usable.</summary>
+        public volatile bool   PcbTessellate = true;
+
+        /// <summary>Max element size for the tessellator, mm. Smaller is smoother and costs
+        /// triangles; this is the knob for a model that arrives too coarse or too heavy.</summary>
+        public volatile float  PcbTessellateTol = 0.4f;
+
+        /// <summary>Explicit tessellator command, or empty to auto-discover (gmsh, then
+        /// FreeCAD). Present so an unusual or commercial toolchain can be used without a
+        /// code change.</summary>
+        public          string PcbTessellator = "";
+
         public volatile bool   PcbCadSurfaces = true;
         public volatile float  PcbCadSurfaceDensity = 0.6f;
 

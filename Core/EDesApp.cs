@@ -171,7 +171,13 @@ namespace EDes
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
             bool ok = PcbImporter.Import(path, _board, Math.Max(1000, _s.MeshPointBudget),
-                                         f => _s.PcbImportStatus = f);
+                                         f => _s.PcbImportStatus = f,
+                                         new PcbImporter.StepOptions
+                                         {
+                                             Tessellate  = _s.PcbTessellate,
+                                             ToleranceMm = _s.PcbTessellateTol,
+                                             Command     = _s.PcbTessellator,
+                                         });
 
             // Before anything draws: an import resets every layer to its defaults, so the
             // user's own visibility and colour choices have to be laid back over the top.
@@ -1323,6 +1329,25 @@ namespace EDes
             ui.AddToggle(sec, "STEP / CAD wireframe", _s.PcbCad,     v => _s.PcbCad = v);
             ui.AddSlider(sec, "CAD brightness", 0.2, 2.0, _s.PcbCadBright,
                          v => _s.PcbCadBright = (float)v, "F2");
+            ui.AddToggle(sec, "Tessellate STEP (curved surfaces)", _s.PcbTessellate,
+                         v => _s.PcbTessellate = v);
+            ui.AddSlider(sec, "Tessellation detail (mm)", 0.05, 3.0, _s.PcbTessellateTol,
+                         v => _s.PcbTessellateTol = (float)v, "F2");
+            ui.AddTextBox(sec, "Tessellator command (blank = auto)", _s.PcbTessellator,
+                          v => _s.PcbTessellator = v.Trim('"', ' '));
+            ui.AddLiveInfo(sec, () =>
+            {
+                string tool = StepConverter.Discover(_s.PcbTessellator, out string how);
+                return tool.Length > 0
+                    ? "tessellator: " + System.IO.Path.GetFileName(tool) + "  (" + how + ")"
+                    : how;
+            }, 2.0);
+            ui.AddInfo(sec, "StepParser fills PLANAR faces without any external tool, but a " +
+                            "round part is mostly curved faces — those need a real geometry " +
+                            "kernel, so they are tessellated by gmsh or FreeCAD instead of " +
+                            "guessed at. Converted once and cached; the exact STEP edges are " +
+                            "kept either way. Smaller detail = smoother = more triangles. " +
+                            "Re-import after changing these.");
             ui.AddToggle(sec, "CAD flat-shaded surfaces", _s.PcbCadSurfaces,
                          v => _s.PcbCadSurfaces = v);
             ui.AddSlider(sec, "Surface fill density", 0.1, 2.0, _s.PcbCadSurfaceDensity,
