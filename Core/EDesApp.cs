@@ -75,7 +75,8 @@ namespace EDes
         private bool        _navHostUsable;
         private string      _navSource = "none";
         private NavState    _navLive;          // conditioned (-1..1, dead-zoned) signal
-        private float       _navPeak;          // largest raw count seen, for calibration
+        private float       _navPeakTrans;     // largest raw translation count seen
+        private float       _navPeakRot;       // largest raw rotation count seen
         private float       _lastDt = 1f / 30f;
         private float _anim;                       // flow-animation clock
         private int   _lastVoxels, _lastDropped;
@@ -348,8 +349,9 @@ namespace EDes
             // watch the dead-zone actually swallow the puck's resting noise.
             void Drive(in NavState raw)
             {
-                _navPeak = MathF.Max(_navPeak, raw.PeakAxis);
-                _navLive = raw.Condition(_s.NavFullScale, _s.NavDeadzone);
+                _navPeakTrans = MathF.Max(_navPeakTrans, raw.PeakTranslation);
+                _navPeakRot   = MathF.Max(_navPeakRot,   raw.PeakRotation);
+                _navLive = raw.Condition(_s.NavFullScaleTrans, _s.NavFullScaleRot, _s.NavDeadzone);
                 _cam.ApplyNav(_navLive, _lastDt, _s.NavPanRate, _s.NavRotRate, _s.NavZoomRate);
             }
         }
@@ -371,8 +373,10 @@ namespace EDes
               .Append("  R=").Append((_nav.Buttons & 2) != 0 ? "DOWN" : "up").Append('\n');
             sb.Append($"  live X {_navLive.Dx,7:0.000}  Y {_navLive.Dy,7:0.000}  Z {_navLive.Dz,7:0.000}"
                     + $"   P {_navLive.Ax,7:0.000}  Y {_navLive.Ay,7:0.000}  R {_navLive.Az,7:0.000}\n");
-            sb.Append($"  peak raw axis {_navPeak:0.0}   full-scale {_s.NavFullScale:0.0}"
-                    + $"   dead-zone {_s.NavDeadzone * 100f:0.#}%\n");
+            sb.Append($"  peak raw   translation {_navPeakTrans:0.0} (scale {_s.NavFullScaleTrans:0.0})"
+                    + $"   rotation {_navPeakRot:0.0} (scale {_s.NavFullScaleRot:0.0})\n");
+            sb.Append($"  dead-zone {_s.NavDeadzone * 100f:0.#}%   pan {_s.NavPanRate:0.0}/s"
+                    + $"   rot {_s.NavRotRate:0.0} rad/s\n");
             sb.Append("LedHost vxl_nav_read rc=").Append(_navHostRc).Append('\n');
             sb.Append($"  d    X {_navHost.dx,7:0.000}  Y {_navHost.dy,7:0.000}  Z {_navHost.dz,7:0.000}\n");
             sb.Append($"  a    X {_navHost.ax,7:0.000}  Y {_navHost.ay,7:0.000}  Z {_navHost.az,7:0.000}\n");
@@ -1001,22 +1005,32 @@ namespace EDes
                             "Ctrl+wheel zooms it. WASD orbits the scene, Q/E rolls, " +
                             "comma/period zooms, R resets.");
             ui.AddToggle(sec, "SpaceNavigator enabled", _s.NavEnabled, v => _s.NavEnabled = v);
-            ui.AddSlider(sec, "Nav pan rate",  0.1, 10, _s.NavPanRate,  v => _s.NavPanRate  = (float)v, "F2");
-            ui.AddSlider(sec, "Nav rotate rate", 0.1, 6, _s.NavRotRate, v => _s.NavRotRate  = (float)v, "F2");
-            ui.AddSlider(sec, "Nav zoom rate", 0.1, 5, _s.NavZoomRate,  v => _s.NavZoomRate = (float)v, "F2");
-            ui.AddSlider(sec, "Nav full scale (raw counts)", 1, 1000, _s.NavFullScale,
-                         v => _s.NavFullScale = (float)v, "F0");
+            ui.AddInfo(sec, "ONE sensitivity for all three translation axes and ONE for all " +
+                            "three rotation axes — so the puck feels the same in X, Y and Z, and " +
+                            "rotation can be tuned independently of translation.");
+            ui.AddSlider(sec, "Translation sensitivity (units/s)", 0.1, 40, _s.NavPanRate,
+                         v => _s.NavPanRate = (float)v, "F2");
+            ui.AddSlider(sec, "Rotation sensitivity (rad/s)", 0.1, 20, _s.NavRotRate,
+                         v => _s.NavRotRate = (float)v, "F2");
+            ui.AddSlider(sec, "Button zoom rate", 0.1, 10, _s.NavZoomRate,
+                         v => _s.NavZoomRate = (float)v, "F2");
+            ui.AddSlider(sec, "Translation full scale (raw counts)", 1, 1000, _s.NavFullScaleTrans,
+                         v => _s.NavFullScaleTrans = (float)v, "F0");
+            ui.AddSlider(sec, "Rotation full scale (raw counts)", 1, 1000, _s.NavFullScaleRot,
+                         v => _s.NavFullScaleRot = (float)v, "F0");
             ui.AddSlider(sec, "Nav dead-zone (fraction)", 0, 0.5, _s.NavDeadzone,
                          v => _s.NavDeadzone = (float)v, "F3");
-            ui.AddInfo(sec, "The driver reports RAW counts, not -1..1. Full scale converts them, " +
-                            "so the three rates above are world units per second. If the puck is " +
-                            "still too fast or too slow, fix full scale FIRST (deflect hard, then " +
-                            "press Calibrate below) and only then touch the rates. Dead-zone is a " +
-                            "fraction of full scale and is what stops the scene drifting at rest.");
-            ui.AddButton(sec, "Calibrate full scale from observed peak", () =>
+            ui.AddInfo(sec, "The driver reports RAW counts, not -1..1, and NOT the same range for " +
+                            "translation as for rotation. The two full-scale values convert them, " +
+                            "which is what puts all six axes on a common footing — set those FIRST " +
+                            "(deflect hard in every direction, then Calibrate) and only then trim " +
+                            "the two sensitivities. Dead-zone stops the scene drifting at rest.");
+            ui.AddButton(sec, "Calibrate both full scales from observed peaks", () =>
             {
-                if (_navPeak > 1f) _s.NavFullScale = _navPeak;
+                if (_navPeakTrans > 1f) _s.NavFullScaleTrans = _navPeakTrans;
+                if (_navPeakRot   > 1f) _s.NavFullScaleRot   = _navPeakRot;
             });
+            ui.AddButton(sec, "Reset observed peaks", () => { _navPeakTrans = 0f; _navPeakRot = 0f; });
             ui.AddButton(sec, "Reset scene camera", () => _cam.Reset());
             ui.AddLiveInfo(sec, () =>
                 $"yaw {_cam.Yaw:0.00}  pitch {_cam.Pitch:0.00}  roll {_cam.Roll:0.00}  zoom {_cam.Zoom:0.00}");

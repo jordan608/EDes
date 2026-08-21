@@ -37,17 +37,29 @@ namespace EDes
         // ── Camera / SpaceNavigator ───────────────────────────────────────────
         public volatile bool  NavEnabled  = true;
         public volatile bool  ShowNavDiag = false;   // SpaceNav readout in the volume (key V)
-        public volatile float NavPanRate  = 2.5f;
-        public volatile float NavRotRate  = 1.5f;
-        public volatile float NavZoomRate = 1.2f;
+        /// <summary>One sensitivity for ALL THREE translation axes, one for ALL THREE
+        /// rotation axes, one for the button zoom. Deliberately not per-axis: the puck
+        /// should feel isotropic, so X/Y/Z must not be trimmable against each other.
+        /// Units are world-units (or radians) per second at full deflection.</summary>
+        public volatile float NavPanRate  = 9.0f;
+        public volatile float NavRotRate  = 3.0f;
+        public volatile float NavZoomRate = 2.0f;
 
-        /// <summary>The raw count the puck reports at FULL deflection. The driver hands
-        /// back raw counts, not a -1..1 signal, so this is what turns them into one and
-        /// what makes the three rates above mean "world units per second". 350 is the
-        /// usual 3Dconnexion full-scale; if a build already normalises, set this to 1.
-        /// The diagnostics block reports the peak actually seen — deflect the puck hard
-        /// on every axis and set this to that number.</summary>
-        public volatile float NavFullScale = 350f;
+        /// <summary>The raw count the puck reports at FULL deflection, for the three
+        /// TRANSLATION axes and the three ROTATION axes respectively.
+        ///
+        /// The driver hands back raw counts, not a -1..1 signal, so these are what turn
+        /// them into one and what make the rates above mean "world units per second".
+        /// They are split because the puck does not report the same range for both
+        /// groups — one shared value is what left translation and rotation feeling
+        /// unequal. Within a group all three axes share a scale, so translation stays
+        /// uniform in X, Y and Z by construction.
+        ///
+        /// 350 is the usual 3Dconnexion full-scale. The diagnostics block reports the
+        /// peak actually seen per group, and Calibrate adopts it — deflect the puck hard
+        /// in every direction first.</summary>
+        public volatile float NavFullScaleTrans = 350f;
+        public volatile float NavFullScaleRot   = 350f;
 
         /// <summary>Dead-zone as a FRACTION of full scale (0.08 = ignore the first 8%).
         /// A puck at rest still reports a few counts; without this they integrate into

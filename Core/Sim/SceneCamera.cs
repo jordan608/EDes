@@ -143,13 +143,20 @@ namespace EDes.Sim
         {
             if (!nav.Present) return;
 
+            // One rate for all three, and NavState.Condition has already put the three
+            // translation axes on a common scale, so pushing the puck the same distance
+            // in X, Y or Z moves the scene the same distance.
             PanX += nav.Dx * panRate * dt;
             PanY += nav.Dz * panRate * dt;   // nav "forward/back" → scene depth
             PanZ += nav.Dy * panRate * dt;   // nav "lift" → vertical (-Z is up)
 
-            RotateLocal(nav.Ay * rotRate * dt,    // tilt forward / back → scene's own X
-                        nav.Ax * rotRate * dt,    // tilt left / right   → scene's own Y
-                        nav.Az * rotRate * dt);   // twist left / right  → scene's own Z
+            // All three rotations share rotRate, so the puck feels isotropic in rotation
+            // exactly as translation does above. The Y term is negated: this axis reports
+            // the opposite sense to the other two, so without it tilting left rolled the
+            // scene right.
+            RotateLocal( nav.Ay * rotRate * dt,   // tilt forward / back → scene's own X
+                        -nav.Ax * rotRate * dt,   // tilt left / right   → scene's own Y
+                         nav.Az * rotRate * dt);  // twist left / right  → scene's own Z
 
             // Zoom is on the two puck buttons. It used to be a gesture on the lift
             // axis, which fought the pan already bound to that same axis — pushing

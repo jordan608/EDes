@@ -70,19 +70,27 @@ namespace EDes
             MathF.Abs(Dx) + MathF.Abs(Dy) + MathF.Abs(Dz) +
             MathF.Abs(Ax) + MathF.Abs(Ay) + MathF.Abs(Az) > 1e-4f;
 
-        /// <summary>Largest absolute value on any of the six live axes. The
-        /// diagnostics readout tracks the peak of this so the puck's real full-scale
-        /// can be read off the display instead of guessed.</summary>
-        public float PeakAxis =>
-            MathF.Max(MathF.Max(MathF.Max(MathF.Abs(Dx), MathF.Abs(Dy)), MathF.Abs(Dz)),
-                      MathF.Max(MathF.Max(MathF.Abs(Ax), MathF.Abs(Ay)), MathF.Abs(Az)));
+        /// <summary>Largest absolute value on the three TRANSLATION axes, and on the
+        /// three ROTATION axes, tracked separately.
+        ///
+        /// Separately because the puck does not report the same range on both groups —
+        /// which is precisely why one shared full-scale left translation and rotation
+        /// feeling unequal no matter how the rates were trimmed. Calibrate each group
+        /// against its own peak and the six axes finally agree.</summary>
+        public float PeakTranslation =>
+            MathF.Max(MathF.Max(MathF.Abs(Dx), MathF.Abs(Dy)), MathF.Abs(Dz));
+
+        public float PeakRotation =>
+            MathF.Max(MathF.Max(MathF.Abs(Ax), MathF.Abs(Ay)), MathF.Abs(Az));
 
         /// <summary>Raw driver counts → a usable -1..1 control signal.
         ///
         /// Two steps, in this order:
-        ///   1. divide by <paramref name="fullScale"/> (the count the puck reports at
-        ///      full deflection) and clamp, so the axes mean the same thing on any
-        ///      device and the camera rates are expressed in world-units-per-second;
+        ///   1. divide by the group full-scale (the count the puck reports at full
+        ///      deflection) and clamp, so the axes mean the same thing on any device and
+        ///      the camera rates are expressed in world-units-per-second. Translation
+        ///      and rotation get their OWN full-scale because the puck does not report
+        ///      the same range for both; sharing one is what made them feel unequal;
         ///   2. subtract a dead-zone and RE-SCALE what is left back over the full
         ///      0..1 travel. Re-scaling matters: a bare "under the threshold is zero"
         ///      test leaves a step discontinuity at the edge, so the scene would jump
@@ -90,16 +98,20 @@ namespace EDes
         ///
         /// The summed axes and the buttons are passed through untouched — they are not
         /// rates and nothing integrates them.</summary>
-        public NavState Condition(float fullScale, float deadzone)
+        public NavState Condition(float transFullScale, float rotFullScale, float deadzone)
         {
             if (!Present) return default;
 
-            float scale = MathF.Max(1e-3f, fullScale);
-            float dead  = Math.Clamp(deadzone, 0f, 0.9f);
+            float ts   = MathF.Max(1e-3f, transFullScale);
+            float rs   = MathF.Max(1e-3f, rotFullScale);
+            float dead = Math.Clamp(deadzone, 0f, 0.9f);
 
+            // One scale for all three translation axes and one for all three rotation
+            // axes — never per-axis. Per-axis trimming would let X drift away from Y
+            // and make the puck feel skewed rather than merely fast or slow.
             return new NavState(true, Devices,
-                                Cond(Dx, scale, dead), Cond(Dy, scale, dead), Cond(Dz, scale, dead),
-                                Cond(Ax, scale, dead), Cond(Ay, scale, dead), Cond(Az, scale, dead),
+                                Cond(Dx, ts, dead), Cond(Dy, ts, dead), Cond(Dz, ts, dead),
+                                Cond(Ax, rs, dead), Cond(Ay, rs, dead), Cond(Az, rs, dead),
                                 Sx, Sy, Sz, Buttons);
         }
 
