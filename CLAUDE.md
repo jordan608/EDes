@@ -101,6 +101,7 @@ Solve/layout sits behind a dirty flag in `CircuitScene`; the renderers only ever
 | `DemoGameSettings.cs` | The demo's own settings (`PlayerSpeed`, `ParticleBudget`) → `game.json`. `IGameSettings` (engine persists it on save). |
 | `VoxelModelRenderer.cs` | Engine service: model load/voxelize/density/transform + two-pass shell-cull + CPU/GPU lit `DrawVox_Batch`. |
 | `GameSettings.cs` | Shared engine UI↔game state + persistence (`settings.json`). Game-specific fields live in the game's own settings. |
+| `IVoxonGame.Modes` / `ActiveMode` | Default interface members (empty / 0), so a game with no modes needs no changes. EDesApp implements them over `EDesSettings.Mode`; the shell draws one header per entry and rebuilds the game's panel when one is clicked. |
 | `LightingConfig.cs` | Serializable lighting snapshot (global, sun, 4 spots, UseGpu, boost, cull). |
 | `LightingSystem.cs` | CPU N·L shading, ambient/brightness, scene lights + sun + transient pool, shell culling, `QueryColor`, `ApplyConfig`. |
 | `GpuLighting.cs` | ComputeSharp (DX12) port of the lighting. `IsAvailable` guard + CPU fallback. |
@@ -112,7 +113,7 @@ Solve/layout sits behind a dirty flag in `CircuitScene`; the renderers only ever
 | `SynthAudio.cs` | Procedural sound engine: `SynthVoice` (one-shot sweep+noise+envelope), `SynthArpVoice` (short note-chime), `SustainedSynthProvider` (continuous loop tone) + `SynthPresets.Map`, a name→recipe dictionary. The 6 example presets are placeholders — replace/extend for your game; drop a real file with the same name next to the exe at any time and it takes over automatically. |
 | `PlayerData.cs` | `PlayerStore` profiles + high scores → `players.json`. Thread-safe (locked). |
 | `ParticleManager.cs`, `DisplayVolume.cs` | Emissive particles; runtime display bounds. |
-| `UI/MainWindow.axaml(.cs)` | Settings window: accordion tabs, preview, status bar, mouse model controls, validated inputs. |
+| `UI/MainWindow.axaml(.cs)` | Settings window: mode headers across the top (from `IVoxonGame.Modes`), the active mode's settings on the LEFT, the Voxon display settings on the RIGHT, preview in the middle, status bar. There is no tab strip and no nav list — the Lighting and Profiles tabs were deleted. |
 | `LedHostCS.cs`, `LedWinCS.cs`, `VoxonTypes.cs` (root) | SDK P/Invoke wrappers. **Don't edit casually**; they mirror native signatures. |
 
 ### The EDes app (`Core/`, `Core/Sim/`, `Core/Pcb/`)
@@ -122,7 +123,7 @@ Solve/layout sits behind a dirty flag in `CircuitScene`; the renderers only ever
 | `EDesApp.cs` | The `IVoxonGame`: modes, per-mode input, camera driving, bounds reading, budget setup, HUD, backdrop, and the whole settings tab. Start here. |
 | `EDesSettings.cs` | Persisted app state to `%AppData%/EDes/edes.json` (`IGameSettings`). All scalars `volatile`; `PcbImportRequested` is the UI-to-game-thread request flag. |
 | `Sim/VoxelBatch.cs` | **The choke point.** Budget-limited, bounds-clipping voxel accumulator + line/blob/ring/rect primitives; one `DrawVox_Batch` per frame. Everything drawn goes through it. |
-| `Sim/SceneCamera.cs` | pan, scale, yaw, pitch, roll `Transform()` + SpaceNav application. Every scene point passes through it exactly once. `HORIZONTAL_IS_X` is the one switch that swaps the layout horizontal/depth axes. |
+| `Sim/SceneCamera.cs` | pan, scale + an orthonormal **basis** `Transform()` + SpaceNav application. Every scene point passes through it exactly once. Orientation is a basis, NOT Euler angles — see invariant 12. `HORIZONTAL_IS_X` is the one switch that swaps the layout horizontal/depth axes. |
 | `Sim/Hud.cs` | Text in the volume, routed through `VoxelBatch` (so text obeys the budget + bounds), scene-space or panel-space, plus engineering-notation formatting. |
 | `Sim/Palette.cs` | Packed 0xRRGGBB colours, clamped `Scale`/`Mix`, and the power `Heat` ramp. |
 | `Sim/Ohm.cs` | `Resistor`/`SeriesGroup`/`ParallelGroup` recursive solver + the 4 `CircuitPresets`. |
@@ -171,7 +172,24 @@ Solve/layout sits behind a dirty flag in `CircuitScene`; the renderers only ever
 10. **EDes: -Z is up.** "Raise it" means SUBTRACT from z (resistor power bulge, layer stacking,
     scope volts). Readout panels sit on the constant-Y `PlaneY` plane and are deliberately NOT
     camera-transformed, so they stay legible while the scene rotates.
-11. **EDes: draw order is priority order** - mode content, then HUD text, then backdrop. When the
+11. **EDes: scene orientation is a BASIS, not Euler angles.** `SceneCamera` stores the
+    scene's own X/Y/Z axes (`_ux.._wz`) and `RotateLocal` POST-multiplies each increment,
+    which is what makes every rotation happen about the scene's own axis instead of the
+    display's. Do not reintroduce accumulated yaw/pitch/roll scalars — three scalars
+    replayed in a fixed order can only rotate about the frame that order is defined in.
+    `Yaw`/`Pitch`/`Roll` still exist but are READ-ONLY projections for the status line.
+    Every rotation routes through `RotateLocal`, and it re-orthonormalises each call
+    because the basis is fed back into itself every frame.
+
+12. **EDes: SpaceNav axes are RAW driver counts.** The SDK hands back roughly ±350 at
+    full deflection with a few counts of noise at rest — not a -1..1 signal, whatever the
+    old docstring claimed. Always run a reading through `NavState.Condition(fullScale,
+    deadzone)` before using it as a rate; feeding raw counts to a rate of 0.1 moved the
+    scene 1.17 units per FRAME, and with no dead-zone the resting noise integrated into
+    permanent drift. `NavFullScale` is a setting because the true full-scale is per-device
+    — the diagnostics block reports the observed peak so it can be calibrated, not guessed.
+
+13. **EDes: draw order is priority order** - mode content, then HUD text, then backdrop. When the
     budget runs out, the tail of that order is what disappears. Keep new decoration last.
 
 ## Rendering best practices

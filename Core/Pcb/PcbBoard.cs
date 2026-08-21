@@ -345,6 +345,27 @@ namespace EDes.Pcb
             return min == float.MaxValue ? 0f : min;
         }
 
+        /// <summary>Is this hole a via rather than a component through-hole?
+        ///
+        /// Excellon carries no via flag — a via and a lead hole are both just a tool
+        /// diameter and a coordinate — so this has to be a classification, and it is
+        /// deliberately a conservative one: plated (an unplated hole conducts nothing
+        /// and cannot be a via), not a slot (routed slots are mechanical), and at or
+        /// under the caller's diameter cut-off. The default cut-off of 0.7 mm sits in
+        /// the gap between real vias and the smallest component leads (~0.8 mm), so
+        /// raising it starts pulling in through-hole pads.</summary>
+        public static bool IsVia(in PcbHole h, float maxDiaMm)
+            => h.Plated && !h.Slot && h.Dia > 0f && h.Dia <= maxDiaMm;
+
+        /// <summary>How many holes the above classifies as vias — quoted in the panel
+        /// so the diameter cut-off can be set by watching the count, not by guessing.</summary>
+        public int ViaCount(float maxDiaMm)
+        {
+            int n = 0;
+            foreach (var h in Holes) if (IsVia(h, maxDiaMm)) n++;
+            return n;
+        }
+
         public float MinDrill()
         {
             float min = float.MaxValue;

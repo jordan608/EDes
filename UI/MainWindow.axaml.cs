@@ -2,16 +2,17 @@
 //  MainWindow.axaml.cs — Settings/preview window code-behind
 //
 //  Responsibilities:
-//    • Build nav buttons and settings panels programmatically
+//    • Build the mode headers (from IVoxonGame.Modes) and the two settings panels
 //    • Receive the Rend2D preview buffer and display it as a WriteableBitmap
 //    • Sync camera sliders ↔ GameSettings (bidirectional, with suppress flag)
 //    • Motor start/stop, save/load/reset, auto-save on change
 //    • Live status bar: VPS + hardware presence
 //
-//  Panel builder convention:
-//    Every settings panel is a private method BuildXxxPanel() : Control.
-//    Each adds rows using the helper methods (AddSlider, AddToggle, etc.).
-//    This keeps each panel short and self-contained.
+//  Layout:
+//    The window has exactly two settings panels and no tab strip. The LEFT panel is
+//    the active game mode own settings (IVoxonGame.BuildSettingsPanel, rebuilt on
+//    every mode change); the RIGHT panel is the Voxon display settings. Mode choice
+//    lives in the header row above both.
 //
 //  Threading:
 //    OnPreviewFrame is called from the game thread.
@@ -61,13 +62,18 @@ namespace EDes.UI
         // Camera slider sync suppressor
         private bool _syncingCamera = false;
 
-        // Camera controls — built into the Simulator panel, so these are null
-        // whenever another tab is showing. Always null-check before use.
+        // Camera controls — built into the display panel. Always null-check before use.
         private Slider?    _camYaw, _camTilt, _camZoom;
         private TextBlock? _camYawLabel, _camTiltLabel, _camZoomLabel;
 
-        // Active nav panel key
-        private string _activePanel = "Simulator";
+        // Mode headers, in IVoxonGame.Modes order. Index = mode index.
+        private readonly List<Button> _modeHeaders = new();
+
+        // Last mode the UI drew. The game thread can change the mode on its own (Tab
+        // in the volume), so the status tick compares against this and rebuilds the
+        // headers + left panel when they disagree. Without it the volume and the
+        // window would sit there showing different modes.
+        private int _shownMode = -1;
 
         // True while the simulator preview holds keyboard focus. When set, game
         // keys are swallowed before they reach the settings controls.
@@ -77,9 +83,6 @@ namespace EDes.UI
         private bool  _rotating;      // right-drag: rotate the model / scene content
         private bool  _orbiting;      // left-drag: orbit the simulator camera
         private Point _lastPtr;
-
-        // For the Profiles tab's demo-score button.
-        private readonly Random _rand = new();
 
         // Keys the game consumes (read via GetAsyncKeyState). While the preview is
         // focused we mark these handled so they can't move sliders / click buttons.
@@ -91,9 +94,6 @@ namespace EDes.UI
             Key.NumPad0, Key.Space, Key.Escape,
             Key.OemOpenBrackets, Key.OemCloseBrackets,
         };
-
-        // Nav table — add more panels by extending this array
-        private readonly (string Key, string Label, Func<Control> Builder)[] _navItems;
 
         private readonly IVoxonGame? _game;
         private readonly Color _accent;
@@ -122,18 +122,13 @@ namespace EDes.UI
             SplashSimulatorBtn.Click += (_, _) => _s.SplashChoice = PreflightChoice.Simulator;
             SplashQuitBtn.Click      += (_, _) => _s.SplashChoice = PreflightChoice.Quit;
 
-            // ── Build nav table ───────────────────────────────────────────────
-            // The "Game" tab is supplied by the active game; the others are engine.
-            _navItems = new (string, string, Func<Control>)[]
-            {
-                ("Simulator", "Simulator", BuildSimulatorPanel),
-                ("Lighting",  "Lighting",  BuildLightingPanel),
-                ("Game",      "Game",      BuildGamePanel),
-                ("Profiles",  "Profiles",  BuildProfilesPanel),
-            };
+            // ── Panels ────────────────────────────────────────────────────────
+            // The display panel is built once — nothing in it is mode-specific. The
+            // mode panel is rebuilt on every mode change by RefreshModePanel.
+            DisplayPanelArea.Content = BuildDisplayPanel();
 
-            BuildNavButtons();
-            ActivatePanel(_activePanel);   // builds the Simulator panel + camera sliders
+            BuildModeHeaders();
+            RefreshModePanel();
 
             // ── Motor buttons ─────────────────────────────────────────────────
             BtnMotorStart.Click += (_, _) => _s.MotorRpmRequest = 600;
@@ -316,7 +311,7 @@ namespace EDes.UI
             float ms = _s.LiveFrameMs;
             LatencyText.Text = $"Latency: {ms:F1} ms ({(ms > 0.01f ? 1000f / ms : 0f):F0} fps)";
             MotorText.Text   = hasHw ? $"Motor: {_s.LiveMotorRpm} RPM" : "";
-            BoundsText.Text  = $"Lighting: {(_s.Lighting.UseGpu ? "GPU" : "CPU")}";
+            BoundsText.Text  = $"Mode: {ActiveModeName()}";
 
             // Dismiss the splash once the game loop is live.
             if (SplashOverlay.IsVisible && _s.GameLoopRunning)
@@ -331,6 +326,9 @@ namespace EDes.UI
                     _s.SplashWarning ? Color.Parse("#FFFFAA55") : Color.Parse("#FFCCCCCC"));
                 SplashButtons.IsVisible = _s.SplashShowButtons;
             }
+
+            // The volume Tab key changes the mode behind the window back — notice it.
+            if (_game != null && _game.ActiveMode != _shownMode) RefreshModePanel();
 
             // Sync camera labels from game-loop-updated angles
             SyncCameraSliders();
@@ -389,76 +387,107 @@ namespace EDes.UI
         private void OnResetClick(object? s, RoutedEventArgs e) { _s.Reset(); RebuildActivePanel(); }
 
         // ─────────────────────────────────────────────────────────────────────
-        // Nav system
+        // Mode headers
         // ─────────────────────────────────────────────────────────────────────
+        //
+        // The headers come from IVoxonGame.Modes, so the shell never learns what
+        // "Education" or "PCB" mean — it lights one and asks the game to rebuild its
+        // panel. Clicking a header does two things that must stay together: it changes
+        // the mode the volume renders AND swaps the settings shown underneath it.
 
-        private void BuildNavButtons()
+        private void BuildModeHeaders()
         {
-            NavPanel.Children.Clear();
-            foreach (var (key, label, _) in _navItems)
+            ModeHeaderPanel.Children.Clear();
+            _modeHeaders.Clear();
+
+            var modes = _game?.Modes;
+            if (modes == null || modes.Count == 0) return;
+
+            for (int i = 0; i < modes.Count; i++)
             {
+                int index = i;                  // capture per-iteration for the closure
                 var btn = new Button
                 {
-                    Content             = label,
-                    HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
-                    HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Left,
-                    Padding             = new Thickness(10, 6),
-                    FontSize            = 12,
-                    Background          = Brushes.Transparent,
+                    Content         = modes[i],
+                    FontSize        = 14,
+                    FontWeight      = FontWeight.SemiBold,
+                    Padding         = new Thickness(18, 10),
+                    Background      = Brushes.Transparent,
+                    BorderThickness = new Thickness(0, 0, 0, 2),
+                    BorderBrush     = Brushes.Transparent,
                 };
-                string capturedKey = key;
-                btn.Click += (_, _) => ActivatePanel(capturedKey);
-                NavPanel.Children.Add(btn);
+                btn.Click += (_, _) => SelectMode(index);
+                ModeHeaderPanel.Children.Add(btn);
+                _modeHeaders.Add(btn);
             }
-            HighlightNavButton(_activePanel);
         }
 
-        private void ActivatePanel(string key)
+        private void SelectMode(int index)
         {
-            _activePanel = key;
-            foreach (var (k, _, builder) in _navItems)
-            {
-                if (k != key) continue;
-                SettingsPanelArea.Content = builder();
-                break;
-            }
-            HighlightNavButton(key);
+            if (_game == null) return;
+            _game.ActiveMode = index;
+            RefreshModePanel();
+            DebounceSave();
         }
 
-        private void RebuildActivePanel() => ActivatePanel(_activePanel);
-
-        private void HighlightNavButton(string activeKey)
+        /// <summary>Rebuild the left panel for whatever mode is active now and light the
+        /// matching header. Safe to call when nothing changed.</summary>
+        private void RefreshModePanel()
         {
-            int idx = 0;
-            foreach (var (key, _, _) in _navItems)
+            if (_game == null)
             {
-                if (NavPanel.Children[idx] is Button btn)
-                {
-                    bool active = key == activeKey;
-                    btn.Background = active
-                        ? new SolidColorBrush(Color.Parse("#FF0A2A4A"))
-                        : Brushes.Transparent;
-                    btn.Foreground = active
-                        ? new SolidColorBrush(_accent)
-                        : new SolidColorBrush(Color.Parse("#FFCCCCCC"));
-                }
-                idx++;
+                GamePanelArea.Content = WrapInScroll(MakeScrollPanel());
+                return;
             }
+
+            _shownMode            = _game.ActiveMode;
+            GamePanelArea.Content = _game.BuildSettingsPanel(_ui);
+            GamePanelTitle.Text   = ActiveModeName() + " settings";
+            HighlightModeHeader(_shownMode);
+        }
+
+        private string ActiveModeName()
+        {
+            var modes = _game?.Modes;
+            if (modes == null || modes.Count == 0) return "Settings";
+            return modes[Math.Clamp(_game!.ActiveMode, 0, modes.Count - 1)];
+        }
+
+        private void HighlightModeHeader(int activeIndex)
+        {
+            for (int i = 0; i < _modeHeaders.Count; i++)
+            {
+                bool active = i == activeIndex;
+                _modeHeaders[i].Foreground = active
+                    ? new SolidColorBrush(_accent)
+                    : new SolidColorBrush(Color.Parse("#FF888899"));
+                _modeHeaders[i].BorderBrush = active
+                    ? new SolidColorBrush(_accent)
+                    : Brushes.Transparent;
+                _modeHeaders[i].Background = active
+                    ? new SolidColorBrush(Color.Parse("#FF0A2A4A"))
+                    : Brushes.Transparent;
+            }
+        }
+
+        /// <summary>Rebuild both panels — used after Load/Reset, which can change every
+        /// control value at once.</summary>
+        private void RebuildActivePanel()
+        {
+            DisplayPanelArea.Content = BuildDisplayPanel();
+            RefreshModePanel();
         }
 
         // ─────────────────────────────────────────────────────────────────────
         // Settings panel builders
         // ─────────────────────────────────────────────────────────────────────
         //
-        // Pattern for adding a new panel:
-        //   1. Add a (key, label, BuildMyPanel) entry to _navItems above.
-        //   2. Add a private Control BuildMyPanel() method below.
-        //   3. Use the helper methods (AddSlider, AddToggle, etc.) to fill it.
-
-        // ── Simulator panel ───────────────────────────────────────────────────
-        // Everything that controls how the simulator/display renders: rendering
-        // quality, frame-rate cap, background, hardware bounds, and camera.
-        private Control BuildSimulatorPanel()
+        // ── Display panel (right side) ─────────────────────────────────────────
+        // Everything that controls how the Voxon display / simulator renders: quality,
+        // the frame-rate cap, and the simulator camera. Nothing here is mode-specific,
+        // which is why it gets its own permanent panel instead of competing with the
+        // mode settings for the same strip of window.
+        private Control BuildDisplayPanel()
         {
             var stack = MakeScrollPanel();
             var group = new List<Expander>();
@@ -500,144 +529,6 @@ namespace EDes.UI
             cam.Children.Add(reset);
 
             return WrapInScroll(stack);
-        }
-
-        // ── Game panel ────────────────────────────────────────────────────────
-        // Supplied by the active game (IVoxonGame.BuildSettingsPanel). Falls back
-        // to an empty panel at design time when no game is wired.
-        private Control BuildGamePanel()
-            => _game?.BuildSettingsPanel(_ui) ?? WrapInScroll(MakeScrollPanel());
-
-        // ── Profiles panel ────────────────────────────────────────────────────
-        // Player profiles + high scores, persisted to players.json (App.Players).
-        private Control BuildProfilesPanel()
-        {
-            var stack = MakeScrollPanel();
-            var group = new List<Expander>();
-            var pd    = App.Players;
-
-            // ── Current profile ───────────────────────────────────────────────
-            var cur = AddSection(stack, "Current Profile", group, expanded: true);
-
-            var combo = new ComboBox
-            {
-                ItemsSource         = pd.Profiles.Select(p => p.Name).ToList(),
-                SelectedItem        = pd.CurrentProfile,
-                FontSize            = 11,
-                Margin              = new Thickness(10, 2, 10, 4),
-                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
-            };
-            combo.SelectionChanged += (_, _) =>
-            {
-                if (combo.SelectedItem is string name && name != pd.CurrentProfile)
-                { pd.SelectProfile(name); RebuildActivePanel(); }
-            };
-            cur.Children.Add(combo);
-
-            var newName = new TextBox
-            {
-                Watermark = "New profile name",
-                FontSize  = 11,
-                MaxLength  = 24,
-                Margin    = new Thickness(10, 2, 10, 2),
-            };
-            void AddProfile()
-            {
-                var n = newName.Text?.Trim();
-                if (!string.IsNullOrEmpty(n)) { pd.SelectProfile(n); RebuildActivePanel(); }
-            }
-            // Commit on Enter (the value isn't applied per-keystroke).
-            newName.KeyDown += (_, e) => { if (e.Key == Key.Enter) { AddProfile(); e.Handled = true; } };
-            cur.Children.Add(newName);
-            AddButton(cur, "Add / select profile", AddProfile);
-
-            var p = pd.Current;
-            AddInfo(cur, $"Games played: {p.GamesPlayed}");
-            AddInfo(cur, $"Best score:   {p.BestScore:N0}");
-            AddInfo(cur, $"Total score:  {p.TotalScore:N0}");
-            if (!string.IsNullOrEmpty(p.LastPlayed)) AddInfo(cur, $"Last played:  {p.LastPlayed}");
-
-            // ── High scores ───────────────────────────────────────────────────
-            var hs = AddSection(stack, "High Scores", group, expanded: true);
-            if (pd.HighScores.Count == 0)
-                AddInfo(hs, "No scores yet.");
-            else
-            {
-                int rank = 1;
-                foreach (var e in pd.HighScores)
-                    AddInfo(hs, $"{rank++,2}.  {e.Name,-12} {e.Score,8:N0}   {e.Date}");
-            }
-            AddButton(hs, "Submit demo score", () =>
-            {
-                pd.SubmitScore(_rand.Next(100, 10000));
-                RebuildActivePanel();
-            });
-            AddButton(hs, "Clear high scores", () =>
-            {
-                pd.ClearScores();
-                RebuildActivePanel();
-            });
-
-            return WrapInScroll(stack);
-        }
-
-        // ── Lighting panel ────────────────────────────────────────────────────
-        // Combined-additive model: global ambient/brightness + an optional
-        // directional "sun" + four point-light spotlights, all independent.
-        // Lighting applies to solid geometry only (particles/background are emissive).
-        private Control BuildLightingPanel()
-        {
-            var stack = MakeScrollPanel();
-            var group = new List<Expander>();
-            var cfg   = _s.Lighting;   // snapshot for initial control values
-
-            var glob = AddSection(stack, "Global", group, expanded: true);
-            AddToggle(glob, "Enable lighting", cfg.Enabled,      v => ApplyLighting(c => c.Enabled = v));
-            AddInfo(glob, "Off = flat passthrough (voxels keep their base colour).");
-            AddSlider(glob, "Ambient",    0, 1.0, cfg.Ambient,    v => ApplyLighting(c => c.Ambient    = (float)v), "F2");
-            AddSlider(glob, "Brightness", 0, 3.0, cfg.Brightness, v => ApplyLighting(c => c.Brightness = (float)v), "F2");
-            AddToggle(glob, "Compute on GPU", cfg.UseGpu,         v => ApplyLighting(c => c.UseGpu = v));
-            AddInfo(glob, "Offload shading to the GPU (ComputeSharp). Falls back to CPU if no DX12 device.");
-            AddToggle(glob, "Boost dark colours", cfg.BoostDark, v => ApplyLighting(c => c.BoostDark = v));
-            AddSlider(glob, "Boost strength", 0, 1.0, cfg.BoostStrength, v => ApplyLighting(c => c.BoostStrength = (float)v), "F2");
-            AddToggle(glob, "Cull black voxels",  cfg.CullBlack, v => ApplyLighting(c => c.CullBlack = v));
-
-            var sun = AddSection(stack, "Simple Lighting (Sun)", group);
-            AddInfo(sun, "One directional light. Direction is a vector (auto-normalised).");
-            AddToggle(sun, "Enable sun", cfg.SunEnabled,         v => ApplyLighting(c => c.SunEnabled = v));
-            AddSlider(sun, "Direction X", -1, 1, cfg.SunDirX,    v => ApplyLighting(c => c.SunDirX = (float)v), "F2");
-            AddSlider(sun, "Direction Y", -1, 1, cfg.SunDirY,    v => ApplyLighting(c => c.SunDirY = (float)v), "F2");
-            AddSlider(sun, "Direction Z", -1, 1, cfg.SunDirZ,    v => ApplyLighting(c => c.SunDirZ = (float)v), "F2");
-            AddSlider(sun, "Intensity",    0, 5, cfg.SunIntensity, v => ApplyLighting(c => c.SunIntensity = (float)v), "F2");
-            AddInfo(sun, "Colour");
-            AddRgb(sun, () => _s.Lighting.SunColor, nc => ApplyLighting(c => c.SunColor = nc));
-
-            for (int i = 0; i < cfg.Spots.Length; i++)
-            {
-                int idx  = i;            // capture per-iteration index for the closures
-                var sp   = cfg.Spots[idx];
-                var sec  = AddSection(stack, $"Spotlight {idx + 1}", group);
-                AddToggle(sec, "Enabled",     sp.Enabled,        v => ApplyLighting(c => c.Spots[idx].Enabled = v));
-                AddSlider(sec, "Position X", -8, 8, sp.X,        v => ApplyLighting(c => c.Spots[idx].X = (float)v), "F1");
-                AddSlider(sec, "Position Y", -8, 8, sp.Y,        v => ApplyLighting(c => c.Spots[idx].Y = (float)v), "F1");
-                AddSlider(sec, "Position Z", -4, 8, sp.Z,        v => ApplyLighting(c => c.Spots[idx].Z = (float)v), "F1");
-                AddSlider(sec, "Radius",    0.5, 40, sp.Radius,  v => ApplyLighting(c => c.Spots[idx].Radius    = (float)v), "F1");
-                AddSlider(sec, "Intensity",   0, 5, sp.Intensity,v => ApplyLighting(c => c.Spots[idx].Intensity = (float)v), "F2");
-                AddInfo(sec, "Colour");
-                AddRgb(sec, () => _s.Lighting.Spots[idx].Color, nc => ApplyLighting(c => c.Spots[idx].Color = nc));
-            }
-
-            return WrapInScroll(stack);
-        }
-
-        // ── ApplyLighting — clone-mutate-swap the lighting config ─────────────
-        // The game thread reads GameSettings.Lighting by reference, so we must
-        // never mutate it in place. Clone, change the copy, swap atomically.
-        private void ApplyLighting(Action<LightingConfig> mutate)
-        {
-            var c = _s.Lighting.Clone();
-            mutate(c);
-            _s.Lighting = c;
         }
 
         // ─────────────────────────────────────────────────────────────────────

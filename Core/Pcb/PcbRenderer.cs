@@ -36,6 +36,8 @@ namespace EDes.Pcb
         public bool  ShowRegions;
         public bool  FillRegions;      // hatch pours instead of outlining them
         public bool  ShowHoles;
+        public bool  ShowVias;         // via barrels bridging the whole stack
+        public float ViaMaxDiaMm;      // plated holes at or under this are vias
         public bool  ShowMeshes;
         public bool  ShowCursor;
         public float CursorXmm, CursorYmm;
@@ -49,6 +51,10 @@ namespace EDes.Pcb
 
     public sealed class PcbRenderer
     {
+        /// <summary>Vias draw copper-amber so they read as plated conductor and are
+        /// unmistakable against the grey drill bores.</summary>
+        private const int VIA_COLOUR = 0xE8A020;
+
         // ── Board-to-world mapping from the last Draw (the app quotes it in the HUD) ──
         public float Scale   { get; private set; } = 1f;   // world units per mm
         public float Spacing { get; private set; }         // world units between layers
@@ -89,7 +95,8 @@ namespace EDes.Pcb
                 if (batch.BudgetHit) return;
             }
 
-            if (opt.ShowHoles) DrawHoles(batch, cam, board, cx, cy, z0, Spacing, slots);
+            if (opt.ShowVias)  DrawVias(batch, cam, board, opt, cx, cy, z0, Spacing, slots);
+            if (opt.ShowHoles) DrawHoles(batch, cam, board, cx, cy, z0, Spacing, slots, opt);
             if (opt.ShowMeshes) DrawMeshes(batch, cam, board, cx, cy, opt);
             if (opt.ShowComponents) DrawComponents(batch, hud, cam, board, opt, cx, cy, z0, slots);
             if (opt.ShowCursor) DrawCursor(batch, cam, board, opt, cx, cy, z0, Spacing, slots);
@@ -216,13 +223,19 @@ namespace EDes.Pcb
         // ── Drills ────────────────────────────────────────────────────────────
         // A hole is drawn as what it physically is: a bore through the whole stack.
         private void DrawHoles(VoxelBatch batch, SceneCamera cam, PcbBoard board,
-                               float cx, float cy, float z0, float spacing, int slots)
+                               float cx, float cy, float z0, float spacing, int slots,
+                               in PcbViewOptions opt)
         {
             float zTop = z0 - spacing * 0.35f;
             float zBot = z0 + (slots - 1) * spacing + spacing * 0.35f;
 
             foreach (var h in board.Holes)
             {
+                // Vias are the same Excellon hits, so without this every via would be
+                // drawn twice — once grey as a drill, once as a barrel — and the grey
+                // pass would win on colour wherever they overlapped.
+                if (opt.ShowVias && PcbBoard.IsVia(h, opt.ViaMaxDiaMm)) continue;
+
                 int col = h.Plated ? 0xC0C0C0 : 0x707070;
                 float x = Wx(h.X, cx), y = Wy(h.Y, cy);
                 float r = MathF.Max(h.Dia * 0.5f * Scale, batch.Spacing);
@@ -250,6 +263,63 @@ namespace EDes.Pcb
                     batch.Line(cam.Transform(x, y, zBot), cam.Transform(x1, y1, zBot), col);
                     batch.Line(cam.Transform(x1, y1, zTop), cam.Transform(x1, y1, zBot), col);
                 }
+                if (batch.BudgetHit) return;
+            }
+        }
+
+        // ── Vias ──────────────────────────────────────────────────────────────
+        // A via exists to be a CONTINUOUS conductor between layers, so the barrel is
+        // drawn as ONE line spanning the full stack — from the topmost layer plane to
+        // the bottommost — rather than as a segment per gap.
+        //
+        // That is what makes it independent of layer separation. VoxelBatch.Line
+        // point-samples at the frame's voxel spacing, so stretching LayerSpacing makes
+        // the barrel longer, never dotted, and there is no seam at a layer boundary
+        // because there is no join there to leak. Per-gap segments would look identical
+        // at the default spacing and fall apart as soon as the stack was pulled open.
+        //
+        // Budget note: a barrel costs (stack height / voxel spacing) voxels, so a
+        // via-dense board is easily tens of thousands of voxels. It is drawn BEFORE the
+        // drills deliberately — under a tight budget the drills thin out first.
+        private void DrawVias(VoxelBatch batch, SceneCamera cam, PcbBoard board,
+                              in PcbViewOptions opt, float cx, float cy,
+                              float z0, float spacing, int slots)
+        {
+            float zTop = z0;                                 // topmost layer plane
+            float zBot = z0 + (slots - 1) * spacing;         // bottommost layer plane
+            int   col  = Palette.Scale(VIA_COLOUR, opt.Brightness);
+
+            foreach (var h in board.Holes)
+            {
+                if (!PcbBoard.IsVia(h, opt.ViaMaxDiaMm)) continue;
+
+                float x = Wx(h.X, cx), y = Wy(h.Y, cy);
+                float r = h.Dia * 0.5f * Scale;
+
+                // The conductor itself: always drawn, always the full stack height.
+                // Everything below is decoration and may be skipped or budget-cut
+                // without ever breaking the connection this line represents.
+                batch.Line(cam.Transform(x, y, zTop), cam.Transform(x, y, zBot), col);
+
+                // Wall + annular ring only once the via is wider than a voxel or two.
+                // Below that the wall lands on the same voxels as the centre line, so
+                // it would cost four times the budget to draw the same thing.
+                if (r > batch.Spacing * 1.5f)
+                {
+                    for (int k = 0; k < 4; k++)
+                    {
+                        float a  = k * MathF.PI * 0.5f;
+                        float ox = MathF.Cos(a) * r, oy = MathF.Sin(a) * r;
+                        batch.Line(cam.Transform(x + ox, y + oy, zTop),
+                                   cam.Transform(x + ox, y + oy, zBot), col);
+                    }
+
+                    // A ring where the barrel meets each layer — this is what makes it
+                    // readable as "connected to every layer" rather than a bare spike.
+                    for (int i = 0; i < slots; i++)
+                        CircleXY(batch, cam, x, y, z0 + i * spacing, r, col, fill: false);
+                }
+
                 if (batch.BudgetHit) return;
             }
         }

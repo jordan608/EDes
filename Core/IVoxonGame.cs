@@ -1,9 +1,9 @@
 // ═══════════════════════════════════════════════════════════════════════════
 //  IVoxonGame.cs — The engine ↔ game contract
 //
-//  The engine (window, game loop, lighting, audio, input, diagnostics, preview,
-//  Simulator/Lighting/Profiles tabs) is constant. A game is a class implementing
-//  IVoxonGame: it brings its own logic, settings tab, and branding, and reaches
+//  The engine (window, game loop, audio, input, diagnostics, preview, and the
+//  Display settings panel) is constant. A game is a class implementing
+//  IVoxonGame: it brings its own logic, settings panel, and branding, and reaches
 //  engine services through GameContext.
 //
 //  Lifecycle / threading:
@@ -19,6 +19,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 using System;
+using System.Collections.Generic;
 using Avalonia.Controls;
 using EDes.UI;
 using Voxon;
@@ -61,5 +62,15 @@ namespace EDes
 
         /// <summary>Serializable settings object (or null). Persisted by the engine.</summary>
         object? Settings { get; }
+
+        /// <summary>Top-level modes the shell offers as header buttons across the top
+        /// of the window. Empty (the default) means the game has no modes and the shell
+        /// draws no headers, so games that predate this need no changes.</summary>
+        IReadOnlyList<string> Modes => Array.Empty<string>();
+
+        /// <summary>Index into <see cref="Modes"/>. The shell sets this when a header is
+        /// clicked and then rebuilds the game's settings panel, which is what lets a
+        /// game show only the settings belonging to the mode on screen.</summary>
+        int ActiveMode { get => 0; set { } }
     }
 }

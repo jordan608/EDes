@@ -29,9 +29,18 @@ namespace EDes
     }
 
     /// <summary>One frame of 6-DOF SpaceNavigator (SpaceMouse) motion, read from
-    /// LedWin's nav API. All axes are normalised roughly to -1..1 and are already
-    /// dead-zoned by the SDK. Present is false when no puck is plugged in, so
-    /// consumers can skip nav handling entirely.</summary>
+    /// LedWin's nav API or LedHost's vxl_nav_read.
+    ///
+    /// The axes here are RAW driver counts, NOT normalised and NOT dead-zoned — a
+    /// 3Dconnexion puck reports roughly +/-350 at full deflection and a few counts
+    /// of noise at rest. Feeding those straight into a camera rate is what made the
+    /// puck unusable (~1 world unit per frame at a rate of 0.1) and what made the
+    /// scene drift when nobody was touching it. Call Condition() to turn a raw
+    /// reading into the -1..1, dead-zoned form every consumer actually wants; the
+    /// raw values are kept as-is so the diagnostics readout can still show them.
+    ///
+    /// Present is false when no puck is plugged in, so consumers can skip nav
+    /// handling entirely.</summary>
     public readonly struct NavState
     {
         public readonly bool  Present;
@@ -60,6 +69,47 @@ namespace EDes
         public bool HasMotion =>
             MathF.Abs(Dx) + MathF.Abs(Dy) + MathF.Abs(Dz) +
             MathF.Abs(Ax) + MathF.Abs(Ay) + MathF.Abs(Az) > 1e-4f;
+
+        /// <summary>Largest absolute value on any of the six live axes. The
+        /// diagnostics readout tracks the peak of this so the puck's real full-scale
+        /// can be read off the display instead of guessed.</summary>
+        public float PeakAxis =>
+            MathF.Max(MathF.Max(MathF.Max(MathF.Abs(Dx), MathF.Abs(Dy)), MathF.Abs(Dz)),
+                      MathF.Max(MathF.Max(MathF.Abs(Ax), MathF.Abs(Ay)), MathF.Abs(Az)));
+
+        /// <summary>Raw driver counts → a usable -1..1 control signal.
+        ///
+        /// Two steps, in this order:
+        ///   1. divide by <paramref name="fullScale"/> (the count the puck reports at
+        ///      full deflection) and clamp, so the axes mean the same thing on any
+        ///      device and the camera rates are expressed in world-units-per-second;
+        ///   2. subtract a dead-zone and RE-SCALE what is left back over the full
+        ///      0..1 travel. Re-scaling matters: a bare "under the threshold is zero"
+        ///      test leaves a step discontinuity at the edge, so the scene would jump
+        ///      the instant the puck crossed it instead of easing in from a stop.
+        ///
+        /// The summed axes and the buttons are passed through untouched — they are not
+        /// rates and nothing integrates them.</summary>
+        public NavState Condition(float fullScale, float deadzone)
+        {
+            if (!Present) return default;
+
+            float scale = MathF.Max(1e-3f, fullScale);
+            float dead  = Math.Clamp(deadzone, 0f, 0.9f);
+
+            return new NavState(true, Devices,
+                                Cond(Dx, scale, dead), Cond(Dy, scale, dead), Cond(Dz, scale, dead),
+                                Cond(Ax, scale, dead), Cond(Ay, scale, dead), Cond(Az, scale, dead),
+                                Sx, Sy, Sz, Buttons);
+        }
+
+        private static float Cond(float raw, float scale, float dead)
+        {
+            float v = Math.Clamp(raw / scale, -1f, 1f);
+            float a = MathF.Abs(v);
+            if (a <= dead) return 0f;
+            return MathF.Sign(v) * (a - dead) / (1f - dead);
+        }
     }
 
     // Immutable per-frame snapshot handed to the game.

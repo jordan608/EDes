@@ -41,6 +41,20 @@ namespace EDes
         public volatile float NavRotRate  = 1.5f;
         public volatile float NavZoomRate = 1.2f;
 
+        /// <summary>The raw count the puck reports at FULL deflection. The driver hands
+        /// back raw counts, not a -1..1 signal, so this is what turns them into one and
+        /// what makes the three rates above mean "world units per second". 350 is the
+        /// usual 3Dconnexion full-scale; if a build already normalises, set this to 1.
+        /// The diagnostics block reports the peak actually seen — deflect the puck hard
+        /// on every axis and set this to that number.</summary>
+        public volatile float NavFullScale = 350f;
+
+        /// <summary>Dead-zone as a FRACTION of full scale (0.08 = ignore the first 8%).
+        /// A puck at rest still reports a few counts; without this they integrate into
+        /// permanent scene drift. Motion is re-scaled past the threshold, so there is no
+        /// jump at the edge.</summary>
+        public volatile float NavDeadzone = 0.08f;
+
         // ── Education mode: the circuit ───────────────────────────────────────
         public volatile int    PresetIndex = 0;
         // float, not double: volatile requires a 32-bit type, and 24-bit float
@@ -77,6 +91,11 @@ namespace EDes
         public volatile bool   PcbRegions    = true;
         public volatile bool   PcbFillRegions = false;
         public volatile bool   PcbHoles      = true;
+        public volatile bool   PcbVias       = false;   // via barrels through the stack
+        /// <summary>A plated hole at or below this diameter counts as a via rather than
+        /// a component through-hole. 0.7 mm covers ordinary vias while leaving even
+        /// small component leads (0.8 mm+) classified as through-holes.</summary>
+        public volatile float  PcbViaMaxDia  = 0.7f;    // mm
         public volatile bool   PcbMeshes     = true;
         public volatile bool   PcbCursor     = false;
         public volatile float  PcbCursorX    = 0f;     // mm, board coordinates

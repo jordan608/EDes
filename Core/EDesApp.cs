@@ -74,6 +74,8 @@ namespace EDes
         private int         _navHostRc = -999; // its return code (0 = ok on this SDK)
         private bool        _navHostUsable;
         private string      _navSource = "none";
+        private NavState    _navLive;          // conditioned (-1..1, dead-zoned) signal
+        private float       _navPeak;          // largest raw count seen, for calibration
         private float       _lastDt = 1f / 30f;
         private float _anim;                       // flow-animation clock
         private int   _lastVoxels, _lastDropped;
@@ -285,8 +287,8 @@ namespace EDes
             pitch += input.LookY * KeyRot * dt;
             _cam.Orbit(yaw, pitch);
 
-            if (IsDown(VX_KEYS.KB_Q)) _cam.Roll -= KeyRot * dt;
-            if (IsDown(VX_KEYS.KB_E) && (EDesMode)_s.Mode != EDesMode.Scope) _cam.Roll += KeyRot * dt;
+            if (IsDown(VX_KEYS.KB_Q)) _cam.RollBy(-KeyRot * dt);
+            if (IsDown(VX_KEYS.KB_E) && (EDesMode)_s.Mode != EDesMode.Scope) _cam.RollBy(KeyRot * dt);
 
             if (IsDown(VX_KEYS.KB_Comma))     _cam.ZoomBy(1f - KeyZoom * dt);
             if (IsDown(VX_KEYS.KB_Full_Stop)) _cam.ZoomBy(1f + KeyZoom * dt);
@@ -324,20 +326,31 @@ namespace EDes
             if (_navHostUsable)
             {
                 _navSource = "LedHost vxl_nav_read";
-                var host = new NavState(true, 1,
-                                        _navHost.dx, _navHost.dy, _navHost.dz,
-                                        _navHost.ax, _navHost.ay, _navHost.az,
-                                        0f, 0f, 0f, _navHost.but);
-                _cam.ApplyNav(host, _lastDt, _s.NavPanRate, _s.NavRotRate, _s.NavZoomRate);
+                Drive(new NavState(true, 1,
+                                   _navHost.dx, _navHost.dy, _navHost.dz,
+                                   _navHost.ax, _navHost.ay, _navHost.az,
+                                   0f, 0f, 0f, _navHost.but));
             }
             else if (_nav.Present)
             {
                 _navSource = "LedWin GetNavAxisValue";
-                _cam.ApplyNav(_nav, _lastDt, _s.NavPanRate, _s.NavRotRate, _s.NavZoomRate);
+                Drive(_nav);
             }
             else
             {
                 _navSource = "not detected";
+                _navLive   = default;
+            }
+
+            // Raw driver counts are useless as a camera rate — normalise and dead-zone
+            // first (see NavState.Condition). _navLive is kept so the diagnostics can
+            // show the conditioned signal beside the raw one, which is the only way to
+            // watch the dead-zone actually swallow the puck's resting noise.
+            void Drive(in NavState raw)
+            {
+                _navPeak = MathF.Max(_navPeak, raw.PeakAxis);
+                _navLive = raw.Condition(_s.NavFullScale, _s.NavDeadzone);
+                _cam.ApplyNav(_navLive, _lastDt, _s.NavPanRate, _s.NavRotRate, _s.NavZoomRate);
             }
         }
 
@@ -356,6 +369,10 @@ namespace EDes
             sb.Append("  buttons ").Append(_nav.Buttons)
               .Append("  L=").Append((_nav.Buttons & 1) != 0 ? "DOWN" : "up")
               .Append("  R=").Append((_nav.Buttons & 2) != 0 ? "DOWN" : "up").Append('\n');
+            sb.Append($"  live X {_navLive.Dx,7:0.000}  Y {_navLive.Dy,7:0.000}  Z {_navLive.Dz,7:0.000}"
+                    + $"   P {_navLive.Ax,7:0.000}  Y {_navLive.Ay,7:0.000}  R {_navLive.Az,7:0.000}\n");
+            sb.Append($"  peak raw axis {_navPeak:0.0}   full-scale {_s.NavFullScale:0.0}"
+                    + $"   dead-zone {_s.NavDeadzone * 100f:0.#}%\n");
             sb.Append("LedHost vxl_nav_read rc=").Append(_navHostRc).Append('\n');
             sb.Append($"  d    X {_navHost.dx,7:0.000}  Y {_navHost.dy,7:0.000}  Z {_navHost.dz,7:0.000}\n");
             sb.Append($"  a    X {_navHost.ax,7:0.000}  Y {_navHost.ay,7:0.000}  Z {_navHost.az,7:0.000}\n");
@@ -561,6 +578,8 @@ namespace EDes
                 ShowRegions  = _s.PcbRegions,
                 FillRegions  = _s.PcbFillRegions,
                 ShowHoles    = _s.PcbHoles,
+                ShowVias     = _s.PcbVias,
+                ViaMaxDiaMm  = _s.PcbViaMaxDia,
                 ShowMeshes   = _s.PcbMeshes,
                 ShowCursor   = _s.PcbCursor,
                 CursorXmm    = _s.PcbCursorX,
@@ -732,30 +751,39 @@ namespace EDes
 
         // ── Settings tab ──────────────────────────────────────────────────────
 
+        /// <summary>The mode headers the shell draws across the top of the window.
+        /// Order must match EDesMode.</summary>
+        public IReadOnlyList<string> Modes { get; } = new[] { "Education", "Oscilloscope", "PCB" };
+
+        /// <summary>Which header is lit. The shell writes this on a click and then
+        /// rebuilds the panel below, so the setting is the single source of truth for
+        /// both the volume and the UI — there is no second copy to drift.</summary>
+        public int ActiveMode
+        {
+            get => Math.Clamp(_s.Mode, 0, Modes.Count - 1);
+            set => _s.Mode = Math.Clamp(value, 0, Modes.Count - 1);
+        }
+
+        /// <summary>Only the sections that belong to the mode on screen, plus the ones
+        /// that apply everywhere. The shell rebuilds this whenever the mode changes, so
+        /// a mode's settings are never buried under two other modes' accordions.</summary>
         public Control BuildSettingsPanel(PanelBuilder ui)
         {
             var stack = ui.Root();
             var group = new List<Expander>();
 
-            BuildModeSection(ui, stack, group);
-            BuildCircuitSection(ui, stack, group);
-            BuildScopeSection(ui, stack, group);
-            BuildPcbSection(ui, stack, group);
+            switch ((EDesMode)ActiveMode)
+            {
+                case EDesMode.Education: BuildCircuitSection(ui, stack, group); break;
+                case EDesMode.Scope:     BuildScopeSection(ui, stack, group);   break;
+                case EDesMode.Pcb:       BuildPcbSection(ui, stack, group);     break;
+            }
+
             BuildRenderSection(ui, stack, group);
             BuildCameraSection(ui, stack, group);
             BuildControlsSection(ui, stack, group);
 
             return ui.Wrap(stack);
-        }
-
-        private void BuildModeSection(PanelBuilder ui, StackPanel stack, List<Expander> group)
-        {
-            var sec = ui.AddSection(stack, "Mode", group, expanded: true);
-            ui.AddInfo(sec, "Tab cycles modes in the volume.");
-            ui.AddButton(sec, "Education — circuits + Ohm's law", () => _s.Mode = (int)EDesMode.Education);
-            ui.AddButton(sec, "Oscilloscope — full-screen scope", () => _s.Mode = (int)EDesMode.Scope);
-            ui.AddButton(sec, "PCB — board / layer stack",        () => _s.Mode = (int)EDesMode.Pcb);
-            ui.AddLiveInfo(sec, () => "Active: " + (EDesMode)_s.Mode);
         }
 
         private void BuildCircuitSection(PanelBuilder ui, StackPanel stack, List<Expander> group)
@@ -886,6 +914,15 @@ namespace EDes
             ui.AddToggle(sec, "Copper pours",     _s.PcbRegions,     v => _s.PcbRegions = v);
             ui.AddToggle(sec, "Hatch pours",      _s.PcbFillRegions, v => _s.PcbFillRegions = v);
             ui.AddToggle(sec, "Drills",           _s.PcbHoles,       v => _s.PcbHoles = v);
+            ui.AddToggle(sec, "Vias",             _s.PcbVias,        v => _s.PcbVias = v);
+            ui.AddSlider(sec, "Via max diameter (mm)", 0.1, 2.0, _s.PcbViaMaxDia,
+                         v => _s.PcbViaMaxDia = (float)v, "F2");
+            ui.AddLiveInfo(sec, () =>
+            {
+                int vias = _board.ViaCount(_s.PcbViaMaxDia);
+                return $"{vias} of {_board.Holes.Count} holes classified as vias "
+                     + $"(plated, not slotted, <= {_s.PcbViaMaxDia:0.00} mm)";
+            }, 0.5);
             ui.AddToggle(sec, "Mechanical meshes", _s.PcbMeshes,     v => _s.PcbMeshes = v);
             ui.AddToggle(sec, "Components (placement file)", _s.PcbComponents,
                          v => _s.PcbComponents = v);
@@ -967,6 +1004,19 @@ namespace EDes
             ui.AddSlider(sec, "Nav pan rate",  0.1, 10, _s.NavPanRate,  v => _s.NavPanRate  = (float)v, "F2");
             ui.AddSlider(sec, "Nav rotate rate", 0.1, 6, _s.NavRotRate, v => _s.NavRotRate  = (float)v, "F2");
             ui.AddSlider(sec, "Nav zoom rate", 0.1, 5, _s.NavZoomRate,  v => _s.NavZoomRate = (float)v, "F2");
+            ui.AddSlider(sec, "Nav full scale (raw counts)", 1, 1000, _s.NavFullScale,
+                         v => _s.NavFullScale = (float)v, "F0");
+            ui.AddSlider(sec, "Nav dead-zone (fraction)", 0, 0.5, _s.NavDeadzone,
+                         v => _s.NavDeadzone = (float)v, "F3");
+            ui.AddInfo(sec, "The driver reports RAW counts, not -1..1. Full scale converts them, " +
+                            "so the three rates above are world units per second. If the puck is " +
+                            "still too fast or too slow, fix full scale FIRST (deflect hard, then " +
+                            "press Calibrate below) and only then touch the rates. Dead-zone is a " +
+                            "fraction of full scale and is what stops the scene drifting at rest.");
+            ui.AddButton(sec, "Calibrate full scale from observed peak", () =>
+            {
+                if (_navPeak > 1f) _s.NavFullScale = _navPeak;
+            });
             ui.AddButton(sec, "Reset scene camera", () => _cam.Reset());
             ui.AddLiveInfo(sec, () =>
                 $"yaw {_cam.Yaw:0.00}  pitch {_cam.Pitch:0.00}  roll {_cam.Roll:0.00}  zoom {_cam.Zoom:0.00}");

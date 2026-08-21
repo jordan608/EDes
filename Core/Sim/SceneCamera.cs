@@ -34,14 +34,32 @@ namespace EDes.Sim
         public const bool HORIZONTAL_IS_X = true;
 
         public float PanX, PanY, PanZ;
-        public float Zoom  = 1f;
-        public float Yaw, Pitch, Roll;
+        public float Zoom = 1f;
+
+        // ── Orientation ───────────────────────────────────────────────────────
+        // The scene's orientation is an orthonormal BASIS, not three Euler angles.
+        //
+        // Euler angles cannot express "rotate about the object's own axis": three
+        // accumulated scalars replayed in a fixed order always rotate about the
+        // frame the order is defined in, i.e. the display's global axes. That is why
+        // twisting the puck used to tilt the board about global Y no matter how the
+        // board was already sitting. Storing the basis instead and POST-multiplying
+        // each increment makes every rotation local by construction, and drops
+        // gimbal lock (and the pitch clamp that existed to hide it) on the way out.
+        //
+        // U, V, W are the scene's own X, Y, Z axes expressed in display space, so
+        // Transform is just  world = U*x + V*y + W*z.
+        private float _ux = 1, _uy = 0, _uz = 0;   // scene X in display space
+        private float _vx = 0, _vy = 1, _vz = 0;   // scene Y
+        private float _wx = 0, _wy = 0, _wz = 1;   // scene Z
 
         public void Reset()
         {
             PanX = PanY = PanZ = 0f;
             Zoom = 1f;
-            Yaw  = Pitch = Roll = 0f;
+            _ux = 1; _uy = 0; _uz = 0;
+            _vx = 0; _vy = 1; _vz = 0;
+            _wx = 0; _wy = 0; _wz = 1;
         }
 
         /// <summary>World → display space. Call once per point, right before drawing.</summary>
@@ -52,27 +70,75 @@ namespace EDes.Sim
             x += PanX; y += PanY; z += PanZ;
             x *= Zoom; y *= Zoom; z *= Zoom;
 
-            // Yaw — around the vertical (Z) axis
-            float cx = x * MathF.Cos(Yaw) - y * MathF.Sin(Yaw);
-            float cy = x * MathF.Sin(Yaw) + y * MathF.Cos(Yaw);
-            x = cx; y = cy;
-
-            // Pitch — around the horizontal (X) axis
-            float cz = z * MathF.Cos(Pitch) - y * MathF.Sin(Pitch);
-            cy       = z * MathF.Sin(Pitch) + y * MathF.Cos(Pitch);
-            z = cz; y = cy;
-
-            // Roll — around the depth (Y) axis
-            cx = x * MathF.Cos(Roll) + z * MathF.Sin(Roll);
-            cz = -x * MathF.Sin(Roll) + z * MathF.Cos(Roll);
-            x = cx; z = cz;
-
-            return new point3d(x, y, z);
+            return new point3d(_ux * x + _vx * y + _wx * z,
+                               _uy * x + _vy * y + _wy * z,
+                               _uz * x + _vz * y + _wz * z);
         }
 
         public point3d Transform(point3d p) => Transform(p.x, p.y, p.z);
 
-        /// <summary>Apply one frame of 6-DOF SpaceMouse motion (SpaceNavigator).</summary>
+        /// <summary>Rotate about the scene's OWN axes by three small angles (radians).
+        /// Every rotation in this class routes through here, so "local" is not an
+        /// option a caller can get wrong.</summary>
+        public void RotateLocal(float aboutX, float aboutY, float aboutZ)
+        {
+            // Post-multiplying by a rotation about a basis axis just mixes the OTHER
+            // two basis vectors — no matrix product needed, and it is obvious by
+            // inspection that the axis of rotation is the scene's own.
+            if (aboutX != 0f)
+            {
+                float c = MathF.Cos(aboutX), sn = MathF.Sin(aboutX);
+                (_vx, _wx) = (_vx * c + _wx * sn, _wx * c - _vx * sn);
+                (_vy, _wy) = (_vy * c + _wy * sn, _wy * c - _vy * sn);
+                (_vz, _wz) = (_vz * c + _wz * sn, _wz * c - _vz * sn);
+            }
+            if (aboutY != 0f)
+            {
+                float c = MathF.Cos(aboutY), sn = MathF.Sin(aboutY);
+                (_wx, _ux) = (_wx * c + _ux * sn, _ux * c - _wx * sn);
+                (_wy, _uy) = (_wy * c + _uy * sn, _uy * c - _wy * sn);
+                (_wz, _uz) = (_wz * c + _uz * sn, _uz * c - _wz * sn);
+            }
+            if (aboutZ != 0f)
+            {
+                float c = MathF.Cos(aboutZ), sn = MathF.Sin(aboutZ);
+                (_ux, _vx) = (_ux * c + _vx * sn, _vx * c - _ux * sn);
+                (_uy, _vy) = (_uy * c + _vy * sn, _vy * c - _uy * sn);
+                (_uz, _vz) = (_uz * c + _vz * sn, _vz * c - _uz * sn);
+            }
+            Orthonormalise();
+        }
+
+        /// <summary>Gram-Schmidt the basis back to square and unit-length.
+        ///
+        /// Rotations here are INCREMENTAL — the basis is fed back into itself every
+        /// frame, so float error compounds instead of cancelling. Left alone it shows
+        /// up as the scene slowly shearing and scaling after a few minutes of driving
+        /// the puck. Renormalising each time costs nothing at this rate.</summary>
+        private void Orthonormalise()
+        {
+            float ul = MathF.Sqrt(_ux * _ux + _uy * _uy + _uz * _uz);
+            if (ul < 1e-6f) { Reset(); return; }
+            _ux /= ul; _uy /= ul; _uz /= ul;
+
+            float d = _ux * _vx + _uy * _vy + _uz * _vz;      // V -= (U·V) U
+            _vx -= d * _ux; _vy -= d * _uy; _vz -= d * _uz;
+            float vl = MathF.Sqrt(_vx * _vx + _vy * _vy + _vz * _vz);
+            if (vl < 1e-6f) { Reset(); return; }
+            _vx /= vl; _vy /= vl; _vz /= vl;
+
+            _wx = _uy * _vz - _uz * _vy;                      // W = U x V
+            _wy = _uz * _vx - _ux * _vz;
+            _wz = _ux * _vy - _uy * _vx;
+        }
+
+        /// <summary>Apply one frame of 6-DOF SpaceMouse motion (SpaceNavigator).
+        ///
+        /// Axis mapping is empirical, not from the SDK's enum names: the aliases in
+        /// VX_NAV_AXIS_CODES (PITCH=X, YAW=Y, ROLL=Z) do not describe what this puck
+        /// actually reports, so each rotation is commented with the physical gesture
+        /// it comes from. Change the three lines below to re-tune; nothing else needs
+        /// to know.</summary>
         public void ApplyNav(in NavState nav, float dt, float panRate, float rotRate, float zoomRate)
         {
             if (!nav.Present) return;
@@ -81,27 +147,32 @@ namespace EDes.Sim
             PanY += nav.Dz * panRate * dt;   // nav "forward/back" → scene depth
             PanZ += nav.Dy * panRate * dt;   // nav "lift" → vertical (-Z is up)
 
-            Yaw   += nav.Ay * rotRate * dt;
-            Pitch += nav.Ax * rotRate * dt;
-            Roll  += nav.Az * rotRate * dt;
+            RotateLocal(nav.Ay * rotRate * dt,    // tilt forward / back → scene's own X
+                        nav.Ax * rotRate * dt,    // tilt left / right   → scene's own Y
+                        nav.Az * rotRate * dt);   // twist left / right  → scene's own Z
 
-            // Twist the puck's own vertical axis to zoom when it is pushed down/up
-            // hard while not rotating — cheap, and keeps zoom on the same device.
-            if (MathF.Abs(nav.Dy) > 0.6f && MathF.Abs(nav.Ax) < 0.2f)
-                Zoom = Math.Clamp(Zoom * (1f + nav.Dy * zoomRate * dt), 0.2f, 5f);
-
-            ClampPitch();
+            // Zoom is on the two puck buttons. It used to be a gesture on the lift
+            // axis, which fought the pan already bound to that same axis — pushing
+            // down to raise the board zoomed it as a side effect.
+            bool zoomIn  = nav.ButtonDown(VX_NAV_BUTTON_CODES.NAV_RIGHT_BUTTON);
+            bool zoomOut = nav.ButtonDown(VX_NAV_BUTTON_CODES.NAV_LEFT_BUTTON);
+            if (zoomIn ^ zoomOut)
+                ZoomBy(1f + (zoomIn ? zoomRate : -zoomRate) * dt);
         }
 
-        public void Orbit(float dYaw, float dPitch)
-        {
-            Yaw   += dYaw;
-            Pitch += dPitch;
-            ClampPitch();
-        }
+        /// <summary>Keyboard orbit — also local, so WASD and the puck agree.</summary>
+        public void Orbit(float dYaw, float dPitch) => RotateLocal(dPitch, 0f, dYaw);
+
+        /// <summary>Keyboard roll (Q/E), about the scene's own depth axis.</summary>
+        public void RollBy(float d) => RotateLocal(0f, d, 0f);
 
         public void ZoomBy(float factor) => Zoom = Math.Clamp(Zoom * factor, 0.2f, 5f);
 
-        private void ClampPitch() => Pitch = Math.Clamp(Pitch, -1.45f, 1.45f);
+        // ── Derived angles, for the settings readout only ──────────────────────
+        // The basis is the truth; these are a human-readable projection of it and are
+        // ambiguous near straight up, which is fine for a status line.
+        public float Yaw   => MathF.Atan2(_uy, _ux);
+        public float Pitch => MathF.Asin(Math.Clamp(-_uz, -1f, 1f));
+        public float Roll  => MathF.Atan2(_vz, _wz);
     }
 }
