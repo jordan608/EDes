@@ -63,7 +63,7 @@ namespace EDes.Sim
         public float LaneSpread { get; private set; }
 
         private bool  _dirty = true;
-        private float _builtRadius, _builtZHalf;
+        private float _builtRadius, _builtTop, _builtBottom;
 
         // ── Mutators (all just mark dirty) ────────────────────────────────────
 
@@ -113,24 +113,35 @@ namespace EDes.Sim
         // ── Solve + layout ────────────────────────────────────────────────────
 
         /// <summary>Recompute if anything changed. Cheap no-op otherwise.
-        /// Bounds come from the live display size so the circuit is always laid
-        /// out to fit the hardware it is actually running on.</summary>
-        public void RecomputeIfDirty(float radius, float zHalf)
+        /// The caller passes the band the circuit may occupy (bandTop..bandBottom in
+        /// display units, -Z up) plus one text row, so the loop is sized to the space
+        /// it was actually given and its component labels fit INSIDE the loop rather
+        /// than being written over whatever sits above it.</summary>
+        public void RecomputeIfDirty(float radius, float bandTop, float bandBottom, float textStep)
         {
             if (!_dirty &&
-                MathF.Abs(radius - _builtRadius) < 1e-4f &&
-                MathF.Abs(zHalf  - _builtZHalf)  < 1e-4f) return;
+                MathF.Abs(radius     - _builtRadius) < 1e-4f &&
+                MathF.Abs(bandTop    - _builtTop)    < 1e-4f &&
+                MathF.Abs(bandBottom - _builtBottom) < 1e-4f) return;
 
             _builtRadius = radius;
-            _builtZHalf  = zHalf;
+            _builtTop    = bandTop;
+            _builtBottom = bandBottom;
             _dirty       = false;
 
-            // Fit inside the volume with margin. The scope panel owns the lower
-            // half of the volume (positive Z), so the circuit sits in the upper.
-            W          = radius * 0.60f;
-            TopZ       = -zHalf * 0.58f;
-            BotZ       = -zHalf * 0.12f;
-            LaneSpread = radius * 0.28f;
+            float height = MathF.Max(textStep * 2f, bandBottom - bandTop);
+
+            // Reserve the top of the band for the power bulge (resistors rise as they
+            // heat) and keep at least three text rows of clear air inside the loop.
+            float bulgeRoom = height * 0.18f;
+            float labelRoom = MathF.Min(height * 0.55f, textStep * 3.4f);
+
+            TopZ       = bandTop + bulgeRoom;
+            BotZ       = MathF.Max(TopZ + textStep * 0.8f, bandTop + bulgeRoom + labelRoom);
+            if (BotZ > bandBottom) BotZ = bandBottom;
+
+            W          = radius * 0.72f;
+            LaneSpread = radius * 0.30f;
 
             Solve();
             BuildSegments();

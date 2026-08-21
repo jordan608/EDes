@@ -32,10 +32,12 @@ namespace EDes.Sim
         /// <summary>Draw the circuit. animClock advances the flow dots; pass
         /// showLabels=false to reclaim the voxels that text costs.</summary>
         public void Draw(VoxelBatch batch, Hud hud, SceneCamera cam, CircuitScene scene,
-                         float animClock, bool showLabels, float textSize, float zHalf)
+                         float animClock, bool showLabels, float textSize, float textStep)
         {
             double maxCurrent = Math.Max(1e-9, scene.TotalCurrent);
-            float  bulgeMax   = zHalf * 0.16f;
+            // The bulge may only use the headroom CircuitScene reserved above the
+            // top wire, so a hot resistor cannot climb into the header text.
+            float  bulgeMax   = MathF.Max(textStep * 0.5f, (scene.BotZ - scene.TopZ) * 0.45f);
 
             foreach (var seg in scene.Segments)
             {
@@ -44,7 +46,7 @@ namespace EDes.Sim
                 if (seg.IsBattery)
                     DrawBattery(batch, hud, cam, seg, scene, textSize, showLabels);
                 else if (seg.Body != null)
-                    DrawResistor(batch, hud, cam, seg, scene, bulgeMax, textSize, showLabels);
+                    DrawResistor(batch, hud, cam, seg, scene, bulgeMax, textSize, textStep, showLabels);
                 else
                     DrawWire(batch, cam, seg, maxCurrent);
             }
@@ -63,7 +65,8 @@ namespace EDes.Sim
 
         // ── Resistor: schematic zigzag, heat colour, power bulge ──────────────
         private void DrawResistor(VoxelBatch batch, Hud hud, SceneCamera cam, in WireSegment seg,
-                                  CircuitScene scene, float bulgeMax, float textSize, bool showLabels)
+                                  CircuitScene scene, float bulgeMax, float textSize,
+                                  float textStep, bool showLabels)
         {
             var   r         = seg.Body!;
             float powerFrac = (float)Math.Clamp(r.Power / Math.Max(1e-12, scene.MaxPower), 0.0, 1.0);
@@ -113,9 +116,10 @@ namespace EDes.Sim
             if (selected) DrawSelectionRing(batch, cam, centre, len * 0.55f);
             if (!showLabels) return;
 
-            // Label above the body (negative Z): name/ohms, then V/I, then P.
-            float step = Hud.LineStep(textSize);
-            float lz   = centre.z - step * 2.4f;
+            // Labels go BELOW the component, inside the loop, where CircuitScene
+            // reserved three rows for them — never above, where the header lives.
+            float step = textStep;
+            float lz   = seg.Start.z + step * 0.35f;
             int   lc   = selected ? Palette.TextHilite : Palette.Text;
             string l1  = r.Name + " " + Hud.Eng(r.R, "R");
             string l2  = Hud.Eng(r.Voltage, "V") + " " + Hud.Eng(r.Current, "A");

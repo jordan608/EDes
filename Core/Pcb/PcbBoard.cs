@@ -97,6 +97,42 @@ namespace EDes.Pcb
         };
     }
 
+    /// <summary>A placed component, from a pick-and-place / centroid file. XY is the
+    /// part centroid in board millimetres; Bottom says which side it is mounted on.</summary>
+    public struct PcbComponent
+    {
+        public string Designator;      // R1, C14, U3 ...
+        public string Value;           // 10k, 100nF, STM32F401 ...
+        public string Footprint;       // 0603, SOIC-8 ...
+        public float  X, Y;            // mm, board coordinates
+        public float  Rotation;        // degrees
+        public bool   Bottom;          // mounted on the bottom side
+    }
+
+    /// <summary>One BOM row (a part and the designators that use it).</summary>
+    public struct PcbBomLine
+    {
+        public string Designators;
+        public string Value;
+        public string Footprint;
+        public int    Quantity;
+    }
+
+    /// <summary>Any file in the design folder that is not geometry: a schematic PDF,
+    /// a mechanical drawing, a netlist, a datasheet, a readme. EDes cannot render a
+    /// vector schematic in the volume, but it CAN tell you the design package is
+    /// complete and what is in it — which is most of what an inventory is for.</summary>
+    public enum DocKind { Schematic, Drawing, Netlist, Bom, Placement, Datasheet, Cad3D, Archive, Other }
+
+    public struct PcbDocument
+    {
+        public string  Path;
+        public string  Name;
+        public DocKind Kind;
+        public long    Bytes;
+        public int     Pages;      // PDF page count when cheaply known, else 0
+    }
+
     /// <summary>A sampled point cloud from a mesh file (STL / OBJ / GLB / PLY).</summary>
     public sealed class MeshCloud
     {
@@ -116,6 +152,16 @@ namespace EDes.Pcb
         public readonly List<PcbLayer>  Layers = new();
         public readonly List<PcbHole>   Holes  = new();
         public readonly List<MeshCloud> Meshes = new();
+
+        /// <summary>Placed parts (from a centroid file), their BOM rows, and every
+        /// non-geometry document found in the design folder tree.</summary>
+        public readonly List<PcbComponent> Components = new();
+        public readonly List<PcbBomLine>   BomLines   = new();
+        public readonly List<PcbDocument>  Documents  = new();
+
+        /// <summary>Folders walked during the last import, deepest paths first — shown
+        /// so it is obvious which parts of a design tree contributed.</summary>
+        public readonly List<string> SourceFolders = new();
 
         public string SourceName = "(no board loaded)";
         /// <summary>Import warnings/notes — surfaced in the settings panel.</summary>
@@ -147,6 +193,10 @@ namespace EDes.Pcb
             Layers.Clear();
             Holes.Clear();
             Meshes.Clear();
+            Components.Clear();
+            BomLines.Clear();
+            Documents.Clear();
+            SourceFolders.Clear();
             Notes.Clear();
             SourceName = "(no board loaded)";
             MinX = MinY = float.MaxValue;
@@ -190,6 +240,8 @@ namespace EDes.Pcb
                 Hit(h.X + h.Dia * 0.5f, h.Y + h.Dia * 0.5f);
                 if (h.Slot) Hit(h.X1, h.Y1);
             }
+
+            foreach (var c in Components) Hit(c.X, c.Y);
 
             // Meshes carry their own 3D bounds; fold their XY footprint in so a
             // mesh-only import still fits the display.
@@ -256,9 +308,16 @@ namespace EDes.Pcb
             return n;
         }
 
+        public int ComponentsOnSide(bool bottom)
+        {
+            int n = 0;
+            foreach (var c in Components) if (c.Bottom == bottom) n++;
+            return n;
+        }
+
         public int TotalObjects()
         {
-            int n = Holes.Count;
+            int n = Holes.Count + Components.Count;
             foreach (var l in Layers) n += l.ObjectCount;
             foreach (var m in Meshes) n += m.Count;
             return n;

@@ -36,6 +36,7 @@ namespace EDes
 
         // ── Camera / SpaceNavigator ───────────────────────────────────────────
         public volatile bool  NavEnabled  = true;
+        public volatile bool  ShowNavDiag = false;   // SpaceNav readout in the volume (key V)
         public volatile float NavPanRate  = 2.5f;
         public volatile float NavRotRate  = 1.5f;
         public volatile float NavZoomRate = 1.2f;
@@ -50,9 +51,15 @@ namespace EDes
         public volatile bool   FlowPaused = false;
 
         // ── Scope ─────────────────────────────────────────────────────────────
-        public volatile bool   ScopeUsb          = false;         // false = synthetic
+        /// <summary>0 Synthetic, 1 Serial (ASCII stream), 2 SCPI over TCP (LXI socket),
+        /// 3 SCPI over USBTMC (needs a VISA runtime). See ScopeInput.</summary>
+        public volatile int    ScopeMode         = 0;
         public          string ScopePort         = "";            // e.g. "COM4"
         public volatile int    ScopeBaud         = 115200;
+        public          string ScopeHost         = "";            // instrument IP for SCPI/TCP
+        public volatile int    ScopeTcpPort      = 5555;          // Rigol/LXI raw socket
+        public          string ScopeVisaResource = "";            // blank = first USB instrument
+        public volatile float  ScopePollHz       = 10f;           // SCPI acquisitions/second
         public volatile float  ScopeVoltsPerDiv  = 1.0f;
         public volatile int    ScopeChannelMask  = 0xF;
         public volatile int    ScopeTriggerCh    = 0;             // -1 = free run
@@ -77,6 +84,10 @@ namespace EDes
         public volatile float  PcbBrightness = 1.0f;
         public volatile int    PcbIsolate    = -1;     // -1 = show all layers
         public volatile int    MeshPointBudget = 80_000;
+        public volatile bool   PcbComponents      = true;    // markers from the placement file
+        public volatile bool   PcbComponentLabels = true;    // designators beside them
+        public volatile int    PcbLabelLimit      = 150;     // skip labels above this part count
+        public volatile bool   PcbShowDocs        = true;    // document inventory in the volume
 
         /// <summary>Set by the UI to ask the game thread to (re)import PcbPath.
         /// The game thread clears it — imports never run on the UI thread.</summary>

@@ -4,8 +4,9 @@ EDes imports a board from **fabrication output**, not from CAD project files. Th
 deliberate: every EDA tool writes its own project format and changes it between versions,
 but they all export the same two industry formats for manufacturing, and those are stable.
 
-Point the **PCB tab → Path** at a **folder** (a whole fab output set) or a single file, then
-press **Import / reload**. Import runs on the game thread, takes tens of milliseconds for a
+Point the **PCB tab → Path** at a **folder** (a whole design tree, or just a fab output set)
+or a single file, then press **Import / reload**. Folders are walked **recursively** — see
+[Design folder trees](#design-folder-trees). Import runs on the game thread, takes tens of milliseconds for a
 typical board, and reports what it found in the panel underneath the button.
 
 ---
@@ -144,3 +145,78 @@ draw order is priority order, so what you lose first is the backdrop, then label
 geometry. If a board looks thin, either raise the budget or reduce what is drawn (turn off
 pours, isolate a layer, lower the mesh point budget). The on-glass readout shows
 `N VOX` and `+N DROPPED` so you can see it happening rather than guessing.
+
+
+---
+
+## Design folder trees
+
+A real design folder is a tree: gerbers in one sub-folder, the 3D model in another,
+schematics and drawings somewhere else, and a BOM and placement file next to the assembly
+outputs. Point EDes at the **top** of that tree and it walks the whole thing. Nothing has to
+be named or arranged a particular way — every file is classified by its extension, its
+header, and the folder it sits in.
+
+```
+MyBoard/                    <- point EDes here
+├─ 01_Schematic/  board_schematic.pdf        -> inventory (sheet count)
+├─ 02_PCB/
+│  ├─ Gerbers/   board-F_Cu.gbr, …, board.drl -> layer stack + drills   (drawn)
+│  └─ backup/    (ignored)
+├─ 03_Assembly/  board-pos.csv                -> component placement    (drawn)
+│                board_BOM.csv                -> values + footprints    (labels)
+├─ 04_3D/        board.step / board.stl       -> mechanical model       (drawn if STL)
+└─ README.md                                  -> inventory
+```
+
+**What the walk does**
+
+- Recurses to 12 levels, up to 20 000 files, and reports if it stops early.
+- Skips folders that never hold anything useful: `.git`, `.svn`, `backup`, `backups`,
+  `autosave`, `node_modules`, `obj`, `bin`, `cache`, `temp`, `tmp`, `__MACOSX`.
+- **De-duplicates** by file name + size, shallowest copy first. Fab output copied into a
+  release folder is the normal case; it imports once and the note says how many duplicates
+  were skipped.
+- Reports what every folder contributed in the PCB tab (folders walked, per-layer object
+  counts, drill table, part counts, document list).
+
+### Component placement (the big one)
+
+A pick-and-place / centroid file is what turns a stack of copper into a board with parts on
+it. EDes draws a marker per component, on the side it is mounted, with a stub showing its
+rotation, and its designator (plus value, from the BOM) beside it.
+
+Recognised: KiCad `.pos` and `-pos.csv`, Altium "Pick Place" CSV, Eagle/generic CSV — and
+any CSV whose header names a designator column and an X column. Parsing is driven by the
+**header row**, not by column position, so these all work:
+
+```
+Ref,Val,Package,PosX,PosY,Rot,Side              (KiCad)
+Designator,…,Mid X,Mid Y,Rotation,Layer         (Altium, units suffixed per value)
+Designator,X,Y,Rotation,Side                    (generic)
+```
+
+Units: a per-value suffix (`12.7mm`, `500mil`, `0.5in`) wins; otherwise the file's stated
+unit; otherwise millimetres.
+
+Toggles: **Components**, **Component designators**, **Label limit** (labels are skipped
+above that part count, since text is the most expensive thing on this display).
+
+### BOM
+
+Any `*bom*` / `*parts*` CSV. Rows are matched to placed designators (`"R1,R2,R3"` in one
+row is expanded), filling in **value** and **footprint** for the labels, and the row count
+appears in the readout.
+
+### Documents
+
+Schematics (`.kicad_sch`, `.sch`, `.SchDoc`, `*sch*.pdf`), drawings (`.pdf`, `.dxf`, `.dwg`,
+`.svg`), netlists (`.net`, `.ipc`, `.d356`), 3D CAD (`.step`, `.stp`, `.wrl`, `.iges`),
+archives and readmes are **catalogued, not rendered** — EDes cannot draw a vector schematic
+in a volumetric display, and pretending otherwise would be worse than saying so. What you get
+is a design-package inventory: how many schematic sheets, drawings, netlists and 3D models
+the folder contains, in the volume (`SCH 1/2SH  DWG 2  3D 1  NET 1  BOM 34`) and in full in
+the PCB tab. PDF page counts are approximate — counted from page objects, no PDF library.
+
+If you want a schematic *rendered*, export it to **DXF** or **SVG** and tell me — those are
+vector line art that this renderer could draw directly, unlike PDF.

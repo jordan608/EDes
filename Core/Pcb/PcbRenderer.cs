@@ -41,6 +41,10 @@ namespace EDes.Pcb
         public float CursorXmm, CursorYmm;
         public float Brightness;
         public int   IsolateLayer;     // -1 = all layers, else only this index
+        public bool  ShowComponents;   // markers from the placement file
+        public bool  ShowLabels;       // designators next to those markers
+        public int   LabelLimit;       // skip labels entirely above this part count
+        public float TextSize;         // label size, in display units
     }
 
     public sealed class PcbRenderer
@@ -51,8 +55,8 @@ namespace EDes.Pcb
         public int   VisibleLayers { get; private set; }
 
         /// <summary>Draw the board. Returns immediately if there is nothing loaded.</summary>
-        public void Draw(VoxelBatch batch, SceneCamera cam, PcbBoard board, in PcbViewOptions opt,
-                         float radius, float zHalf)
+        public void Draw(VoxelBatch batch, Sim.Hud hud, SceneCamera cam, PcbBoard board,
+                         in PcbViewOptions opt, float radius, float zHalf)
         {
             if (!board.HasGeometry) return;
 
@@ -87,6 +91,7 @@ namespace EDes.Pcb
 
             if (opt.ShowHoles) DrawHoles(batch, cam, board, cx, cy, z0, Spacing, slots);
             if (opt.ShowMeshes) DrawMeshes(batch, cam, board, cx, cy, opt);
+            if (opt.ShowComponents) DrawComponents(batch, hud, cam, board, opt, cx, cy, z0, slots);
             if (opt.ShowCursor) DrawCursor(batch, cam, board, opt, cx, cy, z0, Spacing, slots);
         }
 
@@ -269,6 +274,49 @@ namespace EDes.Pcb
                     var p = cam.Transform(Wx(m.X[i], cx), Wy(m.Y[i], cy), -m.Z[i] * Scale);
                     if (!batch.Add(p, col) && batch.BudgetHit) return;
                 }
+            }
+        }
+
+        // ── Placed components ─────────────────────────────────────────────────
+        // A marker per part, on the side it is mounted, with a stub showing rotation
+        // (pin 1 / part orientation) and optionally its designator. This is the thing
+        // a flat gerber viewer cannot do: parts sitting ON the board, in 3D, labelled.
+        private void DrawComponents(VoxelBatch batch, Sim.Hud hud, SceneCamera cam, PcbBoard board,
+                                    in PcbViewOptions opt, float cx, float cy, float z0, int slots)
+        {
+            // Top parts sit just above the top layer, bottom parts just below the last.
+            float zTop    = z0 - Spacing * 0.55f;
+            float zBottom = z0 + (slots - 1) * Spacing + Spacing * 0.55f;
+
+            float arm   = MathF.Max(batch.Spacing * 2f, 0.8f * Scale);   // ~1.6 mm part
+            bool  label = opt.ShowLabels && board.Components.Count <= Math.Max(1, opt.LabelLimit);
+
+            foreach (var c in board.Components)
+            {
+                if (batch.BudgetHit) return;
+
+                float x = Wx(c.X, cx), y = Wy(c.Y, cy);
+                float z = c.Bottom ? zBottom : zTop;
+                int   col = c.Bottom ? 0x5AA0FF : 0xFFC24A;
+
+                // A cross, so the exact centroid is readable at any zoom.
+                batch.Line(cam.Transform(x - arm, y, z), cam.Transform(x + arm, y, z), col);
+                batch.Line(cam.Transform(x, y - arm, z), cam.Transform(x, y + arm, z), col);
+
+                // Rotation stub: the part's own +X direction.
+                float rad = c.Rotation * MathF.PI / 180f;
+                batch.Line(cam.Transform(x, y, z),
+                           cam.Transform(x + MathF.Cos(rad) * arm * 1.8f,
+                                         y + MathF.Sin(rad) * arm * 1.8f, z),
+                           Palette.Scale(col, 0.7f));
+
+                if (!label) continue;
+
+                string text = c.Designator;
+                if (c.Value.Length > 0 && text.Length + c.Value.Length <= 12)
+                    text += " " + c.Value;
+                hud.Text(new Voxon.point3d(x + arm * 1.2f, y, z - opt.TextSize * 0.4f),
+                         opt.TextSize * 0.8f, col, text, cam);
             }
         }
 

@@ -36,6 +36,7 @@ namespace EDes.Sim
         public float Y;              // the plane the whole face is drawn on
         public float X0, X1;         // left / right edge
         public float ZTop, ZBottom;  // remember: -Z is up, so ZTop < ZBottom
+        public float HeaderZ;        // row above the face for the source/scale line
         public float CentreZ => (ZTop + ZBottom) * 0.5f;
         public float HalfH   => (ZBottom - ZTop) * 0.5f;
         public float Width   => X1 - X0;
@@ -66,7 +67,7 @@ namespace EDes.Sim
         /// <param name="triggerCh">channel the trigger watches, -1 = free run</param>
         public void Draw(VoxelBatch batch, Hud hud, ScopeSource src, in ScopePanel panel,
                          float voltsPerDiv, uint channelMask, int triggerCh, float triggerLevel,
-                         bool triggerRising, bool showMeasurements, float textSize)
+                         bool triggerRising, bool showHeader, float textSize)
         {
             const int VDIV = 8, HDIV = 10;
 
@@ -99,9 +100,19 @@ namespace EDes.Sim
                                Palette.Scale(ChannelColours[Math.Clamp(triggerCh, 0, MAX_CH - 1)], 0.6f));
             }
 
-            if (showMeasurements)
-                DrawReadouts(hud, src, panel, voltsPerDiv, channelMask, channels, textSize);
+            // Only the header line belongs to the panel. The per-channel measurement
+            // rows are drawn by the app into its reserved footer band (see EDesApp),
+            // so they cannot collide with whatever sits below the face.
+            if (showHeader)
+                DrawHeader(hud, src, panel, voltsPerDiv, textSize);
         }
+
+        /// <summary>Colour for a channel, for the app's measurement rows.</summary>
+        public static int ChannelColour(int ch) => ChannelColours[Math.Clamp(ch, 0, MAX_CH - 1)];
+
+        /// <summary>Time per division of the window last drawn, for a readout.</summary>
+        public double SecondsPerDiv(ScopeSource src)
+            => src.SampleRateHz > 1f ? _lastColumns / 10.0 / src.SampleRateHz : 0;
 
         // ── Window selection (with software trigger) ──────────────────────────
         private int SnapshotWindow(ScopeSource src, int ch, int columns,
@@ -198,37 +209,20 @@ namespace EDes.Sim
                 batch.Line(new point3d(x, y, z), new point3d(MathF.Min(x + dash, x1), y, z), col);
         }
 
-        // ── Readouts ──────────────────────────────────────────────────────────
-        private void DrawReadouts(Hud hud, ScopeSource src, in ScopePanel p, float voltsPerDiv,
-                                  uint channelMask, int channels, float textSize)
+        // ── Header ────────────────────────────────────────────────────────────
+        private void DrawHeader(Hud hud, ScopeSource src, in ScopePanel p, float voltsPerDiv,
+                                float textSize)
         {
-            float step = Hud.LineStep(textSize);
-
-            // Header above the face: source, rate, scale.
             string timePerDiv = src.SampleRateHz > 1f
                 ? Hud.Eng(_lastColumns / 10.0 / src.SampleRateHz, "S")
                 : "--";
-            hud.Text(new point3d(p.X0, p.Y, p.ZTop - step * 1.35f), textSize,
+
+            hud.Text(new point3d(p.X0, p.Y, p.HeaderZ), textSize,
                      src.Connected ? Palette.Trace : Palette.TextDim,
                      "SCOPE  " + src.Status);
-            hud.TextRight(p.X1, p.Y, p.ZTop - step * 1.35f, textSize, Palette.TextDim,
+            hud.TextRight(p.X1, p.Y, p.HeaderZ, textSize, Palette.TextDim,
                      Hud.Eng(voltsPerDiv, "V") + "/DIV  " + timePerDiv + "/DIV  " +
                      Hud.Eng(src.SampleRateHz, "HZ"));
-
-            // Measurement row below the face, one line per enabled channel.
-            float z = p.ZBottom + step * 0.6f;
-            for (int ch = 0; ch < channels; ch++)
-            {
-                if ((channelMask & (1u << ch)) == 0) continue;
-                var st = Stats[ch];
-                string line = "CH" + (ch + 1) +
-                              "  VPP " + Hud.Eng(st.Vpp,   "V") +
-                              "  RMS " + Hud.Eng(st.Vrms,  "V") +
-                              "  F "   + Hud.Eng(st.FreqHz, "HZ") +
-                              "  DUTY " + st.DutyPct.ToString("0") + "PCT";
-                hud.Text(new point3d(p.X0, p.Y, z), textSize, ChannelColours[ch], line);
-                z += step;
-            }
         }
 
         // Column count of the last window — used for the time/div readout.

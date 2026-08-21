@@ -59,6 +59,22 @@ namespace EDes
 
         // ── Live frame state ──────────────────────────────────────────────────
         private float _radius = 4f, _zHalf = 2f, _spacing = 0.03f;
+        private float _textSize = 0.2f, _step = 0.31f;   // display-scaled text metrics
+        private FrameLayout _layout;                     // this frame's vertical plan
+
+        // ── SpaceNavigator ────────────────────────────────────────────────────
+        // Two independent read paths, because they do not always both work:
+        //   LedWin  GetNavCount / GetNavAxisValue  (polled in InputManager)
+        //   LedHost vxl_nav_read                   (polled here, in Draw)
+        // The engine never called vxl_nav_read, which is the documented way to read
+        // the puck — so on many machines LedWin's copy simply never updated. Whichever
+        // path reports motion drives the camera; both are shown in the diagnostics.
+        private NavState    _nav;              // last LedWin read
+        private vxl_nav_t   _navHost;          // last LedHost vxl_nav_read
+        private int         _navHostRc = -999; // its return code (0 = ok on this SDK)
+        private bool        _navHostUsable;
+        private string      _navSource = "none";
+        private float       _lastDt = 1f / 30f;
         private float _anim;                       // flow-animation clock
         private int   _lastVoxels, _lastDropped;
 
@@ -100,6 +116,9 @@ namespace EDes
 
         public void Update(in InputState input, float dt)
         {
+            _nav    = input.Nav;
+            _lastDt = dt;
+
             HandleKeys(dt);
             DriveCamera(input, dt);
             Sync();
@@ -124,7 +143,9 @@ namespace EDes
             _scene.SetResistor(1, _s.R2);
             _scene.SetResistor(2, _s.R3);
 
-            _scope.Configure(_s.ScopeUsb, _s.ScopePort, _s.ScopeBaud);
+            _scope.Configure((ScopeInput)Math.Clamp(_s.ScopeMode, 0, 3),
+                             _s.ScopePort, _s.ScopeBaud,
+                             _s.ScopeHost, _s.ScopeTcpPort, _s.ScopeVisaResource, _s.ScopePollHz);
             _scope.Paused = _s.ScopeFrozen;
 
             VoxelFont.Thickness = Math.Clamp(_s.TextWeight, 0.5f, 3f);
@@ -161,6 +182,7 @@ namespace EDes
             if (Down(VX_KEYS.KB_Tab))
                 _s.Mode = (_s.Mode + 1) % 3;
 
+            if (Down(VX_KEYS.KB_V)) _s.ShowNavDiag  = !_s.ShowNavDiag;
             if (Down(VX_KEYS.KB_L)) _s.ShowLabels   = !_s.ShowLabels;
             if (Down(VX_KEYS.KB_G)) _s.ShowBackdrop = !_s.ShowBackdrop;
             if (Down(VX_KEYS.KB_R)) _cam.Reset();
@@ -270,11 +292,77 @@ namespace EDes
             if (IsDown(VX_KEYS.KB_Full_Stop)) _cam.ZoomBy(1f + KeyZoom * dt);
             if (MathF.Abs(input.MoveZ) > 0.01f) _cam.ZoomBy(1f + input.MoveZ * KeyZoom * dt);
 
+            // NOTE: the SpaceNavigator is applied in Draw (ApplyNavigator), because the
+            // LedHost read needs the ledHost/vxl_state_t the engine only hands us there.
             // The preview window's left-drag drives the SIMULATOR camera directly
             // (GameSettings.EmuHAng/EmuVAng, read by Rend2D) — that is "walk around
             // the volume". This scene camera is the other half: it moves the content.
-            if (_s.NavEnabled)
-                _cam.ApplyNav(input.Nav, dt, _s.NavPanRate, _s.NavRotRate, _s.NavZoomRate);
+        }
+
+        /// <summary>Read the puck through LedHost as well as LedWin, then drive the
+        /// camera from whichever path actually has data.</summary>
+        private void ApplyNavigator(LedHostCS ledHost)
+        {
+            // LedHost path: vxl_nav_read fills the struct directly from the driver.
+            try
+            {
+                if (ledHost.NavRead != null)
+                {
+                    var nav = new vxl_nav_t();
+                    _navHostRc = ledHost.NavRead(0, ref nav);
+                    _navHost   = nav;
+                    _navHostUsable = MathF.Abs(nav.dx) + MathF.Abs(nav.dy) + MathF.Abs(nav.dz) +
+                                     MathF.Abs(nav.ax) + MathF.Abs(nav.ay) + MathF.Abs(nav.az)
+                                     > 1e-4f || nav.but != 0;
+                }
+                else _navHostRc = -1;      // delegate not exported by this LedHost build
+            }
+            catch { _navHostRc = -2; }
+
+            if (!_s.NavEnabled) { _navSource = "disabled"; return; }
+
+            if (_navHostUsable)
+            {
+                _navSource = "LedHost vxl_nav_read";
+                var host = new NavState(true, 1,
+                                        _navHost.dx, _navHost.dy, _navHost.dz,
+                                        _navHost.ax, _navHost.ay, _navHost.az,
+                                        0f, 0f, 0f, _navHost.but);
+                _cam.ApplyNav(host, _lastDt, _s.NavPanRate, _s.NavRotRate, _s.NavZoomRate);
+            }
+            else if (_nav.Present)
+            {
+                _navSource = "LedWin GetNavAxisValue";
+                _cam.ApplyNav(_nav, _lastDt, _s.NavPanRate, _s.NavRotRate, _s.NavZoomRate);
+            }
+            else
+            {
+                _navSource = "not detected";
+            }
+        }
+
+        /// <summary>Everything known about the puck, for the settings panel and the
+        /// in-volume readout. This is a diagnostic, so it shows the RAW numbers from
+        /// both paths rather than a tidy summary.</summary>
+        public string NavDiagnostics()
+        {
+            var sb = new StringBuilder();
+            sb.Append("driving: ").Append(_navSource).Append('\n');
+            sb.Append("LedWin  devices=").Append(_nav.Devices)
+              .Append("  present=").Append(_nav.Present ? "yes" : "no").Append('\n');
+            sb.Append($"  dir  X {_nav.Dx,7:0.000}  Y {_nav.Dy,7:0.000}  Z {_nav.Dz,7:0.000}\n");
+            sb.Append($"  ang  P {_nav.Ax,7:0.000}  Y {_nav.Ay,7:0.000}  R {_nav.Az,7:0.000}\n");
+            sb.Append($"  sum  X {_nav.Sx,7:0.000}  Y {_nav.Sy,7:0.000}  Z {_nav.Sz,7:0.000}\n");
+            sb.Append("  buttons ").Append(_nav.Buttons)
+              .Append("  L=").Append((_nav.Buttons & 1) != 0 ? "DOWN" : "up")
+              .Append("  R=").Append((_nav.Buttons & 2) != 0 ? "DOWN" : "up").Append('\n');
+            sb.Append("LedHost vxl_nav_read rc=").Append(_navHostRc).Append('\n');
+            sb.Append($"  d    X {_navHost.dx,7:0.000}  Y {_navHost.dy,7:0.000}  Z {_navHost.dz,7:0.000}\n");
+            sb.Append($"  a    X {_navHost.ax,7:0.000}  Y {_navHost.ay,7:0.000}  Z {_navHost.az,7:0.000}\n");
+            sb.Append("  buttons ").Append(_navHost.but)
+              .Append("  L=").Append((_navHost.but & 1) != 0 ? "DOWN" : "up")
+              .Append("  R=").Append((_navHost.but & 2) != 0 ? "DOWN" : "up");
+            return sb.ToString();
         }
 
         private static bool Down(VX_KEYS k)   => NativeInput.OnDown(k) == 1;
@@ -285,8 +373,15 @@ namespace EDes
         public void Draw(LedHostCS ledHost, ref vxl_state_t vs)
         {
             ReadBounds(ledHost, ref vs);
+            ApplyNavigator(ledHost);
 
             _batch.BeginFrame(_s.MaxVoxels, _radius, _zHalf, _spacing);
+
+            // Reserve vertical space BEFORE drawing anything: two header rows at the
+            // top, and a footer sized to the rows this mode will actually need. Blocks
+            // then draw into their own band and cannot collide. See Sim/Layout.cs.
+            int headerRows = _s.ShowHudPanel ? 2 : 0;
+            _layout = new FrameLayout(_zHalf, _step, headerRows, FooterRowsForMode());
 
             switch ((EDesMode)_s.Mode)
             {
@@ -295,6 +390,7 @@ namespace EDes
                 case EDesMode.Pcb:       DrawPcbMode();   break;
             }
 
+            if (_s.ShowNavDiag)   DrawNavReadout();
             if (_s.ShowHudPanel)  DrawHudPanel();
             if (_s.ShowBackdrop)  DrawBackdrop();     // last: decoration is dropped first
 
@@ -310,73 +406,148 @@ namespace EDes
         /// vs.boundr/boundz are preferred when the DLL has filled them in.</summary>
         private void ReadBounds(LedHostCS ledHost, ref vxl_state_t vs)
         {
-            float aspect = ledHost.GetAspectRatioX(ref vs);
-            float radius = aspect > 0.1f ? aspect : 4f;
-            if (vs.boundr > 0.1f) radius = MathF.Min(radius, vs.boundr);
+            // The SDK aspect ratios ARE the volume, and the origin is its centre:
+            //     -GetAspectRatioX .. +GetAspectRatioX   across  (radius)
+            //     -GetAspectRatioZ .. +GetAspectRatioZ   vertical (-Z is up)
+            // Both are read every frame so one build fills a VX2 or a VX2-XL.
+            float radius = ledHost.GetAspectRatioX(ref vs);
+            float zHalf  = ledHost.GetAspectRatioZ(ref vs);
+            if (radius <= 0.1f) radius = 4f;                  // pre-init frame
+            if (zHalf  <= 0.1f) zHalf  = radius;
 
-            float zHalf = vs.boundz > 0.1f
-                        ? vs.boundz
-                        : MathF.Min(ledHost.GetAspectRatioZ(ref vs), radius * 0.5f);
-
-            // 6% margin so nothing sits exactly on the wall of the volume.
-            _radius = radius * 0.94f;
-            _zHalf  = MathF.Max(0.2f, zHalf * 0.94f);
+            // 2% inset only, so a glyph's last voxel never lands exactly on the wall.
+            _radius = radius * 0.98f;
+            _zHalf  = MathF.Max(0.2f, zHalf * 0.98f);
 
             // One point per real voxel at density 1.0; the density slider scales it.
             float pitch   = vs.xsiz > 8 ? 2f * radius / vs.xsiz : 0.03f;
             float density = Math.Clamp(_engine.VoxelDensity, 0.25f, 3f);
             _spacing = MathF.Max(0.004f, pitch / density);
+
+            // Text scales with the display so a VX2 is not covered in giant glyphs
+            // and a VX2-XL is not covered in unreadable specks.
+            _textSize = MathF.Max(0.04f, _s.TextSize * (radius / 4f));
+            _step     = Hud.LineStep(_textSize);
+        }
+
+        /// <summary>Footer rows this mode needs — reserved before anything is drawn so
+        /// a readout can never land on top of the content above it.</summary>
+        private int FooterRowsForMode()
+        {
+            if (!_s.ShowLabels) return 0;
+            switch ((EDesMode)_s.Mode)
+            {
+                case EDesMode.Education:
+                    return 3;                                    // law + totals + V=IR
+                case EDesMode.Scope:
+                    return 1 + (_s.ScopeMeasurements ? EnabledChannelCount() : 0);
+                default:
+                    return 2 + VisibleLayerRows()
+                             + ((_s.PcbShowDocs && _board.Documents.Count > 0) ? 1 : 0)
+                             + (_s.PcbCursor ? 1 : 0);
+            }
+        }
+
+        private int EnabledChannelCount()
+        {
+            int n = 0;
+            for (int ch = 0; ch < ScopeSource.MAX_CHANNELS; ch++)
+                if ((_s.ScopeChannelMask & (1 << ch)) != 0 && ch < _scope.ChannelCount) n++;
+            return Math.Max(1, n);
+        }
+
+        private int VisibleLayerRows()
+        {
+            int n = 0;
+            for (int i = 0; i < _board.Layers.Count && n < 6; i++)
+            {
+                if (!_board.Layers[i].Visible) continue;
+                if (_s.PcbIsolate >= 0 && _s.PcbIsolate != i) continue;
+                n++;
+            }
+            return n;
         }
 
         // ── Mode: education ───────────────────────────────────────────────────
         private void DrawEducation()
         {
-            _scene.RecomputeIfDirty(_radius, _zHalf);
-            _circuit.Draw(_batch, _hud, _cam, _scene, _anim, _s.ShowLabels, _s.TextSize, _zHalf);
+            // Upper 55% of the content band is the circuit, lower is the scope strip,
+            // with a one-row gutter between them.
+            _layout.SplitContent(0.55f, 1.0f,
+                                 out float cTop, out float cBottom,
+                                 out float sTop, out float sBottom);
 
-            // Ohm's-law teaching block + circuit totals, on the readout plane.
-            if (_s.ShowLabels)
-            {
-                float step = Hud.LineStep(_s.TextSize);
-                float z    = -_zHalf * 0.04f;
-                var p      = _scene.Active;
+            // The circuit loop needs headroom inside itself for the component labels
+            // (3 rows) plus the power bulge, so it is laid out from the real band.
+            _scene.RecomputeIfDirty(_radius, cTop + _step * 0.6f, cBottom, _step);
+            _circuit.Draw(_batch, _hud, _cam, _scene, _anim, _s.ShowLabels, _textSize, _step);
 
-                _hud.TextCentred(0f, _s.PlaneY, z, _s.TextSize, Palette.TextHilite, p.Law);
-                z += step;
-                _hud.TextCentred(0f, _s.PlaneY, z, _s.TextSize, Palette.Text,
-                    "RT " + Hud.Eng(_scene.TotalResistance, "R") +
-                    "   IT " + Hud.Eng(_scene.TotalCurrent, "A") +
-                    "   PT " + Hud.Eng(_scene.TotalPower, "W"));
-                z += step;
-                _hud.TextCentred(0f, _s.PlaneY, z, _s.TextSize, Palette.TextDim,
-                    "V " + Hud.Eng(_scene.SourceVolts, "V") + "  =  I X R");
-            }
+            DrawScopePanel(sTop, sBottom, _radius * 0.74f);
 
-            // The scope keeps a strip at the bottom of the volume in this mode, so a
-            // measured signal can be compared against the circuit above it.
-            DrawScopePanel(_zHalf * 0.34f, _zHalf * 0.72f, _radius * 0.72f);
+            if (!_s.ShowLabels) return;
+
+            // Footer: the law this circuit demonstrates, then its solved totals.
+            var f = _layout.Footer();
+            _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.TextHilite,
+                             _scene.Active.Law);
+            _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.Text,
+                "RT " + Hud.Eng(_scene.TotalResistance, "R") +
+                "   IT " + Hud.Eng(_scene.TotalCurrent, "A") +
+                "   PT " + Hud.Eng(_scene.TotalPower, "W"));
+            _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.TextDim,
+                "V " + Hud.Eng(_scene.SourceVolts, "V") + "   =   I X R");
         }
 
         // ── Mode: scope ───────────────────────────────────────────────────────
+        // The scope owns the whole content band here: full width, full height.
         private void DrawScopeMode()
-            => DrawScopePanel(-_zHalf * 0.45f, _zHalf * 0.45f, _radius * 0.82f);
+        {
+            DrawScopePanel(_layout.ContentTopZ, _layout.ContentBottomZ, _radius * 0.88f);
+
+            if (!_s.ShowLabels) return;
+            var f = _layout.Footer();
+            _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize * 0.85f, Palette.TextDim,
+                _scope.Identity.Length > 0 ? _scope.Identity : _scope.Status);
+            if (_s.ScopeMeasurements) DrawScopeMeasurements(ref f);
+        }
 
         private void DrawScopePanel(float zTop, float zBottom, float halfWidth)
         {
+            // One row above the face carries the source/scale header; the measurement
+            // rows go in the reserved footer, not below the face.
             var panel = new ScopePanel
             {
                 Y       = _s.PlaneY,
                 X0      = -halfWidth,
                 X1      =  halfWidth,
-                ZTop    = zTop,
+                ZTop    = zTop + _step,      // the face starts one row below the header
                 ZBottom = zBottom,
+                HeaderZ = zTop,
             };
 
             _scopeRenderer.NoteColumns((int)(panel.Width / _spacing));
             _scopeRenderer.Draw(_batch, _hud, _scope, panel,
                                 _s.ScopeVoltsPerDiv, (uint)_s.ScopeChannelMask,
                                 _s.ScopeTriggerCh, _s.ScopeTriggerLevel, _s.ScopeTriggerRising,
-                                _s.ScopeMeasurements && _s.ShowLabels, _s.TextSize);
+                                _s.ShowLabels, _textSize);
+        }
+
+        /// <summary>Per-channel measurement rows, drawn into the reserved footer.</summary>
+        private void DrawScopeMeasurements(ref TextStack f)
+        {
+            int channels = Math.Clamp(_scope.ChannelCount, 1, ScopeSource.MAX_CHANNELS);
+            for (int ch = 0; ch < channels; ch++)
+            {
+                if ((_s.ScopeChannelMask & (1 << ch)) == 0) continue;
+                var st = _scopeRenderer.Stats[ch];
+                _hud.Text(new point3d(-_radius * 0.88f, _s.PlaneY, f.Row()), _textSize,
+                          ScopeRenderer.ChannelColour(ch),
+                          "CH" + (ch + 1) +
+                          "  VPP " + Hud.Eng(st.Vpp, "V") +
+                          "  RMS " + Hud.Eng(st.Vrms, "V") +
+                          "  F "   + Hud.Eng(st.FreqHz, "HZ") +
+                          "  DUTY " + st.DutyPct.ToString("0") + "PCT");
+            }
         }
 
         // ── Mode: PCB ─────────────────────────────────────────────────────────
@@ -396,31 +567,33 @@ namespace EDes
                 CursorYmm    = _s.PcbCursorY,
                 Brightness   = _s.PcbBrightness,
                 IsolateLayer = _s.PcbIsolate,
+                ShowComponents = _s.PcbComponents,
+                ShowLabels     = _s.PcbComponentLabels && _s.ShowLabels,
+                LabelLimit     = _s.PcbLabelLimit,
+                TextSize       = _textSize,
             };
 
-            _pcb.Draw(_batch, _cam, _board, opt, _radius, _zHalf);
+            _pcb.Draw(_batch, _hud, _cam, _board, opt, _radius, _zHalf);
 
             if (!_s.ShowLabels) return;
 
-            float step = Hud.LineStep(_s.TextSize);
-            float z    = _zHalf * 0.55f;
+            var f = _layout.Footer();
 
             if (!_board.HasGeometry)
             {
-                _hud.TextCentred(0f, _s.PlaneY, z, _s.TextSize, Palette.Warning,
+                _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.Warning,
                                  "NO BOARD LOADED - SET A PATH IN THE PCB TAB");
                 return;
             }
 
-            _hud.TextCentred(0f, _s.PlaneY, z, _s.TextSize, Palette.Text,
+            _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.Text,
                 _board.WidthMm.ToString("0.0") + " X " + _board.HeightMm.ToString("0.0") + " MM   " +
-                _board.CopperLayerCount() + " CU   " + _board.Holes.Count + " HOLES");
-            z += step;
+                _board.CopperLayerCount() + " CU   " + _board.Holes.Count + " HOLES" +
+                (_board.Components.Count > 0 ? "   " + _board.Components.Count + " PARTS" : ""));
 
-            _hud.TextCentred(0f, _s.PlaneY, z, _s.TextSize, Palette.TextDim,
+            _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.TextDim,
                 "MIN TRACK " + _board.MinTrackWidth().ToString("0.000") + "MM   " +
                 "MIN DRILL " + _board.MinDrill().ToString("0.000") + "MM");
-            z += step;
 
             // Layer legend: which plane in the stack is which file.
             int shown = 0;
@@ -429,24 +602,53 @@ namespace EDes
                 var l = _board.Layers[i];
                 if (!l.Visible) continue;
                 if (_s.PcbIsolate >= 0 && _s.PcbIsolate != i) continue;
-                _hud.TextCentred(0f, _s.PlaneY, z, _s.TextSize * 0.85f, l.Colour,
+                _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize * 0.85f, l.Colour,
                                  l.Kind.ToString().ToUpperInvariant() + "  " + l.ObjectCount);
-                z += step * 0.85f;
                 shown++;
             }
 
+            if (_s.PcbShowDocs && _board.Documents.Count > 0)
+                _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize * 0.85f, Palette.TextDim,
+                                 DesignInventoryLine());
+
             if (_s.PcbCursor)
-                _hud.TextCentred(0f, _s.PlaneY, z, _s.TextSize, Palette.TextHilite,
+                _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.TextHilite,
                     "CURSOR X " + _s.PcbCursorX.ToString("0.00") +
                     "  Y " + _s.PcbCursorY.ToString("0.00") + " MM");
+        }
+
+        /// <summary>One line summarising what the design package contains, so the
+        /// display says whether the folder is complete, not just what is drawable.</summary>
+        private string DesignInventoryLine()
+        {
+            int sch = 0, dwg = 0, net = 0, cad = 0, bom = 0, sheets = 0;
+            foreach (var d in _board.Documents)
+            {
+                switch (d.Kind)
+                {
+                    case DocKind.Schematic: sch++; sheets += d.Pages; break;
+                    case DocKind.Drawing:   dwg++; break;
+                    case DocKind.Netlist:   net++; break;
+                    case DocKind.Cad3D:     cad++; break;
+                    case DocKind.Bom:       bom++; break;
+                }
+            }
+
+            var sb = new StringBuilder();
+            if (sch > 0) sb.Append("SCH ").Append(sch)
+                           .Append(sheets > 0 ? "/" + sheets + "SH" : "").Append("  ");
+            if (dwg > 0) sb.Append("DWG ").Append(dwg).Append("  ");
+            if (cad > 0) sb.Append("3D ").Append(cad).Append("  ");
+            if (net > 0) sb.Append("NET ").Append(net).Append("  ");
+            if (bom > 0) sb.Append("BOM ").Append(_board.BomLines.Count).Append("  ");
+            if (sb.Length == 0) sb.Append(_board.Documents.Count).Append(" DOCS");
+            return sb.ToString().TrimEnd();
         }
 
         // ── Shared HUD ────────────────────────────────────────────────────────
         private void DrawHudPanel()
         {
-            float size = _s.TextSize;
-            float step = Hud.LineStep(size);
-            float top  = -_zHalf * 0.92f;
+            float size = _textSize;
 
             string mode = ((EDesMode)_s.Mode) switch
             {
@@ -454,22 +656,56 @@ namespace EDes
                 EDesMode.Scope     => "OSCILLOSCOPE",
                 _                  => "PCB  " + _board.SourceName.ToUpperInvariant(),
             };
-            _hud.TextCentred(0f, _s.PlaneY, top, size, Palette.Text, mode);
+            _hud.TextCentred(0f, _s.PlaneY, _layout.HeaderZ, size, Palette.Text, mode);
 
             // Voxel budget readout — the single most useful number when tuning a
             // scene for this display, so it is on the glass, not just in the UI.
-            string budget = _lastVoxels + " VOX";
-            if (_lastDropped > 0) budget += "  +" + _lastDropped + " DROPPED";
-            _hud.TextCentred(0f, _s.PlaneY, top + step, size * 0.8f,
+            string budget = _lastVoxels + " / " + _s.MaxVoxels + " VOX";
+            if (_lastDropped > 0) budget += "   +" + _lastDropped + " DROPPED";
+            _hud.TextCentred(0f, _s.PlaneY, _layout.SubHeaderZ, size * 0.8f,
                              _lastDropped > 0 ? Palette.Warning : Palette.TextDim, budget);
         }
+
+        /// <summary>SpaceNavigator readout in the volume: detection, the three
+        /// translation axes, the three rotation axes, and both buttons — so the puck
+        /// can be checked at the display instead of on the PC screen.</summary>
+        private void DrawNavReadout()
+        {
+            float size = _textSize * 0.8f;
+            float x    = -_radius * 0.92f;
+            var   st   = new TextStack(_layout.ContentTopZ, Hud.LineStep(size));
+
+            bool detected = _nav.Present || _navHostUsable || _nav.Devices > 0;
+            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size,
+                      detected ? Palette.Trace : Palette.Warning,
+                      "SPACENAV " + (detected ? "DETECTED" : "NOT DETECTED") +
+                      "  DEV " + _nav.Devices + "  SRC " + _navSource.ToUpperInvariant());
+
+            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.Text,
+                      "LW  X " + F(_nav.Dx) + "  Y " + F(_nav.Dy) + "  Z " + F(_nav.Dz) +
+                      "   RX " + F(_nav.Ax) + "  RY " + F(_nav.Ay) + "  RZ " + F(_nav.Az));
+
+            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.Text,
+                      "LH  X " + F(_navHost.dx) + "  Y " + F(_navHost.dy) + "  Z " + F(_navHost.dz) +
+                      "   RX " + F(_navHost.ax) + "  RY " + F(_navHost.ay) + "  RZ " + F(_navHost.az) +
+                      "   RC " + _navHostRc);
+
+            int buttons = _nav.Buttons | _navHost.but;
+            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size,
+                      buttons != 0 ? Palette.TextHilite : Palette.TextDim,
+                      "BTN L " + ((buttons & 1) != 0 ? "DOWN" : "UP") +
+                      "   BTN R " + ((buttons & 2) != 0 ? "DOWN" : "UP") +
+                      "   MASK " + buttons);
+        }
+
+        private static string F(float v) => v.ToString("0.00");
 
         /// <summary>Grid floor + three orthogonal rings: cheap orientation cues that
         /// stop the scene reading as objects floating in a void.</summary>
         private void DrawBackdrop()
         {
-            float r = _radius * 0.92f;
-            float floorZ = _zHalf * 0.90f;
+            float r = _radius * 0.96f;
+            float floorZ = _zHalf * 0.99f;      // the actual floor of the volume
             var up = new point3d(1, 0, 0);
             var rt = new point3d(0, 1, 0);
 
@@ -541,12 +777,43 @@ namespace EDes
 
         private void BuildScopeSection(PanelBuilder ui, StackPanel stack, List<Expander> group)
         {
-            var sec = ui.AddSection(stack, "Oscilloscope", group);
-            ui.AddInfo(sec, "USB: any device streaming ASCII samples, one line per sample set " +
-                            "(CSV = one channel per column). Off = synthetic signal.");
-            ui.AddToggle(sec, "Read from USB serial", _s.ScopeUsb, v => _s.ScopeUsb = v);
+            var sec = ui.AddSection(stack, "Oscilloscope — input", group);
+            ui.AddInfo(sec, "Synthetic needs nothing. Serial reads an ASCII sample stream " +
+                            "(CSV = one channel per column). SCPI talks to a bench instrument: " +
+                            "TCP needs no driver at all, USBTMC needs an installed VISA runtime. " +
+                            "See docs/SCOPE_USB.md.");
+            ui.AddButton(sec, "Source: Synthetic",         () => _s.ScopeMode = (int)ScopeInput.Synthetic);
+            ui.AddButton(sec, "Source: Serial (ASCII)",    () => _s.ScopeMode = (int)ScopeInput.Serial);
+            ui.AddButton(sec, "Source: SCPI over TCP",     () => _s.ScopeMode = (int)ScopeInput.ScpiTcp);
+            ui.AddButton(sec, "Source: SCPI over USBTMC",  () => _s.ScopeMode = (int)ScopeInput.ScpiVisa);
+            ui.AddLiveInfo(sec, () =>
+                $"Source: {(ScopeInput)Math.Clamp(_s.ScopeMode, 0, 3)}\nStatus: {_scope.Status}" +
+                (_scope.Identity.Length > 0 ? "\n" + _scope.Identity : "") +
+                $"\n{_scope.ChannelCount} ch @ {_scope.SampleRateHz:0} Hz" +
+                (_scope.Overruns > 0 ? $"   ({_scope.Overruns} bad reads)" : ""));
+
+            ui.AddTextBox(sec, "Instrument IP (SCPI/TCP)", _s.ScopeHost, v => _s.ScopeHost = v.Trim());
+            ui.AddSlider(sec, "TCP port", 1, 65535, _s.ScopeTcpPort, v => _s.ScopeTcpPort = (int)v, "F0");
+            ui.AddTextBox(sec, "VISA resource (blank = first USB)", _s.ScopeVisaResource,
+                          v => _s.ScopeVisaResource = v.Trim());
+            ui.AddButton(sec, "Next VISA resource", () =>
+            {
+                var res = ScopeSource.VisaResources();
+                if (res.Length == 0) return;
+                int at = Array.IndexOf(res, _s.ScopeVisaResource);
+                _s.ScopeVisaResource = res[(at + 1) % res.Length];
+            });
+            ui.AddSlider(sec, "SCPI acquisitions / second", 0.5, 30, _s.ScopePollHz,
+                         v => _s.ScopePollHz = (float)v, "F1");
+            ui.AddLiveInfo(sec, () =>
+            {
+                var res = ScopeSource.VisaResources();
+                return "VISA runtime: " + (ScopeSource.VisaRuntimeAvailable ? "present" : "NOT installed") +
+                       "\nVISA instruments: " + (res.Length == 0 ? "(none)" : string.Join("\n  ", res));
+            }, 3.0);
+
             ui.AddTextBox(sec, "Serial port", _s.ScopePort, v => _s.ScopePort = v.Trim());
-            ui.AddButton(sec, "Next detected port", () =>
+            ui.AddButton(sec, "Next detected serial port", () =>
             {
                 var ports = ScopeSource.AvailablePorts();
                 if (ports.Length == 0) return;
@@ -556,12 +823,10 @@ namespace EDes
             ui.AddLiveInfo(sec, () =>
             {
                 var ports = ScopeSource.AvailablePorts();
-                return "Ports: " + (ports.Length == 0 ? "(none)" : string.Join(", ", ports)) +
-                       "\nStatus: " + _scope.Status +
-                       $"\n{_scope.ChannelCount} ch @ {_scope.SampleRateHz:0} Hz";
-            });
-
+                return "Serial ports: " + (ports.Length == 0 ? "(none)" : string.Join(", ", ports));
+            }, 3.0);
             ui.AddSlider(sec, "Baud", 9600, 1000000, _s.ScopeBaud, v => _s.ScopeBaud = (int)v, "F0");
+            sec = ui.AddSection(stack, "Oscilloscope — display", group);
             ui.AddSlider(sec, "Volts / division", 0.01, 20, _s.ScopeVoltsPerDiv,
                          v => _s.ScopeVoltsPerDiv = (float)v, "F2");
             for (int ch = 0; ch < ScopeSource.MAX_CHANNELS; ch++)
@@ -619,6 +884,13 @@ namespace EDes
             ui.AddToggle(sec, "Hatch pours",      _s.PcbFillRegions, v => _s.PcbFillRegions = v);
             ui.AddToggle(sec, "Drills",           _s.PcbHoles,       v => _s.PcbHoles = v);
             ui.AddToggle(sec, "Mechanical meshes", _s.PcbMeshes,     v => _s.PcbMeshes = v);
+            ui.AddToggle(sec, "Components (placement file)", _s.PcbComponents,
+                         v => _s.PcbComponents = v);
+            ui.AddToggle(sec, "Component designators", _s.PcbComponentLabels,
+                         v => _s.PcbComponentLabels = v);
+            ui.AddSlider(sec, "Label limit (parts)", 10, 2000, _s.PcbLabelLimit,
+                         v => _s.PcbLabelLimit = (int)v, "F0");
+            ui.AddToggle(sec, "Design inventory readout", _s.PcbShowDocs, v => _s.PcbShowDocs = v);
             ui.AddToggle(sec, "Measurement cursor", _s.PcbCursor,    v => _s.PcbCursor = v);
             ui.AddSlider(sec, "Cursor X (mm)", -200, 200, _s.PcbCursorX, v => _s.PcbCursorX = (float)v, "F2");
             ui.AddSlider(sec, "Cursor Y (mm)", -200, 200, _s.PcbCursorY, v => _s.PcbCursorY = (float)v, "F2");
@@ -637,6 +909,17 @@ namespace EDes
                     sb.Append($"drill {g.Dia:0.000} mm x {g.Count}\n");
                 foreach (var m in _board.Meshes)
                     sb.Append($"mesh {m.Name}: {m.Count} pts\n");
+                if (_board.Components.Count > 0)
+                    sb.Append($"parts: {_board.Components.Count} " +
+                              $"({_board.ComponentsOnSide(false)} top / " +
+                              $"{_board.ComponentsOnSide(true)} bottom)\n");
+                if (_board.BomLines.Count > 0)
+                    sb.Append($"bom rows: {_board.BomLines.Count}\n");
+                foreach (var d in _board.Documents)
+                    sb.Append($"{d.Kind,-10} {d.Name}" +
+                              (d.Pages > 0 ? $"  ({d.Pages} pages)" : "") + "\n");
+                if (_board.SourceFolders.Count > 0)
+                    sb.Append($"folders walked: {_board.SourceFolders.Count}\n");
                 return sb.ToString().TrimEnd();
             }, 2.0);
         }
@@ -678,6 +961,14 @@ namespace EDes
             ui.AddButton(sec, "Reset scene camera", () => _cam.Reset());
             ui.AddLiveInfo(sec, () =>
                 $"yaw {_cam.Yaw:0.00}  pitch {_cam.Pitch:0.00}  roll {_cam.Roll:0.00}  zoom {_cam.Zoom:0.00}");
+
+            sec = ui.AddSection(stack, "SpaceNavigator diagnostics", group);
+            ui.AddInfo(sec, "Live raw values from BOTH read paths, refreshed 5x/second. " +
+                            "Press V in the volume for the same readout on the display. " +
+                            "Move the puck: whichever block changes is the one that works.");
+            ui.AddToggle(sec, "Readout in the volume (V)", _s.ShowNavDiag,
+                         v => _s.ShowNavDiag = v);
+            ui.AddLiveInfo(sec, NavDiagnostics, 0.2);
         }
 
         private void BuildControlsSection(PanelBuilder ui, StackPanel stack, List<Expander> group)

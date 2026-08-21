@@ -152,5 +152,9 @@ Check("largest drill first", table[0].Dia, 1.2);
 CheckInt("0.8mm count", table[1].Count, 2);
 
 Console.WriteLine();
+Console.WriteLine("=== design folder tree ===");
+failures += PcbParserTests.DesignTreeChecks.Run();
+
+Console.WriteLine();
 Console.WriteLine(failures == 0 ? "ALL CHECKS PASSED" : $"{failures} CHECK(S) FAILED");
 return failures == 0 ? 0 : 1;

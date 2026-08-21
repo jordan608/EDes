@@ -35,20 +35,31 @@ namespace EDes
     public readonly struct NavState
     {
         public readonly bool  Present;
+        public readonly int   Devices;      // what LedWin's GetNavCount() reported
         public readonly float Dx, Dy, Dz;   // translation: right, lift, forward
         public readonly float Ax, Ay, Az;   // rotation: pitch, yaw, roll
+        public readonly float Sx, Sy, Sz;   // the SDK's summed (accumulated) axes
         public readonly int   Buttons;      // bit 0 = left, bit 1 = right
 
-        public NavState(bool present, float dx, float dy, float dz,
-                        float ax, float ay, float az, int buttons)
+        public NavState(bool present, int devices,
+                        float dx, float dy, float dz,
+                        float ax, float ay, float az,
+                        float sx, float sy, float sz, int buttons)
         {
             Present = present;
+            Devices = devices;
             Dx = dx; Dy = dy; Dz = dz;
             Ax = ax; Ay = ay; Az = az;
+            Sx = sx; Sy = sy; Sz = sz;
             Buttons = buttons;
         }
 
         public bool ButtonDown(VX_NAV_BUTTON_CODES b) => (Buttons & (1 << (int)b)) != 0;
+
+        /// <summary>True if any axis is off zero — i.e. the puck is actually moving.</summary>
+        public bool HasMotion =>
+            MathF.Abs(Dx) + MathF.Abs(Dy) + MathF.Abs(Dz) +
+            MathF.Abs(Ax) + MathF.Abs(Ay) + MathF.Abs(Az) > 1e-4f;
     }
 
     // Immutable per-frame snapshot handed to the game.
@@ -155,8 +166,11 @@ namespace EDes
             if (ledWin == null) return default;
             try
             {
+                // LedWin only fills its nav slots once it has been told to track at
+                // least one device. Ask once; GetNavCount then reports what it found.
                 if (!_navInit) { ledWin.SetNavCount(1); _navInit = true; }
-                if (ledWin.GetNavCount() <= 0) return default;
+
+                int devices = ledWin.GetNavCount();
 
                 float dx = ledWin.GetNavAxisValue(0, VX_NAV_AXIS_CODES.NAV_X_AXIS_DIRECTION);
                 float dy = ledWin.GetNavAxisValue(0, VX_NAV_AXIS_CODES.NAV_Y_AXIS_DIRECTION);
@@ -164,8 +178,19 @@ namespace EDes
                 float ax = ledWin.GetNavAxisValue(0, VX_NAV_AXIS_CODES.NAV_PITCH_AXIS_ANGLE);
                 float ay = ledWin.GetNavAxisValue(0, VX_NAV_AXIS_CODES.NAV_YAW_AXIS_ANGLE);
                 float az = ledWin.GetNavAxisValue(0, VX_NAV_AXIS_CODES.NAV_ROLL_AXIS_ANGLE);
+                float sx = ledWin.GetNavAxisValue(0, VX_NAV_AXIS_CODES.NAV_X_AXIS_SUMMED);
+                float sy = ledWin.GetNavAxisValue(0, VX_NAV_AXIS_CODES.NAV_Y_AXIS_SUMMED);
+                float sz = ledWin.GetNavAxisValue(0, VX_NAV_AXIS_CODES.NAV_Z_AXIS_SUMMED);
                 int   bt = ledWin.GetNavButtonState(0);
-                return new NavState(true, dx, dy, dz, ax, ay, az, bt);
+
+                // Present when the SDK claims a device OR when any axis is alive: on
+                // some builds GetNavCount stays 0 while the axes still report motion,
+                // and refusing input in that case is worse than trusting the data.
+                bool live = devices > 0 ||
+                            MathF.Abs(dx) + MathF.Abs(dy) + MathF.Abs(dz) +
+                            MathF.Abs(ax) + MathF.Abs(ay) + MathF.Abs(az) > 1e-4f || bt != 0;
+
+                return new NavState(live, devices, dx, dy, dz, ax, ay, az, sx, sy, sz, bt);
             }
             catch { return default; }   // nav API unavailable — keyboard/mouse only
         }

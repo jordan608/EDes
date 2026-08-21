@@ -23,6 +23,14 @@
     <Compile Include="$(PcbSrc)\PcbBoard.cs" />
     <Compile Include="$(PcbSrc)\GerberParser.cs" />
     <Compile Include="$(PcbSrc)\ExcellonParser.cs" />
+    <Compile Include="$(PcbSrc)\PlacementParser.cs" />
+    <Compile Include="$(PcbSrc)\MeshLoader.cs" />
+    <Compile Include="$(PcbSrc)\PcbImporter.cs" />
+    <Compile Include="DesignTreeChecks.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AssimpNet" Version="5.0.0-beta1" />
   </ItemGroup>
 
 </Project>
