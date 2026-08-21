@@ -92,8 +92,18 @@ namespace EDes.Pcb
         /// tells the difference between "still parsing this 80 MB STEP" and "hung". A
         /// status set afterwards would name the last file that FINISHED, which is exactly
         /// the wrong one to know about.</summary>
+        /// <summary>Tessellation settings for STEP surfaces. Passed as a struct so adding
+        /// another knob later does not change the signature every caller uses.</summary>
+        public struct StepOptions
+        {
+            public bool   Tessellate;
+            public float  ToleranceMm;
+            public string Command;
+        }
+
         public static bool Import(string path, PcbBoard board, int meshPointBudget,
-                                  Action<string>? progress = null)
+                                  Action<string>? progress = null,
+                                  StepOptions step = default)
         {
             board.Clear();
             if (string.IsNullOrWhiteSpace(path))
@@ -217,10 +227,29 @@ namespace EDes.Pcb
                     var cad = StepParser.TryLoad(file, board.Notes);
                     if (cad != null)
                     {
+                        // Curved faces need a real kernel, so if a tessellator is available
+                        // its mesh REPLACES the analytically-filled faces. The exact edges
+                        // from StepParser are kept either way: they are sharper than
+                        // anything a tessellation gives back.
+                        string extra = "";
+                        if (step.Tessellate)
+                        {
+                            string? stl = StepConverter.EnsureStl(
+                                file, step.ToleranceMm <= 0f ? 0.4f : step.ToleranceMm,
+                                step.Command ?? "", board.Notes, progress);
+
+                            if (stl != null)
+                            {
+                                var faces = StlMesh.TryLoad(stl, board.Notes);
+                                if (faces != null && faces.Count > 0)
+                                    extra = AttachTessellation(cad, faces);
+                            }
+                        }
+
                         board.Solids.AddRange(cad.Solids);
                         solids += cad.SolidCount;
-                        Note(file, "STEP", $"{cad.SolidCount} solid(s), {cad.TotalEdges} edge(s)",
-                             true);
+                        Note(file, "STEP", $"{cad.SolidCount} solid(s), {cad.TotalEdges} edge(s)"
+                                           + extra, true);
                     }
                     else
                     {
@@ -318,8 +347,9 @@ namespace EDes.Pcb
 
                 if (Array.IndexOf(GerberExtensions, ext) >= 0 || LooksLikeGerber(file))
                 {
-                    var kind  = ClassifyLayer(file);
+                    var kind  = ClassifyLayer(file, out bool onBottom);
                     var layer = board.GetOrAddLayer(name, kind);
+                    layer.Bottom = onBottom;
 
                     // Mechanical/drawing layers are dimension art — often the largest
                     // file in the set. They load, but start hidden so they cannot eat
@@ -381,18 +411,35 @@ namespace EDes.Pcb
             }
 
             // Stack copper layers top-to-bottom, everything else around them.
-            board.Layers.Sort((a, b) => StackOrder(a.Kind).CompareTo(StackOrder(b.Kind)));
+            board.Layers.Sort((a, b) =>
+            {
+                int oa = StackOrder(a.Kind, a.Bottom), ob = StackOrder(b.Kind, b.Bottom);
+                // Name as the tie-break so the order is stable rather than dependent on
+                // the order the files happened to be enumerated in.
+                return oa != ob ? oa.CompareTo(ob)
+                                : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            });
             board.ComputeBounds();
 
-            if (gerbers + drills + meshes + parts == 0)
+            // Solids count as geometry. They did not, which meant a plain STEP file -- no
+            // Gerbers, no drill, just a model -- was rejected here as "no geometry" and
+            // returned BEFORE connectivity and designator linking ever ran. A STEP file on
+            // its own is a perfectly reasonable thing to want to look at.
+            if (gerbers + drills + meshes + parts + solids == 0)
             {
                 board.Notes.Add("No geometry found — expected Gerber (.gbr/.gtl/...), " +
-                                "drill (.drl), mesh (.stl/.glb) or a placement file." +
+                                "drill (.drl), mesh (.stl/.glb), STEP (.step/.stp) or a " +
+                                "placement file." +
                                 (docs > 0 ? $" ({docs} document(s) were catalogued.)" : ""));
                 return docs > 0;
             }
 
             int linked = LinkSolidsToComponents(board);
+
+            // Copper connectivity, once every layer and hole is in. Built here rather than
+            // on demand because it depends on the WHOLE board, so a lazy build would land
+            // in the middle of a draw call.
+            board.Nets = PcbNets.Build(board);
             board.ImportMs = (int)totalWatch.ElapsedMilliseconds;
             progress?.Invoke("");
 
@@ -705,6 +752,49 @@ namespace EDes.Pcb
         ///
         /// Returns how many solids were matched, so the caller can report it rather than
         /// leave the user guessing whether the link worked.</summary>
+        /// <summary>Hang a tessellated mesh onto the parsed model.
+        ///
+        /// The mesh comes back as ONE body with no assembly structure — a tessellator
+        /// flattens the tree — so it cannot be split back across the individual solids.
+        /// It goes onto a single carrier solid instead, and the per-solid analytic faces
+        /// are dropped so the two do not both draw the same surfaces at slightly different
+        /// positions, which reads as z-fighting even on a display that has no z-buffer.
+        /// The per-solid EDGES stay: they are exact, and they are what makes the model
+        /// readable.</summary>
+        private static string AttachTessellation(CadModel cad, List<CadFace> faces)
+        {
+            int tris = 0;
+            foreach (var f in faces) tris += f.TriCount;
+
+            foreach (var s in cad.Solids) s.Faces.Clear();
+
+            var carrier = new CadSolid
+            {
+                Name    = "tessellated surfaces",
+                Colour  = 0x9FC5E8,
+                Visible = true,
+                MinX = float.MaxValue, MinY = float.MaxValue, MinZ = float.MaxValue,
+                MaxX = float.MinValue, MaxY = float.MinValue, MaxZ = float.MinValue,
+            };
+
+            foreach (var f in faces)
+            {
+                carrier.Faces.Add(f);
+                for (int i = 0; i < f.TriCount * 3; i++)
+                {
+                    if (f.X[i] < carrier.MinX) carrier.MinX = f.X[i];
+                    if (f.X[i] > carrier.MaxX) carrier.MaxX = f.X[i];
+                    if (f.Y[i] < carrier.MinY) carrier.MinY = f.Y[i];
+                    if (f.Y[i] > carrier.MaxY) carrier.MaxY = f.Y[i];
+                    if (f.Z[i] < carrier.MinZ) carrier.MinZ = f.Z[i];
+                    if (f.Z[i] > carrier.MaxZ) carrier.MaxZ = f.Z[i];
+                }
+            }
+
+            cad.Solids.Add(carrier);
+            return $", {tris} tessellated triangle(s) in {faces.Count} group(s)";
+        }
+
         private static int LinkSolidsToComponents(PcbBoard board)
         {
             if (board.Solids.Count == 0 || board.Components.Count == 0) return 0;
@@ -739,27 +829,35 @@ namespace EDes.Pcb
             return linked;
         }
 
-        private static int StackOrder(PcbLayerKind k) => k switch
+        /// <summary>Position in the stack, top of the board first.
+        ///
+        /// The side matters and used to be ignored: silkscreen, mask and paste share one
+        /// PcbLayerKind per type regardless of side, so every silkscreen layer sorted to
+        /// slot 0 and the BOTTOM silkscreen ended up above the top copper — and above the
+        /// 3D components. The physical order is what this now follows: outward layers on
+        /// the top, then copper, then the mirror of those on the bottom.</summary>
+        private static int StackOrder(PcbLayerKind k, bool bottom) => k switch
         {
-            PcbLayerKind.Silkscreen   => 0,
-            PcbLayerKind.Paste        => 1,
-            PcbLayerKind.SolderMask   => 2,
-            PcbLayerKind.PadMaster    => 3,
-            PcbLayerKind.CopperTop    => 3,
-            PcbLayerKind.CopperInner  => 4,
-            PcbLayerKind.CopperBottom => 5,
-            PcbLayerKind.Outline      => 6,
-            PcbLayerKind.Mechanical   => 7,
-            PcbLayerKind.Drill        => 8,
-            _                         => 9,
+            PcbLayerKind.Silkscreen   => bottom ? 10 : 0,
+            PcbLayerKind.Paste        => bottom ?  9 : 1,
+            PcbLayerKind.SolderMask   => bottom ?  8 : 2,
+            PcbLayerKind.PadMaster    => bottom ?  7 : 3,
+            PcbLayerKind.CopperTop    => 4,
+            PcbLayerKind.CopperInner  => 5,
+            PcbLayerKind.CopperBottom => 6,
+            PcbLayerKind.Outline      => 11,
+            PcbLayerKind.Mechanical   => 12,
+            PcbLayerKind.Drill        => 13,
+            _                         => 14,
         };
 
         // ── Classification ────────────────────────────────────────────────────
 
-        private static PcbLayerKind ClassifyLayer(string file)
+        private static PcbLayerKind ClassifyLayer(string file, out bool bottom)
         {
             string name = Path.GetFileNameWithoutExtension(file).ToLowerInvariant();
             string ext  = Path.GetExtension(file).ToLowerInvariant();
+            bottom = false;
 
             bool Has(params string[] keys)
             {
@@ -782,18 +880,21 @@ namespace EDes.Pcb
             if (Has("f_silks", "f.silks", "silkscreen_top", "topsilk", "silktop") || ext is ".gto" or ".plc")
                 return PcbLayerKind.Silkscreen;
             if (Has("b_silks", "b.silks", "bottomsilk", "silkbottom") || ext is ".gbo" or ".pls")
-                return PcbLayerKind.Silkscreen;
+            { bottom = true; return PcbLayerKind.Silkscreen; }
 
             if (Has("f_mask", "f.mask", "topmask", "soldermask_top") || ext is ".gts" or ".stc")
                 return PcbLayerKind.SolderMask;
             if (Has("b_mask", "b.mask", "bottommask", "soldermask_bottom") || ext is ".gbs" or ".sts")
-                return PcbLayerKind.SolderMask;
+            { bottom = true; return PcbLayerKind.SolderMask; }
 
-            if (Has("paste", "f_paste", "b_paste") || ext is ".gtp" or ".gbp")
+            if (Has("b_paste", "b.paste", "bottompaste", "pastebottom") || ext is ".gbp")
+            { bottom = true; return PcbLayerKind.Paste; }
+            if (Has("paste", "f_paste", "f.paste") || ext is ".gtp")
                 return PcbLayerKind.Paste;
 
             // Pad master = a composite of the pads already present on the copper layer.
-            if (ext is ".gpt" or ".gpb" || Has("padmaster", "pad_master"))
+            if (ext is ".gpb") { bottom = true; return PcbLayerKind.PadMaster; }
+            if (ext is ".gpt" || Has("padmaster", "pad_master"))
                 return PcbLayerKind.PadMaster;
 
             if (Has("f_cu", "f.cu", "topcopper", "top_copper", "toplayer", "gtl") ||
@@ -801,7 +902,7 @@ namespace EDes.Pcb
                 return PcbLayerKind.CopperTop;
             if (Has("b_cu", "b.cu", "bottomcopper", "bottom_copper", "bottomlayer", "gbl") ||
                 ext is ".gbl" or ".sol")
-                return PcbLayerKind.CopperBottom;
+            { bottom = true; return PcbLayerKind.CopperBottom; }
             if (Has("in1_cu", "in2_cu", "in3_cu", "in4_cu", "internalplane", "inner") ||
                 ext is ".g1" or ".g2" or ".g3" or ".g4")
                 return PcbLayerKind.CopperInner;

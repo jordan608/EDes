@@ -106,10 +106,13 @@
              ══════════════════════════════════════════════════════════════ -->
         <Grid Grid.Row="2" ColumnDefinitions="320,4,*,4,320">
 
-            <!-- ── Left: the active mode's settings ───────────────────────── -->
+            <!-- ── Left: the active mode's settings, with the controls pinned below.
+                 The control list used to be an accordion section, which meant it was
+                 collapsed exactly when someone needed it. It is short and it never
+                 changes, so it costs less to leave on screen than to go looking for. -->
             <Grid Grid.Column="0"
                   MinWidth="220" MaxWidth="560"
-                  RowDefinitions="Auto,1,*"
+                  RowDefinitions="Auto,1,*,1,Auto,1,Auto"
                   Background="#0A0A12">
                 <TextBlock Grid.Row="0"
                            x:Name="GamePanelTitle"
@@ -119,6 +122,45 @@
                            Margin="12,10,12,8"/>
                 <Border Grid.Row="1" Background="#22FFFFFF" Margin="8,0"/>
                 <ContentControl Grid.Row="2" x:Name="GamePanelArea"/>
+
+                <!-- Pick list: everything selectable by name. Between the settings and
+                     the controls because it is used WITH the settings but must not scroll
+                     away with them — the whole point is that it is always reachable. -->
+                <Border Grid.Row="3" Background="#22FFFFFF" Margin="8,0"/>
+                <Border Grid.Row="4" x:Name="PickPanel"
+                        Background="#0B0B14" Padding="8,6"
+                        MaxHeight="260"
+                        IsVisible="False">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Top"
+                                   x:Name="PickTitle"
+                                   Text="SELECT"
+                                   FontSize="10" FontWeight="Bold"
+                                   Opacity="0.55"
+                                   Margin="0,0,0,4"/>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel x:Name="PickItems" Spacing="1"/>
+                        </ScrollViewer>
+                    </DockPanel>
+                </Border>
+
+                <Border Grid.Row="5" Background="#22FFFFFF" Margin="8,0"/>
+                <Border Grid.Row="6" x:Name="ControlsPanel"
+                        Background="#0D0D16" Padding="12,8"
+                        IsVisible="False">
+                    <StackPanel Spacing="3">
+                        <TextBlock Text="CONTROLS"
+                                   FontSize="10" FontWeight="Bold"
+                                   Opacity="0.55"/>
+                        <TextBlock x:Name="ControlsText"
+                                   Text=""
+                                   FontSize="10"
+                                   Opacity="0.85"
+                                   TextWrapping="Wrap"
+                                   FontFamily="Consolas,Menlo,monospace"/>
+                    </StackPanel>
+                </Border>
             </Grid>
 
             <GridSplitter Grid.Column="1"
@@ -131,10 +173,64 @@
                  controls; game keys are then routed to the game, not sliders. -->
             <Border x:Name="PreviewBorder" Grid.Column="2"
                     Background="#000000" Focusable="True">
-                <Image x:Name="PreviewImage"
-                       Stretch="Uniform"
-                       HorizontalAlignment="Stretch"
-                       VerticalAlignment="Stretch"/>
+                <Grid>
+                    <Image x:Name="PreviewImage"
+                           Stretch="Uniform"
+                           HorizontalAlignment="Stretch"
+                           VerticalAlignment="Stretch"/>
+
+                    <!-- Probe readout, top-left. Mirrors what the volume shows on its
+                         own HUD plane, because the operator is often looking at the
+                         display rather than the screen — and the same text in both places
+                         means neither has to be the authority. Not hit-testable: unlike
+                         the legend it has no controls, so it must not eat the orbit drag. -->
+                    <Border x:Name="ProbePanel"
+                            HorizontalAlignment="Left" VerticalAlignment="Top"
+                            Margin="10,10,0,0" Padding="8,6"
+                            Background="#C0000000"
+                            BorderBrush="#40FFFFFF" BorderThickness="1"
+                            CornerRadius="3"
+                            MaxWidth="340"
+                            IsHitTestVisible="False"
+                            IsVisible="False">
+                        <StackPanel Spacing="2">
+                            <TextBlock x:Name="ProbeTitle"
+                                       Text="INSPECTION MODE"
+                                       FontSize="11" FontWeight="Bold"
+                                       Foreground="#FF66DDFF"/>
+                            <TextBlock x:Name="ProbeBody"
+                                       Text=""
+                                       FontSize="10"
+                                       Opacity="0.9"
+                                       TextWrapping="Wrap"
+                                       FontFamily="Consolas,Menlo,monospace"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Legend: what is on screen, in what colour, with a checkbox to
+                         toggle it and a swatch to recolour it. An Avalonia overlay rather
+                         than in-volume text on purpose — it costs no voxel budget, and a
+                         clickable colour SWATCH is the whole point, which voxel text
+                         cannot render.
+
+                         This one IS hit-testable, unlike the rest of the preview overlay:
+                         a drag starting on the panel goes to its controls instead of
+                         orbiting the volume. That is the intended trade, and it is why the
+                         panel stays small and cornered. -->
+                    <Border x:Name="LegendPanel"
+                            HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                            Margin="0,0,10,10" Padding="8,6"
+                            Background="#D0000000"
+                            BorderBrush="#30FFFFFF" BorderThickness="1"
+                            CornerRadius="3"
+                            MaxHeight="320"
+                            IsVisible="False">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel x:Name="LegendItems" Spacing="1"/>
+                        </ScrollViewer>
+                    </Border>
+                </Grid>
             </Border>
 
             <GridSplitter Grid.Column="3"

@@ -20,6 +20,10 @@ typical board, and reports what it found in the panel underneath the button.
 | **Mesh (mechanical)** | `.stl .obj .ply .glb .gltf .fbx .dae .3ds .off` | Sampled to a point cloud |
 | **STEP** | `.step .stp` | Edge wireframe, with assembly placement, colours and designators |
 
+A STEP file, or a folder containing nothing but one, imports on its own — no Gerbers
+required. With no board outline present the model's own extents become the bounds, so it
+fits the volume like any other geometry.
+
 Extension-less or oddly-named files are sniffed: a file starting with `%FS`, `%MO` or `G04`
 is treated as Gerber, and one starting with `M48`, `METRIC` or `INCH` as a drill file.
 

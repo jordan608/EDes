@@ -29,6 +29,7 @@ using Avalonia.Platform;
 using Avalonia.Threading;
 using System;
 using System.Collections.Generic;
+using System.Text;
 using Voxon;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -328,6 +329,11 @@ namespace EDes.UI
 
             // The volume Tab key changes the mode behind the window back — notice it.
             if (_game != null && _game.ActiveMode != _shownMode) RefreshModePanel();
+
+            RefreshLegend();
+            RefreshProbe();
+            RefreshControls();
+            RefreshPickList();
         }
 
         // ── Splash ─────────────────────────────────────────────────────────────
@@ -367,6 +373,328 @@ namespace EDes.UI
         private void OnSaveClick (object? s, RoutedEventArgs e) => _s.Save();
         private void OnLoadClick (object? s, RoutedEventArgs e) { _s.Load(); RebuildActivePanel(); }
         private void OnResetClick(object? s, RoutedEventArgs e) { _s.Reset(); RebuildActivePanel(); }
+
+        // ── Pick list ─────────────────────────────────────────────────────────
+        // Rows are rebuilt only when the SET changes; the active highlight is updated in
+        // place. Same reason as the legend: rebuilding the visual tree on every tick over
+        // a live preview churns layout for no visible difference, and here it would also
+        // fight the scroll position the moment anyone scrolled the list.
+        private string _pickKeyShown = "\u0001";
+        private string _pickedShown  = "\u0001";
+        private readonly List<(string Key, Border Row)> _pickRows = new();
+
+        private void RefreshPickList()
+        {
+            var rows = _game?.PickList;
+            if (rows == null || rows.Count == 0)
+            {
+                if (PickPanel.IsVisible) PickPanel.IsVisible = false;
+                _pickKeyShown = "";
+                return;
+            }
+
+            var sb = new StringBuilder(rows.Count * 20);
+            foreach (var r in rows) sb.Append(r.Key).Append('\u001f');
+            string key = sb.ToString();
+
+            if (key != _pickKeyShown)
+            {
+                _pickKeyShown = key;
+                _pickedShown  = "\u0001";     // force the highlight to reapply
+                RebuildPickRows(rows);
+            }
+
+            string picked = _game?.PickedKey ?? "";
+            if (picked != _pickedShown)
+            {
+                _pickedShown = picked;
+                foreach (var (rowKey, border) in _pickRows)
+                    border.Background = string.Equals(rowKey, picked, StringComparison.Ordinal)
+                        ? new SolidColorBrush(Color.Parse("#FF0A3A5A"))
+                        : Brushes.Transparent;
+            }
+
+            PickPanel.IsVisible = true;
+        }
+
+        private void RebuildPickRows(IReadOnlyList<PickRow> rows)
+        {
+            PickItems.Children.Clear();
+            _pickRows.Clear();
+
+            string lastGroup = "\u0001";
+            int nets = 0, comps = 0;
+            foreach (var r in rows)
+            {
+                if (r.Group == "Nets") nets++; else comps++;
+
+                if (r.Group != lastGroup)
+                {
+                    lastGroup = r.Group;
+                    PickItems.Children.Add(new TextBlock
+                    {
+                        Text       = r.Group.ToUpperInvariant(),
+                        FontSize   = 9,
+                        FontWeight = FontWeight.Bold,
+                        Opacity    = 0.4,
+                        Margin     = new Thickness(2, 6, 0, 2),
+                    });
+                }
+
+                string key = r.Key;
+
+                var swatch = new Border
+                {
+                    Width = 9, Height = 9,
+                    CornerRadius = new CornerRadius(2),
+                    Background = new SolidColorBrush(Rgb(r.Colour)),
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                };
+                var label = new TextBlock
+                {
+                    Text = r.Label, FontSize = 10,
+                    FontFamily = new FontFamily("Consolas,Menlo,monospace"),
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                };
+                var detail = new TextBlock
+                {
+                    Text = r.Detail, FontSize = 9, Opacity = 0.45,
+                    Margin = new Thickness(4, 0, 0, 0),
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                };
+
+                var line = new StackPanel
+                {
+                    Orientation = Avalonia.Layout.Orientation.Horizontal,
+                    Spacing = 5,
+                };
+                line.Children.Add(swatch);
+                line.Children.Add(label);
+                line.Children.Add(detail);
+
+                // A Border rather than a Button: a full-width click target that can carry
+                // the selected background, without a button's chrome fighting the list.
+                var row = new Border
+                {
+                    Child = line,
+                    Padding = new Thickness(4, 2),
+                    CornerRadius = new CornerRadius(2),
+                    Background = Brushes.Transparent,
+                    Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
+                };
+                row.PointerPressed += (_, _) => { _game?.Pick(key); DebounceSave(); };
+
+                PickItems.Children.Add(row);
+                _pickRows.Add((key, row));
+            }
+
+            PickTitle.Text = $"SELECT — {nets} NET(S), {comps} PART(S)   (click again to clear)";
+        }
+
+        // ── Controls reference ────────────────────────────────────────────────
+        // Pinned, not tucked into a section. Refreshed on the tick because the list is
+        // mode-specific and the mode can change from the volume's Tab key, not just from
+        // the header buttons.
+        private string _controlsShown = "\u0001";
+
+        private void RefreshControls()
+        {
+            string help = _game?.ControlsHelp ?? "";
+            if (help == _controlsShown) return;
+            _controlsShown = help;
+
+            ControlsText.Text     = help;
+            ControlsPanel.IsVisible = help.Length > 0;
+        }
+
+        // ── Probe readout ─────────────────────────────────────────────────────
+        // The game thread writes one preformatted string; this only splits the first line
+        // off as a heading. Formatting stays on the side that knows what a layer or a
+        // component actually is, so the shell needs no knowledge of the board model.
+        private string _probeShown = "\u0001";
+
+        private void RefreshProbe()
+        {
+            string info = _game?.StatusOverlay ?? "";
+            if (info == _probeShown) return;
+            _probeShown = info;
+
+            if (info.Length == 0)
+            {
+                ProbePanel.IsVisible = false;
+                return;
+            }
+
+            int nl = info.IndexOf('\n');
+            if (nl < 0)
+            {
+                ProbeTitle.Text = "INSPECTION MODE";
+                ProbeBody.Text  = info;
+            }
+            else
+            {
+                ProbeTitle.Text = info.Substring(0, nl);
+                ProbeBody.Text  = info.Substring(nl + 1).TrimEnd('\n');
+            }
+            ProbePanel.IsVisible = true;
+        }
+
+        // ── Legend overlay ────────────────────────────────────────────────────
+        // The row CONTROLS are rebuilt only when the set of rows changes; their state
+        // (checked, colour, label) is updated in place on every tick.
+        //
+        // That split is load-bearing, not an optimisation. The colour picker fires a
+        // change per mouse-move, each of which changes a row's colour — so if a colour
+        // change rebuilt the visual tree, the picker would be destroyed underneath the
+        // cursor on the first drag and never be usable.
+        private string _legendKey = "\u0001";
+        private bool   _legendSyncing;
+
+        private sealed class LegendRowUi
+        {
+            public string    Key = "";
+            public CheckBox  Box = null!;
+            public Button    Swatch = null!;
+            public TextBlock Label = null!;
+        }
+
+        private readonly List<LegendRowUi> _legendUi = new();
+
+        private void RefreshLegend()
+        {
+            var rows = _game?.Legend;
+            if (rows == null || rows.Count == 0)
+            {
+                if (LegendPanel.IsVisible) LegendPanel.IsVisible = false;
+                _legendKey = "";
+                return;
+            }
+
+            // Identity of the row SET only — deliberately excludes colour and checked
+            // state, which are synced in place below.
+            var sb = new StringBuilder(rows.Count * 24);
+            foreach (var r in rows)
+                sb.Append(r.Key).Append('\u001f').Append(r.Label).Append('\u001e');
+            string key = sb.ToString();
+
+            if (key != _legendKey)
+            {
+                _legendKey = key;
+                RebuildLegendRows(rows);
+            }
+
+            SyncLegendState(rows);
+            LegendPanel.IsVisible = true;
+        }
+
+        private void RebuildLegendRows(IReadOnlyList<LegendRow> rows)
+        {
+            LegendItems.Children.Clear();
+            _legendUi.Clear();
+
+            foreach (var r in rows)
+            {
+                string key = r.Key;
+
+                var box = new CheckBox
+                {
+                    IsVisible = r.CanToggle,
+                    MinWidth  = 0,
+                    Padding   = new Thickness(0),
+                    Margin    = new Thickness(0, 0, 2, 0),
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                };
+                box.IsCheckedChanged += (_, _) =>
+                {
+                    if (_legendSyncing) return;      // our own sync, not a user click
+                    _game?.SetLegendVisible(key, box.IsChecked == true);
+                    DebounceSave();
+                };
+
+                // A Button rather than a bare Border so it is focusable and obviously
+                // clickable, with the colour picker hanging off it as a flyout.
+                var swatch = new Button
+                {
+                    Width = 15, Height = 15,
+                    Padding = new Thickness(0),
+                    BorderBrush = new SolidColorBrush(Color.Parse("#60FFFFFF")),
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(2),
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                    IsEnabled = r.CanRecolour,
+                };
+                if (r.CanRecolour)
+                    ToolTip.SetTip(swatch, "Click to change this layer's colour");
+
+                if (r.CanRecolour)
+                {
+                    var picker = new ColorPicker
+                    {
+                        Color = Rgb(r.Colour),
+                        Width = 280,
+                    };
+                    picker.ColorChanged += (_, e) =>
+                    {
+                        if (_legendSyncing) return;
+                        int packed = (e.NewColor.R << 16) | (e.NewColor.G << 8) | e.NewColor.B;
+                        _game?.SetLegendColour(key, packed);
+                        DebounceSave();
+                    };
+                    swatch.Flyout = new Flyout { Content = picker, Placement = PlacementMode.Left };
+                }
+
+                var label = new TextBlock
+                {
+                    Text       = r.Label,
+                    FontSize   = 10,
+                    FontFamily = new FontFamily("Consolas,Menlo,monospace"),
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                };
+
+                var line = new StackPanel
+                {
+                    Orientation = Avalonia.Layout.Orientation.Horizontal,
+                    Spacing = 5,
+                };
+                line.Children.Add(box);
+                line.Children.Add(swatch);
+                line.Children.Add(label);
+                LegendItems.Children.Add(line);
+
+                _legendUi.Add(new LegendRowUi
+                {
+                    Key = key, Box = box, Swatch = swatch, Label = label,
+                });
+            }
+        }
+
+        private void SyncLegendState(IReadOnlyList<LegendRow> rows)
+        {
+            if (_legendUi.Count != rows.Count) return;
+
+            _legendSyncing = true;
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i];
+                var ui = _legendUi[i];
+
+                bool shown = !r.Hidden;
+                if (ui.Box.IsChecked != shown) ui.Box.IsChecked = shown;
+
+                // Hidden keeps its hue but loses solidity, so the row still says WHICH
+                // colour the layer is when it comes back.
+                ui.Swatch.Background = new SolidColorBrush(Rgb(r.Colour));
+                ui.Swatch.Opacity    = r.Hidden ? 0.3 : 1.0;
+                ui.Label.Opacity     = r.Hidden ? 0.45 : 0.95;
+                if (ui.Label.Text != r.Label) ui.Label.Text = r.Label;
+            }
+            _legendSyncing = false;
+        }
+
+        private static Color Rgb(int packed)
+            => Color.FromRgb((byte)((packed >> 16) & 0xFF),
+                             (byte)((packed >> 8)  & 0xFF),
+                             (byte)(packed         & 0xFF));
 
         // ─────────────────────────────────────────────────────────────────────
         // Mode headers
@@ -487,10 +815,6 @@ namespace EDes.UI
             AddToggle(rend, "Show debug border", _s.ShowDebugBorder,           v => _s.ShowDebugBorder = v);
             AddSlider(rend, "Voxel density",    0.25, 3.0, _s.VoxelDensity,    v => _s.VoxelDensity    = (float)v, "F2");
             AddInfo(rend, "Voxel density re-meshes the model (higher = finer, more voxels).");
-
-            var perf = _ui.AddHeader(stack, "Performance");
-            AddToggle(perf, "Cap to 30 VPS", _s.CapVps30, v => _s.CapVps30 = v);
-            AddInfo(perf, "Display tops out at 30 VPS. Cap the loop to save CPU/heat.");
 
             var view = _ui.AddHeader(stack, "View");
             AddInfo(view, "Drag the preview to turn the volume. Wheel zooms the model, " +

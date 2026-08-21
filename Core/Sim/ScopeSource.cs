@@ -293,7 +293,7 @@ namespace EDes.Sim
 
         private static string ShortIdentity(string idn)
         {
-            // "RIGOL TECHNOLOGIES,MSO2302A,DS2F252400118,00.03.05" -> "MSO2302A"
+            // "RIGOL TECHNOLOGIES,MSO2302A,DS2Axxxxxxxx,00.03.05" -> "MSO2302A"
             var parts = idn.Split(',');
             return parts.Length > 1 ? parts[1].Trim() : idn;
         }

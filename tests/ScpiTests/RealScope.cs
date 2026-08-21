@@ -1,5 +1,5 @@
 // Optional: run the same code against a REAL instrument.
-//     dotnet run --project tests/ScpiTests 169.254.117.199
+//     dotnet run --project tests/ScpiTests <scope-ip>
 // Skipped when no host is given, so CI still passes with no bench attached.
 
 using EDes.Sim.Scpi;

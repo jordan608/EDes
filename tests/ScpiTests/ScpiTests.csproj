@@ -3,7 +3,7 @@
   <!--
     SCPI transport + waveform checks:
         dotnet run project tests/ScpiTests              (fake instrument only)
-        dotnet run project tests/ScpiTests 169.254.1.2  (also hits a real one)
+        dotnet run project tests/ScpiTests <scope-ip>  (also hits a real one)
     Exit code 0 means every check passed. Compiles the SCPI sources directly so it
     runs without the Avalonia/Voxon dependency chain.
   -->

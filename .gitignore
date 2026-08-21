@@ -480,3 +480,14 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# Local test fixture pointers (machine-specific paths, never commit)
+tests/local-testdata.txt
+
+# Runtime user state — belt and braces; these normally sit next to the exe or in AppData
+settings.json
+players.json
+game.json
+edes.json
+yourgame.json
+profiles/

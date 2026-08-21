@@ -59,6 +59,15 @@ namespace EDes
 
         // ── Live frame state ──────────────────────────────────────────────────
         private float _radius = 4f, _zHalf = 2f, _spacing = 0.03f;
+
+        /// <summary>Height of one 5x7 glyph cell as a fraction of the text size — the
+        /// constant VoxelFont.EmitGlyphs uses. Named here so the legibility floor is
+        /// derived from the renderer's real metric rather than a guess about it.</summary>
+        private const float GLYPH_CELL_FRACTION = 0.18f;
+
+        /// <summary>True when the requested text size was raised to stay legible, so the
+        /// panel can say so instead of appearing to ignore the slider.</summary>
+        private bool _textFloored;
         private float _textSize = 0.2f, _step = 0.31f;   // display-scaled text metrics
         private FrameLayout _layout;                     // this frame's vertical plan
 
@@ -75,6 +84,7 @@ namespace EDes
         private bool        _navHostUsable;
         private string      _navSource = "none";
         private NavState    _navLive;          // conditioned (-1..1, dead-zoned) signal
+        private int         _prevNavButtons;   // for both-buttons edge detection
         private float       _navPeakTrans;     // largest raw translation count seen
         private float       _navPeakRot;       // largest raw rotation count seen
         private float       _lastDt = 1f / 30f;
@@ -125,6 +135,9 @@ namespace EDes
             HandleKeys(dt);
             DriveCamera(input, dt);
             Sync();
+            RebuildLegend(dt);
+            RebuildPickList(dt);
+            TrackViewMotion();
 
             if (_s.PcbImportRequested) ImportBoard();
 
@@ -168,7 +181,17 @@ namespace EDes
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
             bool ok = PcbImporter.Import(path, _board, Math.Max(1000, _s.MeshPointBudget),
-                                         f => _s.PcbImportStatus = f);
+                                         f => _s.PcbImportStatus = f,
+                                         new PcbImporter.StepOptions
+                                         {
+                                             Tessellate  = _s.PcbTessellate,
+                                             ToleranceMm = _s.PcbTessellateTol,
+                                             Command     = _s.PcbTessellator,
+                                         });
+
+            // Before anything draws: an import resets every layer to its defaults, so the
+            // user's own visibility and colour choices have to be laid back over the top.
+            ApplyLayerPrefs();
             sw.Stop();
 
             var sb = new StringBuilder();
@@ -277,6 +300,11 @@ namespace EDes
         {
             const float KeyRot = 1.2f, KeyZoom = 0.9f;
 
+            // Pushed here as well as in the puck path: DriveCamera runs FIRST, so relying
+            // on the puck path to have set the policy would leave one frame of keyboard
+            // rotation escaping the locks every time one was toggled.
+            ApplyCameraLocks();
+
             float yaw = 0, pitch = 0;
             if (IsDown(VX_KEYS.KB_A)) yaw   -= KeyRot * dt;
             if (IsDown(VX_KEYS.KB_D)) yaw   += KeyRot * dt;
@@ -353,38 +381,247 @@ namespace EDes
                 _navPeakTrans = MathF.Max(_navPeakTrans, raw.PeakTranslation);
                 _navPeakRot   = MathF.Max(_navPeakRot,   raw.PeakRotation);
                 _navLive = raw.Condition(_s.NavFullScaleTrans, _s.NavFullScaleRot, _s.NavDeadzone);
-                _cam.ApplyNav(_navLive, _lastDt, _s.NavPanRate, _s.NavRotRate, _s.NavZoomRate);
+
+                // Both buttons together switch mode, on the RISING edge only — held down,
+                // a level test would flip modes every frame for as long as they were held.
+                bool bothNow  = (raw.Buttons & 0x3) == 0x3;
+                bool bothPrev = (_prevNavButtons & 0x3) == 0x3;
+                if (bothNow && !bothPrev) ToggleInspect();
+                _prevNavButtons = raw.Buttons;
+
+                ApplyCameraLocks();
+
+                // Zoom is on the individual buttons, and both-at-once already cancels
+                // there, so the mode switch cannot also zoom.
+                _cam.ApplyNav(_navLive, _lastDt, _s.NavPanRate, _s.NavRotRate, _s.NavZoomRate,
+                              allowPan: !_s.InspectMode);
+
+                if (_s.InspectMode) DriveProbe(_navLive, _lastDt);
             }
         }
 
-        /// <summary>Everything known about the puck, for the settings panel and the
-        /// in-volume readout. This is a diagnostic, so it shows the RAW numbers from
-        /// both paths rather than a tidy summary.</summary>
-        public string NavDiagnostics()
+        /// <summary>Push the rotation policy onto the camera. Called from the input path
+        /// every frame rather than only when a toggle changes, so the camera cannot be left
+        /// holding a stale policy after a settings load or reset.</summary>
+        private void ApplyCameraLocks()
         {
+            _cam.LocalAxes = _s.NavLocalAxes;
+
+            // Inspection mode locks rotation outright. The probe is positioned in DISPLAY
+            // space and deliberately not camera-transformed, so a scene that kept turning
+            // would drag the board out from under a pointer that had not moved — the
+            // reading would change while the operator held still.
+            _cam.RotationLocked = _s.InspectMode;
+
+            _cam.LockRotX = _s.LockRotX;
+            _cam.LockRotY = _s.LockRotY;
+            _cam.LockRotZ = _s.LockRotZ;
+        }
+
+        // ── Pick list ─────────────────────────────────────────────────────────
+        // Rebuilt on the same timer as the legend, for the same reason: what belongs in it
+        // depends on the loaded board and several toggles, and a dirty flag that misses one
+        // shows a stale list -- which is worse than none, because it will be clicked.
+        private volatile PickRow[] _picks = Array.Empty<PickRow>();
+        private float _picksAge;
+
+        public IReadOnlyList<PickRow> PickList => _picks;
+        public string PickedKey => _s.PickedKey;
+
+        /// <summary>Select from the list, or clear. Clicking the active row clears it, so
+        /// one control both selects and deselects rather than needing a separate button.</summary>
+        public void Pick(string key)
+        {
+            _s.PickedKey = string.Equals(_s.PickedKey, key, StringComparison.Ordinal)
+                           ? "" : (key ?? "");
+        }
+
+        private int PickedNetId()
+        {
+            string k = _s.PickedKey;
+            if (!k.StartsWith("net:", StringComparison.Ordinal)) return -1;
+            return int.TryParse(k.AsSpan(4), out int id) ? id : -1;
+        }
+
+        private string PickedDesignator()
+        {
+            string k = _s.PickedKey;
+            return k.StartsWith("comp:", StringComparison.Ordinal) ? k.Substring(5) : "";
+        }
+
+        private void RebuildPickList(float dt)
+        {
+            _picksAge += dt;
+            if (_picksAge < 0.5f) return;
+            _picksAge = 0f;
+
+            if ((EDesMode)_s.Mode != EDesMode.Pcb || !_board.HasGeometry)
+            {
+                if (_picks.Length > 0) _picks = Array.Empty<PickRow>();
+                return;
+            }
+
+            var rows = new List<PickRow>();
+
+            var nets = _board.Nets;
+            if (nets != null)
+            {
+                // Biggest nets first. On a derived netlist the large ones are the power and
+                // ground planes, which are what you most often want to see the extent of,
+                // and a list ordered by an arbitrary id would bury them.
+                var order = new List<int>(nets.NetCount);
+                for (int n = 0; n < nets.NetCount; n++) if (nets.Size(n) > 1) order.Add(n);
+                order.Sort((a, b) => nets.Size(b).CompareTo(nets.Size(a)));
+
+                foreach (int n in order)
+                    rows.Add(new PickRow("Nets", nets.Name(n),
+                                         nets.Size(n) + " obj", "net:" + n, 0x40E0E0));
+            }
+
+            // Designators from the STEP bodies first, then any placed part without a body,
+            // so a part is listed once whichever source knows about it.
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var sol in _board.Solids)
+            {
+                string d = sol.Designator.Length > 0 ? sol.Designator : sol.Name;
+                if (d.Length == 0 || !seen.Add(d)) continue;
+                rows.Add(new PickRow("Components", d, "3D", "comp:" + d, sol.Colour));
+            }
+            foreach (var c in _board.Components)
+            {
+                if (c.Designator.Length == 0 || !seen.Add(c.Designator)) continue;
+                rows.Add(new PickRow("Components", c.Designator,
+                                     c.Value.Length > 0 ? c.Value : "placed",
+                                     "comp:" + c.Designator, 0xC8C8D0));
+            }
+
+            _picks = rows.ToArray();
+        }
+
+        /// <summary>Advance the inspection stage: camera, signal, component, camera...
+        ///
+        /// A cycle rather than a toggle because the two inspectors answer different
+        /// questions and each hides what the other needs — there is no one view that
+        /// serves both, so they have to be separate stops.</summary>
+        private void ToggleInspect()
+        {
+            _s.InspectStage = (_s.InspectStage + 1) % 3;
+
+            if (_s.InspectMode)
+            {
+                // Start at the centre rather than wherever it was left: the volume may have
+                // been re-fitted or a different board loaded since, and a probe resuming
+                // off in a corner reads as a broken control.
+                _s.InspectX = 0f; _s.InspectY = _s.PlaneY; _s.InspectZ = 0f;
+            }
+            else _s.InspectInfo = "";
+
+            App.Log($"[EDesApp] {(EDesInspect)_s.InspectStage} inspector");
+        }
+
+        /// <summary>Move the probe, clamped inside the physical volume.
+        ///
+        /// Motion is in GLOBAL (display) coordinates, never the board's. The puck axes map
+        /// straight onto the display axes with the camera taking no part, so pushing right
+        /// moves the probe right on the display no matter how the board happens to be
+        /// oriented. Driving it in board space instead would mean the same push went a
+        /// different direction for every orientation, which is unusable for a pointer —
+        /// and it is also why rotation is locked while inspecting.
+        ///
+        /// Clamped to the CYLINDER, not a box: the display is round in XY, so a box clamp
+        /// would let the probe sit in a corner where nothing is ever drawn — it would
+        /// simply vanish. Bounds come from the live values read this frame, so the clamp
+        /// follows the hardware rather than a hardcoded 4.0/2.0.</summary>
+        private void DriveProbe(in NavState nav, float dt)
+        {
+            float rate = _s.InspectRate * dt;
+            float x = _s.InspectX + nav.Dx * rate;
+            float y = _s.InspectY + nav.Dy * rate;
+            float z = _s.InspectZ + nav.Dz * rate;
+
+            float rMax = _radius * 0.94f;
+            float rr   = MathF.Sqrt(x * x + y * y);
+            if (rr > rMax && rr > 1e-6f) { x *= rMax / rr; y *= rMax / rr; }
+            z = Math.Clamp(z, -_zHalf * 0.94f, _zHalf * 0.94f);
+
+            _s.InspectX = x; _s.InspectY = y; _s.InspectZ = z;
+        }
+
+        /// <summary>True when an inspector is active AND the probe is actually on
+        /// something. Both halves matter: with nothing selected the normal readouts are
+        /// still the most useful thing on the display.</summary>
+        private bool ProbeHasSelection => _s.InspectMode && _pcb.Probe.Hit;
+
+        /// <summary>Leader line from the probe to whatever it snapped to.
+        ///
+        /// Both ends are already in display space — the probe by definition, the target
+        /// because the renderer transformed it — so this must NOT be camera-transformed
+        /// again. Drawn thin and dim so it reads as a pointer rather than as board
+        /// geometry.</summary>
+        private void DrawProbeLeader()
+        {
+            if (!_pcb.ProbeHasTarget) return;
+            _batch.Line(new point3d(_s.InspectX, _s.InspectY, _s.InspectZ),
+                        _pcb.ProbeTarget, 0x6080A0, 2f);
+        }
+
+        /// <summary>The probe itself, plus its readout. Drawn in DISPLAY space and NOT
+        /// camera-transformed: it is a physical pointer in the box, so rotating the scene
+        /// must move the board past the probe, not carry the probe along with it.</summary>
+        private void DrawProbe()
+        {
+            var at = new point3d(_s.InspectX, _s.InspectY, _s.InspectZ);
+            float r = MathF.Max(_spacing * 2.5f, _radius * 0.012f);
+            _batch.Blob(at, r, 0xFFFFFF);
+
+            // Cross-hair arms, so the probe's depth is readable — a lone blob on a
+            // transparent display gives no cue about where it sits in Y.
+            float arm = r * 3f;
+            _batch.Line(new point3d(at.x - arm, at.y, at.z), new point3d(at.x + arm, at.y, at.z), 0xB0B0C0);
+            _batch.Line(new point3d(at.x, at.y - arm, at.z), new point3d(at.x, at.y + arm, at.z), 0xB0B0C0);
+            _batch.Line(new point3d(at.x, at.y, at.z - arm), new point3d(at.x, at.y, at.z + arm), 0xB0B0C0);
+        }
+
+        /// <summary>Probe readout, top-left of the volume on the constant-Y HUD plane.
+        /// Deliberately NOT camera-transformed, like the other readouts, so it stays
+        /// legible while the scene turns.</summary>
+        private void DrawProbeReadout()
+        {
+            var probe = _pcb.Probe;
+
+            float size = _textSize * 0.85f;
+            float x    = -_radius * 0.95f;
+
+            // Shares the frame's single top-of-display cursor rather than picking its own
+            // fraction of the height — a hand-picked -0.92 * zHalf is exactly how two
+            // blocks end up in the same voxels once one of them grows a line.
+            ref TextStack st = ref _topText;
+
+            string title = ((EDesInspect)_s.InspectStage) switch
+            {
+                EDesInspect.Signal    => "SIGNAL INSPECTOR",
+                EDesInspect.Component => "COMPONENT INSPECTOR",
+                _                     => "INSPECTION MODE",
+            };
+            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.TextHilite, title);
+
+            if (!probe.Hit)
+            {
+                _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.TextDim,
+                          "move the probe over a layer or part");
+                _s.InspectInfo = "Inspection mode\nNothing under the probe.";
+                return;
+            }
+
+            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.Trace,
+                      probe.Kind.ToUpperInvariant() + "  " + probe.Title);
+            foreach (string line in probe.Lines)
+                _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.Text, line);
+
             var sb = new StringBuilder();
-            sb.Append("driving: ").Append(_navSource).Append('\n');
-            sb.Append("LedWin  devices=").Append(_nav.Devices)
-              .Append("  present=").Append(_nav.Present ? "yes" : "no").Append('\n');
-            sb.Append($"  dir  X {_nav.Dx,7:0.000}  Y {_nav.Dy,7:0.000}  Z {_nav.Dz,7:0.000}\n");
-            sb.Append($"  ang  P {_nav.Ax,7:0.000}  Y {_nav.Ay,7:0.000}  R {_nav.Az,7:0.000}\n");
-            sb.Append($"  sum  X {_nav.Sx,7:0.000}  Y {_nav.Sy,7:0.000}  Z {_nav.Sz,7:0.000}\n");
-            sb.Append("  buttons ").Append(_nav.Buttons)
-              .Append("  L=").Append((_nav.Buttons & 1) != 0 ? "DOWN" : "up")
-              .Append("  R=").Append((_nav.Buttons & 2) != 0 ? "DOWN" : "up").Append('\n');
-            sb.Append($"  live X {_navLive.Dx,7:0.000}  Y {_navLive.Dy,7:0.000}  Z {_navLive.Dz,7:0.000}"
-                    + $"   P {_navLive.Ax,7:0.000}  Y {_navLive.Ay,7:0.000}  R {_navLive.Az,7:0.000}\n");
-            sb.Append($"  peak raw   translation {_navPeakTrans:0.0} (scale {_s.NavFullScaleTrans:0.0})"
-                    + $"   rotation {_navPeakRot:0.0} (scale {_s.NavFullScaleRot:0.0})\n");
-            sb.Append($"  dead-zone {_s.NavDeadzone * 100f:0.#}%   pan {_s.NavPanRate:0.0}/s"
-                    + $"   rot {_s.NavRotRate:0.0} rad/s\n");
-            sb.Append("LedHost vxl_nav_read rc=").Append(_navHostRc).Append('\n');
-            sb.Append($"  d    X {_navHost.dx,7:0.000}  Y {_navHost.dy,7:0.000}  Z {_navHost.dz,7:0.000}\n");
-            sb.Append($"  a    X {_navHost.ax,7:0.000}  Y {_navHost.ay,7:0.000}  Z {_navHost.az,7:0.000}\n");
-            sb.Append("  buttons ").Append(_navHost.but)
-              .Append("  L=").Append((_navHost.but & 1) != 0 ? "DOWN" : "up")
-              .Append("  R=").Append((_navHost.but & 2) != 0 ? "DOWN" : "up");
-            return sb.ToString();
+            sb.Append(probe.Kind.ToUpperInvariant()).Append("  ").Append(probe.Title).Append('\n');
+            foreach (string line in probe.Lines) sb.Append(line).Append('\n');
+            _s.InspectInfo = sb.ToString();
         }
 
         private static bool Down(VX_KEYS k)   => NativeInput.OnDown(k) == 1;
@@ -397,13 +634,18 @@ namespace EDes
             ReadBounds(ledHost, ref vs);
             ApplyNavigator(ledHost);
 
-            _batch.BeginFrame(_s.MaxVoxels, _radius, _zHalf, _spacing);
+            _batch.BeginFrame(EffectiveVoxelBudget(), _radius, _zHalf, _spacing);
 
             // Reserve vertical space BEFORE drawing anything: two header rows at the
             // top, and a footer sized to the rows this mode will actually need. Blocks
             // then draw into their own band and cannot collide. See Sim/Layout.cs.
             int headerRows = _s.ShowHudPanel ? 2 : 0;
-            _layout = new FrameLayout(_zHalf, _step, headerRows, FooterRowsForMode());
+            _layout = new FrameLayout(_zHalf, _step, headerRows, ReadoutRowsForMode());
+
+            // ONE cursor for every text block this frame, handed out first-come. That is
+            // what keeps two blocks from writing into the same rows now that they all
+            // share the top band instead of being split between the two ends.
+            _topText = _layout.Readout();
 
             switch ((EDesMode)_s.Mode)
             {
@@ -412,8 +654,23 @@ namespace EDes
                 case EDesMode.Pcb:       DrawPcbMode();   break;
             }
 
+            // Probe and its readout come BEFORE the HUD panel and the backdrop: when the
+            // probe is what you are driving, it is the last thing that should disappear
+            // to a tight budget, not the first.
+            if (_s.InspectMode)
+            {
+                DrawProbeLeader();
+                DrawProbe();
+                DrawProbeReadout();
+            }
+            else if (_s.InspectInfo.Length > 0) _s.InspectInfo = "";
+
             if (_s.ShowNavDiag)   DrawNavReadout();
-            if (_s.ShowHudPanel)  DrawHudPanel();
+            // The title/voxel panel is suppressed while the probe has something, so the
+            // selection sits at the very top of the display instead of under two rows of
+            // information nobody is reading at that moment. The text band is only a few
+            // rows tall, so anything kept is something else lost.
+            if (_s.ShowHudPanel && !ProbeHasSelection) DrawHudPanel();
             // Scope mode fills the volume with the face itself (see README) — the grid
             // floor/globe backdrop is orientation chrome for flying a circuit or board
             // around, and only competes with a trace that is meant to fill the display.
@@ -424,6 +681,65 @@ namespace EDes
             _lastVoxels  = _batch.Count;
             _lastDropped = _batch.Dropped;
             _engine.LiveVoxelCount = _lastVoxels;
+        }
+
+        // ── Adaptive budget ───────────────────────────────────────────────────
+        // Tracked individually rather than as a combined signature: summing the seven
+        // values into one number would let two simultaneous changes cancel and report the
+        // view as still while it was moving.
+        private float _lastPanX, _lastPanY, _lastPanZ, _lastZoom;
+        private float _lastYaw, _lastPitch, _lastRoll;
+        private float _budgetScale = 1f;
+        private bool  _viewMoving;
+
+        /// <summary>The budget to actually draw with this frame.
+        ///
+        /// Decay and recovery are per-SECOND, not per-frame. Per-frame rates would make
+        /// the throttle behave differently at 30 VPS than at 5 — and 5 is precisely when it
+        /// matters, so the slow case would get the weakest response. Recovery is
+        /// deliberately gentler than decay: rescue quickly, come back carefully, or the
+        /// budget pumps up and down across the threshold.</summary>
+        private int EffectiveVoxelBudget()
+        {
+            if (!_s.AdaptiveBudget)
+            {
+                _budgetScale = 1f;
+                return _s.MaxVoxels;
+            }
+
+            float vps   = _engine?.LiveVps ?? 0f;
+            float floor = Math.Clamp(_s.AdaptiveFloor, 0.02f, 1f);
+            float dt    = MathF.Max(1e-4f, _lastDt);
+
+            // A VPS of 0 means the loop has not measured one yet; treat it as healthy
+            // rather than throttling the very first frames to the floor.
+            bool struggling = vps > 0.01f && vps < _s.AdaptiveLowVps;
+            bool recovered  = vps <= 0.01f || vps > _s.AdaptiveGoodVps;
+
+            if (_viewMoving && struggling) _budgetScale -= dt * 1.5f;
+            else if (recovered || !_viewMoving) _budgetScale += dt * 0.5f;
+
+            _budgetScale = Math.Clamp(_budgetScale, floor, 1f);
+            return Math.Max(1_000, (int)(_s.MaxVoxels * _budgetScale));
+        }
+
+        /// <summary>Has the view moved since the last frame? Any of pan, zoom or
+        /// orientation counts.</summary>
+        private void TrackViewMotion()
+        {
+            const float eps = 1e-5f;
+            _viewMoving =
+                MathF.Abs(_cam.PanX  - _lastPanX)  > eps ||
+                MathF.Abs(_cam.PanY  - _lastPanY)  > eps ||
+                MathF.Abs(_cam.PanZ  - _lastPanZ)  > eps ||
+                MathF.Abs(_cam.Zoom  - _lastZoom)  > eps ||
+                MathF.Abs(_cam.Yaw   - _lastYaw)   > eps ||
+                MathF.Abs(_cam.Pitch - _lastPitch) > eps ||
+                MathF.Abs(_cam.Roll  - _lastRoll)  > eps;
+
+            _lastPanX = _cam.PanX; _lastPanY = _cam.PanY; _lastPanZ = _cam.PanZ;
+            _lastZoom = _cam.Zoom;
+            _lastYaw  = _cam.Yaw;  _lastPitch = _cam.Pitch; _lastRoll = _cam.Roll;
         }
 
         /// <summary>Read the display's true extents from the SDK every frame. The
@@ -451,25 +767,53 @@ namespace EDes
 
             // Text scales with the display so a VX2 is not covered in giant glyphs
             // and a VX2-XL is not covered in unreadable specks.
-            _textSize = MathF.Max(0.04f, _s.TextSize * (radius / 4f));
+            //
+            // The floor is derived from the VOXEL SPACING, not picked. The 5x7 glyphs use
+            // a cell of size * 0.18 in height, so a glyph is only legible while one cell
+            // is at least a voxel or so across — below that every lit cell lands on the
+            // same voxel as its neighbour and the character collapses into a blob. The old
+            // fixed floor of 0.04 was roughly a QUARTER of a voxel per cell at default
+            // density, i.e. far past unreadable, so text could be configured into
+            // illegibility and look like a rendering fault.
+            float minSize = _spacing / GLYPH_CELL_FRACTION *
+                            MathF.Max(1f, _s.MinTextCellVoxels);
+            _textSize = MathF.Max(minSize, _s.TextSize * (radius / 4f));
             _step     = Hud.LineStep(_textSize);
+            _textFloored = _textSize > _s.TextSize * (radius / 4f) + 1e-6f;
         }
 
-        /// <summary>Footer rows this mode needs — reserved before anything is drawn so
-        /// a readout can never land on top of the content above it.</summary>
-        private int FooterRowsForMode()
+        /// <summary>The single top-of-display text cursor for this frame. Every text block
+        /// draws from it, which is what stops two of them landing in the same rows now that
+        /// they all share one band instead of being split top and bottom.</summary>
+        private TextStack _topText;
+
+        /// <summary>Rows the top band needs this frame — reserved BEFORE anything draws,
+        /// so geometry can never start inside the text.</summary>
+        private int ReadoutRowsForMode()
         {
-            if (!_s.ShowLabels) return 0;
+            // The optional blocks share the same top band, so their rows have to be
+            // reserved here as well — otherwise the geometry band starts inside them.
+            int extra = 0;
+            // Trimmed from nine: a trace is now one line and a part is at most four, so
+            // reserving nine pushed the geometry down for rows that never get drawn.
+            if (_s.InspectMode) extra += 6;
+            if (_s.ShowNavDiag) extra += 5;
+
+            // With a selection the mode's own readout is suppressed, so its rows must not
+            // be reserved either — reserving space for text that will not be drawn is the
+            // same mistake as drawing it.
+            if (!_s.ShowLabels || ProbeHasSelection) return extra;
             switch ((EDesMode)_s.Mode)
             {
                 case EDesMode.Education:
-                    return 3;                                    // law + totals + V=IR
+                    return extra + 3;                                    // law + totals + V=IR
                 case EDesMode.Scope:
-                    return 1 + (_s.ScopeMeasurements ? EnabledChannelCount() : 0);
+                    return extra + 1 + (_s.ScopeMeasurements ? EnabledChannelCount() : 0);
                 default:
-                    return 2 + VisibleLayerRows()
-                             + ((_s.PcbShowDocs && _board.Documents.Count > 0) ? 1 : 0)
-                             + (_s.PcbCursor ? 1 : 0);
+                    // Two summary rows plus the cursor row when it is on. The layer legend
+                    // and document inventory are no longer drawn, so reserving their rows
+                    // would push the geometry down for text that never appears.
+                    return extra + 2 + (_s.PcbCursor ? 1 : 0);
             }
         }
 
@@ -479,18 +823,6 @@ namespace EDes
             for (int ch = 0; ch < ScopeSource.MAX_CHANNELS; ch++)
                 if ((_s.ScopeChannelMask & (1 << ch)) != 0 && ch < _scope.ChannelCount) n++;
             return Math.Max(1, n);
-        }
-
-        private int VisibleLayerRows()
-        {
-            int n = 0;
-            for (int i = 0; i < _board.Layers.Count && n < 6; i++)
-            {
-                if (!_board.Layers[i].Visible) continue;
-                if (_s.PcbIsolate >= 0 && _s.PcbIsolate != i) continue;
-                n++;
-            }
-            return n;
         }
 
         // ── Mode: education ───────────────────────────────────────────────────
@@ -512,7 +844,7 @@ namespace EDes
             if (!_s.ShowLabels) return;
 
             // Footer: the law this circuit demonstrates, then its solved totals.
-            var f = _layout.Footer();
+            ref TextStack f = ref _topText;
             _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.TextHilite,
                              _scene.Active.Law);
             _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.Text,
@@ -534,7 +866,7 @@ namespace EDes
             DrawScopePanel(_layout.ContentTopZ, _layout.ContentBottomZ, _radius * ScopeModeHalfWidth);
 
             if (!_s.ShowLabels) return;
-            var f = _layout.Footer();
+            ref TextStack f = ref _topText;
             _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize * 0.85f, Palette.TextDim,
                 _scope.Identity.Length > 0 ? _scope.Identity : _scope.Status);
             if (_s.ScopeMeasurements) DrawScopeMeasurements(ref f);
@@ -599,6 +931,27 @@ namespace EDes
                 ShowCad       = _s.PcbCad,
                 CadBrightness = _s.PcbCadBright,
                 CadLighting   = _s.PcbCadLighting,
+                CadSurfaces   = _s.PcbCadSurfaces,
+                CadSurfaceDensity = _s.PcbCadSurfaceDensity,
+                CadZOffset    = _s.PcbCadZOffset,
+                Inspect       = _s.InspectMode,
+                PickedNet        = PickedNetId(),
+                PickedDesignator = PickedDesignator(),
+                // Signal shows copper + outline; component shows outline only and hides
+                // every part-derived thing. Both are VIEW filters — the operator's own
+                // layer toggles are persisted and must survive a glance at an inspector.
+                LayerFilter   = _s.InspectStage == (int)EDesInspect.Signal ? 1
+                              : _s.InspectStage == (int)EDesInspect.Component ? 2 : 0,
+                HideParts     = _s.InspectStage == (int)EDesInspect.Signal,
+                ProbeX        = _s.InspectX,
+                ProbeY        = _s.InspectY,
+                ProbeZ        = _s.InspectZ,
+                DimFactor     = _s.InspectDim,
+                SnapRange     = _s.InspectSnap,
+                // Slow deliberately: a fast pulse on a volumetric display reads as flicker
+                // rather than as emphasis, and this runs for as long as something is
+                // selected rather than as a brief confirmation.
+                Pulse         = 0.5f + 0.5f * MathF.Sin(_anim * MathF.PI * 2f / 2.4f),
                 CadAmbient    = _s.PcbCadAmbient,
                 CadLightX     = _s.PcbCadLightX,
                 CadLightY     = _s.PcbCadLightY,
@@ -616,9 +969,9 @@ namespace EDes
 
             _pcb.Draw(_batch, _hud, _cam, _board, opt, _radius, _zHalf);
 
-            if (!_s.ShowLabels) return;
+            if (!_s.ShowLabels || ProbeHasSelection) return;
 
-            var f = _layout.Footer();
+            ref TextStack f = ref _topText;
 
             if (!_board.HasGeometry)
             {
@@ -636,57 +989,16 @@ namespace EDes
                 "MIN TRACK " + _board.MinTrackWidth().ToString("0.000") + "MM   " +
                 "MIN DRILL " + _board.MinDrill().ToString("0.000") + "MM");
 
-            // Layer legend: which plane in the stack is which file.
-            int shown = 0;
-            for (int i = 0; i < _board.Layers.Count && shown < 6; i++)
-            {
-                var l = _board.Layers[i];
-                if (!l.Visible) continue;
-                if (_s.PcbIsolate >= 0 && _s.PcbIsolate != i) continue;
-                _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize * 0.85f, l.Colour,
-                                 l.Kind.ToString().ToUpperInvariant() + "  " + l.ObjectCount);
-                shown++;
-            }
-
-            if (_s.PcbShowDocs && _board.Documents.Count > 0)
-                _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize * 0.85f, Palette.TextDim,
-                                 DesignInventoryLine());
+            // The layer legend and the document inventory used to print here. Both are
+            // now redundant: the window's legend overlay shows every layer with its
+            // colour and a visibility box, and the import inventory lists the documents
+            // in full. Reprinting them in the volume spent most of a very short text band
+            // on information that is better presented on screen.
 
             if (_s.PcbCursor)
                 _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.TextHilite,
                     "CURSOR X " + _s.PcbCursorX.ToString("0.00") +
                     "  Y " + _s.PcbCursorY.ToString("0.00") + " MM");
-        }
-
-        /// <summary>One line summarising what the design package contains, so the
-        /// display says whether the folder is complete, not just what is drawable.</summary>
-        private string DesignInventoryLine()
-        {
-            int sch = 0, dwg = 0, net = 0, cad = 0, bom = 0, sheets = 0;
-            foreach (var d in _board.Documents)
-            {
-                switch (d.Kind)
-                {
-                    case DocKind.Schematic: sch++; sheets += d.Pages; break;
-                    case DocKind.Drawing:   dwg++; break;
-                    case DocKind.Netlist:   net++; break;
-                    case DocKind.Cad3D:     cad++; break;
-                    case DocKind.Bom:       bom++; break;
-                }
-            }
-
-            var sb = new StringBuilder();
-            if (sch > 0) sb.Append("SCH ").Append(sch)
-                           .Append(sheets > 0 ? "/" + sheets + "SH" : "").Append("  ");
-            if (dwg > 0) sb.Append("DWG ").Append(dwg).Append("  ");
-            if (cad > 0) sb.Append("3D ").Append(cad).Append("  ");
-            if (net > 0) sb.Append("NET ").Append(net).Append("  ");
-            if (bom > 0) sb.Append("BOM ").Append(_board.BomLines.Count).Append("  ");
-            if (_board.Drc.Parsed)
-                sb.Append("DRC ").Append(_board.Drc.Violations)
-                  .Append('/').Append(_board.Drc.Rules).Append("  ");
-            if (sb.Length == 0) sb.Append(_board.Documents.Count).Append(" DOCS");
-            return sb.ToString().TrimEnd();
         }
 
         // ── Shared HUD ────────────────────────────────────────────────────────
@@ -717,7 +1029,7 @@ namespace EDes
         {
             float size = _textSize * 0.8f;
             float x    = -_radius * 0.92f;
-            var   st   = new TextStack(_layout.ContentTopZ, Hud.LineStep(size));
+            ref TextStack st = ref _topText;   // shared top-of-display cursor
 
             bool detected = _nav.Present || _navHostUsable || _nav.Devices > 0;
             _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size,
@@ -773,6 +1085,158 @@ namespace EDes
 
         // ── Settings tab ──────────────────────────────────────────────────────
 
+        // Immutable snapshot handed to the shell, swapped by reference. Rebuilt on the
+        // GAME thread; read on the UI thread. Never mutated in place — see IVoxonGame.Legend.
+        private volatile LegendRow[] _legend = Array.Empty<LegendRow>();
+        private float _legendAge;
+
+        public IReadOnlyList<LegendRow> Legend => _legend;
+
+        /// <summary>The probe readout, mirrored onto the shell's preview overlay.</summary>
+        public string StatusOverlay => _s.InspectMode ? _s.InspectInfo : "";
+
+        /// <summary>Rebuild the legend, at most a few times a second.
+        ///
+        /// Time-based rather than dirty-flagged on purpose: what belongs in the legend
+        /// depends on the mode, the loaded board, per-layer visibility, the isolate
+        /// setting and several toggles, and a dirty flag that misses one of those shows
+        /// the user a stale legend — which is worse than no legend, because they will
+        /// believe it. One small array twice a second is not worth outsmarting.</summary>
+        private void RebuildLegend(float dt)
+        {
+            _legendAge += dt;
+            if (_legendAge < 0.4f) return;
+            _legendAge = 0f;
+
+            var rows = new List<LegendRow>();
+
+            if ((EDesMode)_s.Mode == EDesMode.Pcb && _board.HasGeometry)
+            {
+                for (int li = 0; li < _board.Layers.Count; li++)
+                {
+                    var layer = _board.Layers[li];
+                    bool isolatedOut = _s.PcbIsolate >= 0 && _s.PcbIsolate != li;
+                    bool shown = layer.Visible && !isolatedOut;
+                    rows.Add(new LegendRow($"{layer.Kind}  {layer.Name}", layer.Colour, !shown,
+                                           key: "layer:" + layer.Name,
+                                           canToggle: true, canRecolour: true));
+                }
+
+                if (_s.PcbVias && _board.Holes.Count > 0)
+                {
+                    int copper = _board.CopperLayerCount();
+                    int blind = 0, through = 0;
+                    foreach (var h in _board.Holes)
+                    {
+                        if (!PcbBoard.IsVia(h, _s.PcbViaMaxDia)) continue;
+                        if (h.IsBlind(copper)) blind++; else through++;
+                    }
+                    if (through > 0)
+                        rows.Add(new LegendRow($"via (through) x{through}", 0xE8A020,
+                                               key: "vias", canToggle: true));
+                    if (blind > 0)
+                        rows.Add(new LegendRow($"via (blind/buried) x{blind}", 0x40D0E8,
+                                               key: "vias", canToggle: true));
+                }
+
+                if (_board.Solids.Count > 0)
+                    rows.Add(new LegendRow($"STEP model x{_board.Solids.Count}", 0x9FC5E8,
+                                           !_s.PcbCad, key: "cad", canToggle: true));
+
+                if (_board.Meshes.Count > 0)
+                    rows.Add(new LegendRow($"mesh x{_board.Meshes.Count}", 0x66D9C0,
+                                           !_s.PcbMeshes, key: "mesh", canToggle: true));
+            }
+
+            _legend = rows.ToArray();
+        }
+
+        // ── Legend write-back ─────────────────────────────────────────────────
+        // Called on the UI THREAD. Layers are looked up by name rather than index because
+        // an import can replace the whole list between the snapshot the shell drew and the
+        // click coming back; a stale index would silently hit the wrong layer, whereas a
+        // stale name simply finds nothing.
+
+        public void SetLegendVisible(string key, bool visible)
+        {
+            if (key == "vias") { _s.PcbVias   = visible; SaveLayerPrefs(); return; }
+            if (key == "cad")  { _s.PcbCad    = visible; SaveLayerPrefs(); return; }
+            if (key == "mesh") { _s.PcbMeshes = visible; SaveLayerPrefs(); return; }
+
+            var layer = FindLayer(key);
+            if (layer == null) return;
+            layer.Visible = visible;
+            SaveLayerPrefs();
+        }
+
+        public void SetLegendColour(string key, int colour)
+        {
+            var layer = FindLayer(key);
+            if (layer == null) return;
+            layer.ColourOverride = colour & 0xFFFFFF;
+            SaveLayerPrefs();
+        }
+
+        private PcbLayer? FindLayer(string key)
+        {
+            if (!key.StartsWith("layer:", StringComparison.Ordinal)) return null;
+            string name = key.Substring(6);
+            // Snapshot the count first: the game thread may be mid-import.
+            var layers = _board.Layers;
+            for (int i = 0; i < layers.Count; i++)
+            {
+                if (i >= layers.Count) break;
+                if (string.Equals(layers[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                    return layers[i];
+            }
+            return null;
+        }
+
+        /// <summary>Flatten the per-layer choices into the settings string.
+        ///
+        /// Persisted because a re-import rebuilds every layer from defaults, and the last
+        /// board is re-imported on every launch — so without this, recolouring a layer
+        /// would appear to work and then silently revert.</summary>
+        private void SaveLayerPrefs()
+        {
+            var sb = new StringBuilder();
+            var layers = _board.Layers;
+            for (int i = 0; i < layers.Count; i++)
+            {
+                var l = layers[i];
+                sb.Append(l.Name.Replace(';', '_').Replace('|', '_')).Append('|');
+                if (l.ColourOverride.HasValue) sb.Append(l.ColourOverride.Value.ToString("X6"));
+                sb.Append('|').Append(l.Visible ? '1' : '0').Append(';');
+            }
+            _s.PcbLayerPrefs = sb.ToString();
+        }
+
+        /// <summary>Re-apply saved choices to a freshly imported board.</summary>
+        private void ApplyLayerPrefs()
+        {
+            string prefs = _s.PcbLayerPrefs;
+            if (string.IsNullOrEmpty(prefs)) return;
+
+            foreach (string entry in prefs.Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var bits = entry.Split('|');
+                if (bits.Length < 3) continue;
+
+                foreach (var l in _board.Layers)
+                {
+                    if (!string.Equals(l.Name, bits[0], StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (bits[1].Length > 0 &&
+                        int.TryParse(bits[1], System.Globalization.NumberStyles.HexNumber,
+                                     System.Globalization.CultureInfo.InvariantCulture,
+                                     out int c))
+                        l.ColourOverride = c & 0xFFFFFF;
+                    l.Visible = bits[2] == "1";
+                    break;
+                }
+            }
+        }
+
         /// <summary>The mode headers the shell draws across the top of the window.
         /// Order must match EDesMode.</summary>
         public IReadOnlyList<string> Modes { get; } = new[] { "Education", "Oscilloscope", "PCB" };
@@ -803,7 +1267,6 @@ namespace EDes
 
             BuildRenderSection(ui, stack, group);
             BuildCameraSection(ui, stack, group);
-            BuildControlsSection(ui, stack, group);
 
             return ui.Wrap(stack);
         }
@@ -922,6 +1385,27 @@ namespace EDes
                             "See docs/PCB_IMPORT.md.");
             ui.AddTextBox(sec, "Path (folder or file)", _s.PcbPath, v => _s.PcbPath = v.Trim('"', ' '));
             ui.AddButton(sec, "Import / reload", () => _s.PcbImportRequested = true);
+
+            // Toggling this RE-IMPORTS. Tessellation happens at import time, so flipping
+            // the flag on its own would change nothing on screen until the next import —
+            // which reads as a dead button rather than as a setting that needs applying.
+            ui.AddButton(sec, "STEP mode: wireframe <-> tessellated STL", () =>
+            {
+                _s.PcbTessellate = !_s.PcbTessellate;
+                if (_s.PcbPath.Length > 0) _s.PcbImportRequested = true;
+            });
+            ui.AddLiveInfo(sec, () =>
+            {
+                if (!_s.PcbTessellate)
+                    return "STEP: WIREFRAME — exact edges, planar faces filled, curved "
+                         + "faces left empty (no external tool needed)";
+
+                string tool = StepConverter.Discover(_s.PcbTessellator, out string how);
+                return tool.Length > 0
+                    ? "STEP: TESSELLATED STL — curved surfaces filled and lit, via "
+                      + System.IO.Path.GetFileName(tool)
+                    : "STEP: TESSELLATED requested, but " + how;
+            }, 1.0);
             ui.AddButton(sec, "Clear board", () =>
             {
                 _s.PcbPath = "";
@@ -938,11 +1422,19 @@ namespace EDes
 
             ui.AddSlider(sec, "Layer spacing", 0.02, 1.5, _s.LayerSpacing, v => _s.LayerSpacing = (float)v, "F2");
             ui.AddSlider(sec, "Track width scale", 0.1, 6, _s.TrackScale, v => _s.TrackScale = (float)v, "F2");
-            ui.AddSlider(sec, "Brightness", 0.2, 2.0, _s.PcbBrightness, v => _s.PcbBrightness = (float)v, "F2");
+            ui.AddSlider(sec, "Brightness (voxel density)", 0.2, 3.0, _s.PcbBrightness,
+                         v => _s.PcbBrightness = (float)v, "F2");
+            ui.AddInfo(sec, "The display shows seven colours — red, green, blue, cyan, " +
+                            "magenta, yellow, white — and nothing else, so brightness is " +
+                            "not a dimension it has. It is DENSITY instead: more voxels in " +
+                            "the same area genuinely does look brighter, and a dark colour " +
+                            "would just be invisible while costing the same budget. Layers " +
+                            "that must share a colour are told apart by pattern (solid, " +
+                            "dashed, dotted) rather than by shade.");
             ui.AddSlider(sec, "Isolate layer (-1 = all)", -1, 31, _s.PcbIsolate, v => _s.PcbIsolate = (int)v, "F0");
             ui.AddToggle(sec, "Pads",             _s.PcbPads,        v => _s.PcbPads = v);
             ui.AddToggle(sec, "Copper pours",     _s.PcbRegions,     v => _s.PcbRegions = v);
-            ui.AddToggle(sec, "Hatch pours",      _s.PcbFillRegions, v => _s.PcbFillRegions = v);
+            ui.AddToggle(sec, "Cross-hatch pours", _s.PcbFillRegions, v => _s.PcbFillRegions = v);
             ui.AddToggle(sec, "Drills",           _s.PcbHoles,       v => _s.PcbHoles = v);
             ui.AddToggle(sec, "Vias",             _s.PcbVias,        v => _s.PcbVias = v);
             ui.AddSlider(sec, "Pour outline density", 0.2, 4.0, _s.PcbPourDensity,
@@ -956,6 +1448,32 @@ namespace EDes
             ui.AddToggle(sec, "STEP / CAD wireframe", _s.PcbCad,     v => _s.PcbCad = v);
             ui.AddSlider(sec, "CAD brightness", 0.2, 2.0, _s.PcbCadBright,
                          v => _s.PcbCadBright = (float)v, "F2");
+            ui.AddSlider(sec, "Tessellation detail (mm)", 0.05, 3.0, _s.PcbTessellateTol,
+                         v => _s.PcbTessellateTol = (float)v, "F2");
+            ui.AddTextBox(sec, "Tessellator command (blank = auto)", _s.PcbTessellator,
+                          v => _s.PcbTessellator = v.Trim('"', ' '));
+            ui.AddLiveInfo(sec, () =>
+            {
+                string tool = StepConverter.Discover(_s.PcbTessellator, out string how);
+                return tool.Length > 0
+                    ? "tessellator: " + System.IO.Path.GetFileName(tool) + "  (" + how + ")"
+                    : how;
+            }, 2.0);
+            ui.AddInfo(sec, "StepParser fills PLANAR faces without any external tool, but a " +
+                            "round part is mostly curved faces — those need a real geometry " +
+                            "kernel, so they are tessellated by gmsh or FreeCAD instead of " +
+                            "guessed at. Converted once and cached; the exact STEP edges are " +
+                            "kept either way. Smaller detail = smoother = more triangles. " +
+                            "Re-import after changing these.");
+            ui.AddToggle(sec, "CAD flat-shaded surfaces", _s.PcbCadSurfaces,
+                         v => _s.PcbCadSurfaces = v);
+            ui.AddSlider(sec, "Surface fill density", 0.1, 2.0, _s.PcbCadSurfaceDensity,
+                         v => _s.PcbCadSurfaceDensity = (float)v, "F2");
+            ui.AddSlider(sec, "CAD Z offset", -3.0, 3.0, _s.PcbCadZOffset,
+                         v => _s.PcbCadZOffset = (float)v, "F2");
+            ui.AddInfo(sec, "0 seats the 3D model on the topmost layer of the stack, which " +
+                            "is where it belongs — the Gerbers are the board, the STEP model " +
+                            "is what is mounted on it.");
             ui.AddToggle(sec, "CAD lighting", _s.PcbCadLighting, v => _s.PcbCadLighting = v);
             ui.AddSlider(sec, "CAD ambient", 0, 1.0, _s.PcbCadAmbient,
                          v => _s.PcbCadAmbient = (float)v, "F2");
@@ -982,8 +1500,12 @@ namespace EDes
                     edges += s.Edges.Count;
                     lit   += s.NormalCount;
                 }
+                int tris = 0, faces = 0;
+                foreach (var s in _board.Solids)
+                    foreach (var fc in s.Faces) { faces++; tris += fc.TriCount; }
                 return $"{_board.Solids.Count} CAD solid(s), {linked} matched to a designator, "
-                     + $"{pts} edge point(s), {lit}/{edges} edge(s) shadeable";
+                     + $"{pts} edge point(s), {lit}/{edges} edge(s) shadeable, "
+                     + $"{faces} planar face(s) / {tris} triangle(s)";
             }, 0.5);
             ui.AddSlider(sec, "Via max diameter (mm)", 0.1, 2.0, _s.PcbViaMaxDia,
                          v => _s.PcbViaMaxDia = (float)v, "F2");
@@ -1109,6 +1631,38 @@ namespace EDes
                             "dropped first, then labels, then geometry.");
             ui.AddSlider(sec, "Max voxels / frame", 5000, VoxelBatch.MAX_CAPACITY, _s.MaxVoxels,
                          v => _s.MaxVoxels = (int)v, "F0");
+            ui.AddSlider(sec, "Min voxels per glyph cell", 1.0, 4.0, _s.MinTextCellVoxels,
+                         v => _s.MinTextCellVoxels = (float)v, "F1");
+            ui.AddLiveInfo(sec, () =>
+            {
+                float cell = _textSize * 0.18f / MathF.Max(1e-6f, _spacing);
+                return $"text size {_textSize:0.000} -> {cell:0.0} voxels per glyph cell"
+                     + (_textFloored ? "   (raised to stay legible)" : "");
+            }, 0.5);
+            ui.AddInfo(sec, "Glyphs are 5x7 cells, so legibility is set by how many voxels " +
+                            "ONE CELL covers, not by the size in world units — which is why " +
+                            "the floor is in voxels and follows the display and the density. " +
+                            "Below about one voxel per cell adjacent cells share voxels and " +
+                            "the character becomes a blob. A smaller glyph grid would let " +
+                            "text shrink further but 3x5 characters are harder to read than " +
+                            "small 5x7 ones, so the 5x7 Bold font plus this floor is the " +
+                            "better trade on a low-resolution display.");
+            ui.AddToggle(sec, "Reduce voxels while moving if slow", _s.AdaptiveBudget,
+                         v => _s.AdaptiveBudget = v);
+            ui.AddSlider(sec, "Throttle below VPS", 2, 30, _s.AdaptiveLowVps,
+                         v => _s.AdaptiveLowVps = (float)v, "F1");
+            ui.AddSlider(sec, "Recover above VPS", 2, 30, _s.AdaptiveGoodVps,
+                         v => _s.AdaptiveGoodVps = (float)v, "F1");
+            ui.AddSlider(sec, "Throttle floor (fraction)", 0.05, 1.0, _s.AdaptiveFloor,
+                         v => _s.AdaptiveFloor = (float)v, "F2");
+            ui.AddInfo(sec, "The budget is only cut while the view is MOVING — a still " +
+                            "frame that renders slowly is one you are studying, and " +
+                            "silently dropping half of it would be the wrong answer. " +
+                            "Recovery is slower than the cut so the budget does not pump " +
+                            "up and down across the threshold.");
+            ui.AddLiveInfo(sec, () =>
+                $"budget scale {_budgetScale * 100f:0}%  ->  {(int)(_s.MaxVoxels * _budgetScale):N0} vox"
+                + $"   ({(_viewMoving ? "moving" : "still")}, {_engine?.LiveVps ?? 0f:0.0} VPS)", 0.3);
             ui.AddSlider(sec, "Voxel density (shared with Simulator tab)", 0.25, 3.0,
                          _engine.VoxelDensity, v => _engine.VoxelDensity = (float)v, "F2");
             ui.AddSlider(sec, "Text size", 0.05, 0.6, _s.TextSize, v => _s.TextSize = (float)v, "F2");
@@ -1159,27 +1713,98 @@ namespace EDes
             });
             ui.AddButton(sec, "Reset observed peaks", () => { _navPeakTrans = 0f; _navPeakRot = 0f; });
             ui.AddButton(sec, "Reset scene camera", () => _cam.Reset());
+            ui.AddInfo(sec, "Lock an axis to stop it rotating in normal camera mode — " +
+                            "useful for keeping a board flat while turning it. The axes " +
+                            "follow the LOCAL/GLOBAL choice below. Inspection mode locks " +
+                            "all three on its own, because the probe would otherwise have " +
+                            "the board slide out from under it.");
+            ui.AddToggle(sec, "Lock X rotation", _s.LockRotX, v => _s.LockRotX = v);
+            ui.AddToggle(sec, "Lock Y rotation", _s.LockRotY, v => _s.LockRotY = v);
+            ui.AddToggle(sec, "Lock Z rotation", _s.LockRotZ, v => _s.LockRotZ = v);
+            ui.AddLiveInfo(sec, () =>
+            {
+                if (_s.InspectMode) return "rotation LOCKED (inspection mode)";
+                bool any = _s.LockRotX || _s.LockRotY || _s.LockRotZ;
+                if (!any) return "all three axes free";
+                return "locked: " + (_s.LockRotX ? "X " : "") + (_s.LockRotY ? "Y " : "")
+                                  + (_s.LockRotZ ? "Z" : "");
+            }, 0.3);
+
+            ui.AddButton(sec, "Rotate about: LOCAL / GLOBAL axes", () =>
+            {
+                _s.NavLocalAxes = !_s.NavLocalAxes;
+                _cam.LocalAxes  = _s.NavLocalAxes;
+            });
+            ui.AddLiveInfo(sec, () =>
+                "rotating about " + (_s.NavLocalAxes
+                    ? "the MODEL's local axes (turns with the board)"
+                    : "the DISPLAY's global axes (fixed to the volume)"), 0.3);
+
+            ui.AddInfo(sec, "Press BOTH puck buttons to switch between Camera mode and " +
+                            "Inspection mode. In inspection mode the puck moves a probe " +
+                            "through the volume, everything dims except what the probe is " +
+                            "over, and its details appear top-left.");
+            ui.AddButton(sec, "Cycle Camera / Signal / Component inspector", ToggleInspect);
+            ui.AddSlider(sec, "Probe speed", 0.2, 12, _s.InspectRate,
+                         v => _s.InspectRate = (float)v, "F2");
+            ui.AddSlider(sec, "Dim for unhovered (1 = no dimming)", 0.1, 1.0, _s.InspectDim,
+                         v => _s.InspectDim = (float)v, "F2");
+            ui.AddSlider(sec, "Probe snap reach", 0.1, 2.0, _s.InspectSnap,
+                         v => _s.InspectSnap = (float)v, "F2");
+            ui.AddInfo(sec, "The probe reaches for the nearest TRACE or PART and draws a " +
+                            "line to it — vias and layers are not selectable, since a " +
+                            "layer is always under the probe and a via comes with its net " +
+                            "anyway. Selecting a trace lights the whole net it is joined " +
+                            "to, through its vias, pulsing cyan.");
+            ui.AddLiveInfo(sec, () =>
+            {
+                var nets = _board.Nets;
+                if (nets == null || nets.NetCount == 0) return "no copper connectivity built";
+                return $"{nets.NetCount} net(s) derived from copper geometry"
+                     + (_pcb.HoverNet >= 0
+                        ? $"   selected: {nets.Name(_pcb.HoverNet)} "
+                          + $"({nets.Size(_pcb.HoverNet)} object(s))"
+                        : "");
+            }, 0.3);
+            ui.AddLiveInfo(sec, () => _s.InspectMode
+                ? $"{(EDesInspect)_s.InspectStage} inspector   probe "
+                  + $"{_s.InspectX:0.00}, {_s.InspectY:0.00}, {_s.InspectZ:0.00}"
+                : "CAMERA mode", 0.3);
             ui.AddLiveInfo(sec, () =>
                 $"yaw {_cam.Yaw:0.00}  pitch {_cam.Pitch:0.00}  roll {_cam.Roll:0.00}  zoom {_cam.Zoom:0.00}");
 
-            sec = ui.AddSection(stack, "SpaceNavigator diagnostics", group);
-            ui.AddInfo(sec, "Live raw values from BOTH read paths, refreshed 5x/second. " +
-                            "Press V in the volume for the same readout on the display. " +
-                            "Move the puck: whichever block changes is the one that works.");
-            ui.AddToggle(sec, "Readout in the volume (V)", _s.ShowNavDiag,
-                         v => _s.ShowNavDiag = v);
-            ui.AddLiveInfo(sec, NavDiagnostics, 0.2);
         }
 
-        private void BuildControlsSection(PanelBuilder ui, StackPanel stack, List<Expander> group)
+        /// <summary>The control reference the shell pins to the bottom of the window.
+        ///
+        /// Mode-specific rather than the whole list at once: showing every mode's keys
+        /// means the four fifths that do nothing right now are competing with the fifth
+        /// that does. GLOBAL and CAMERA always apply, so they always show.</summary>
+        public string ControlsHelp
         {
-            var sec = ui.AddSection(stack, "Controls", group);
-            ui.AddInfo(sec,
-                "GLOBAL   Tab mode - L labels - G backdrop - R reset camera - Esc quit\n" +
-                "CAMERA   WASD orbit - Q/E roll - , / . zoom - SpaceNav 6DOF - left-drag preview\n" +
-                "CIRCUIT  1-4 preset - left/right select resistor - up/down +-10% - -/= source volts - P pause\n" +
-                "SCOPE    1-4 channels - up/down V/div - left/right trigger level - T trigger ch - E edge - P freeze\n" +
-                "PCB      arrows move cursor (Shift = 0.1mm) - C cursor - H drills - P pads - F hatch - N/M isolate layer");
+            get
+            {
+                string modeKeys = (EDesMode)_s.Mode switch
+                {
+                    EDesMode.Education =>
+                        "1-4 preset   left/right select resistor   up/down +-10%\n" +
+                        "-/= source volts   P pause flow",
+                    EDesMode.Scope =>
+                        "1-4 channels   up/down V/div   left/right trigger level\n" +
+                        "T trigger ch   E edge   P freeze",
+                    _ =>
+                        "arrows move cursor (Shift = 0.1mm)   C cursor\n" +
+                        "H drills   P pads   F hatch   N/M isolate layer",
+                };
+
+                return "GLOBAL\n" +
+                       "Tab mode   L labels   G backdrop   R reset camera   Esc quit\n" +
+                       "\nCAMERA\n" +
+                       "WASD orbit   Q/E roll   , / . zoom   left-drag preview\n" +
+                       "SpaceNav 6DOF   both puck buttons = inspection mode\n" +
+                       "\n" + ((EDesMode)_s.Mode).ToString().ToUpperInvariant() + "\n" +
+                       modeKeys;
+            }
         }
     }
 }

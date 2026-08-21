@@ -45,6 +45,30 @@ namespace EDes.Pcb
         public bool  HasNormal;
     }
 
+    /// <summary>One PLANAR face, triangulated, for flat shading.
+    ///
+    /// Only planar faces get one. A trimmed cylinder or NURBS patch needs a real
+    /// geometry kernel to tessellate, and guessing produces geometry that is confidently
+    /// wrong rather than merely absent — so those faces stay unfilled and are counted in
+    /// a note. A planar face is different: its boundary is already tessellated as edges,
+    /// so filling it is polygon triangulation, not surface evaluation.
+    ///
+    /// Vertices are 3 per triangle, flat-packed. Flat shading means one normal for the
+    /// whole face, which is exactly what a plane has.</summary>
+    public sealed class CadFace
+    {
+        public float[] X = System.Array.Empty<float>();
+        public float[] Y = System.Array.Empty<float>();
+        public float[] Z = System.Array.Empty<float>();
+        public int     TriCount;
+        public float   NX, NY, NZ;
+
+        /// <summary>True once a usable normal has been computed. Distinguishes "faces the
+        /// +X direction" from "no normal was available", which are different for lighting
+        /// and would otherwise both read as a zero vector.</summary>
+        public bool    HasNormalSet;
+    }
+
     /// <summary>One solid from the STEP assembly — a component body, or the board.</summary>
     public sealed class CadSolid
     {
@@ -72,6 +96,10 @@ namespace EDes.Pcb
         public bool Visible = true;
 
         public readonly List<CadEdge> Edges = new();
+
+        /// <summary>Triangulated planar faces, for the optional flat-shaded fill. Empty
+        /// when the solid has no planar faces, or when surfaces were not requested.</summary>
+        public readonly List<CadFace> Faces = new();
 
         public float MinX, MinY, MinZ, MaxX, MaxY, MaxZ;
 
@@ -118,6 +146,16 @@ namespace EDes.Pcb
         public int TotalNormals
         {
             get { int n = 0; foreach (var s in Solids) n += s.NormalCount; return n; }
+        }
+
+        public int TotalTriangles
+        {
+            get
+            {
+                int n = 0;
+                foreach (var s in Solids) foreach (var f in s.Faces) n += f.TriCount;
+                return n;
+            }
         }
 
         public float MinX = float.MaxValue, MinY = float.MaxValue, MinZ = float.MaxValue;

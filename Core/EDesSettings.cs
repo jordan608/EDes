@@ -17,6 +17,17 @@ namespace EDes
 {
     public enum EDesMode { Education = 0, Scope = 1, Pcb = 2 }
 
+    /// <summary>The inspection stages the both-buttons gesture cycles through.</summary>
+    public enum EDesInspect
+    {
+        /// <summary>Normal camera driving; no probe.</summary>
+        Off = 0,
+        /// <summary>Copper and board outline only — for tracing signals.</summary>
+        Signal = 1,
+        /// <summary>Parts and board outline only — for identifying components.</summary>
+        Component = 2,
+    }
+
     public sealed class EDesSettings : IGameSettings
     {
         // ── Mode ──────────────────────────────────────────────────────────────
@@ -26,7 +37,33 @@ namespace EDes
         /// <summary>Hard per-frame voxel ceiling. Everything the app draws is counted
         /// against this, HUD text included.</summary>
         public volatile int   MaxVoxels   = 150_000;
+
+        // ── Adaptive budget ───────────────────────────────────────────────────
+        /// <summary>Cut the voxel budget temporarily while the view is MOVING and the
+        /// display cannot keep up.
+        ///
+        /// Only while moving, on purpose: a still frame that renders slowly is one you are
+        /// studying, and quietly throwing away half of it is the wrong answer. A frame you
+        /// are dragging around is one where smoothness matters more than completeness.</summary>
+        public volatile bool  AdaptiveBudget = true;
+
+        /// <summary>Throttle below this VPS, recover above AdaptiveGoodVps. The gap is
+        /// hysteresis: with one threshold the budget would oscillate around it, which reads
+        /// as flicker rather than as a frame-rate save.</summary>
+        public volatile float AdaptiveLowVps  = 10f;
+        public volatile float AdaptiveGoodVps = 15f;
+
+        /// <summary>Floor for the throttle, as a fraction of MaxVoxels. Not zero — the
+        /// point is to stay usable while moving, not to blank the display.</summary>
+        public volatile float AdaptiveFloor = 0.15f;
         public volatile float TextSize    = 0.20f;
+
+        /// <summary>Minimum voxels per glyph CELL, which is what sets the real text floor.
+        /// A 5x7 glyph needs about one voxel per cell to be readable at all and two to be
+        /// comfortable; below one, adjacent lit cells share voxels and the character turns
+        /// into a blob. Expressed in voxels rather than world units so it holds on both a
+        /// VX2 and a VX2-XL, and at any voxel density.</summary>
+        public volatile float MinTextCellVoxels = 1.6f;
         public volatile int   FontIndex   = 2;      // 0 Classic, 1 Blocky, 2 Bold
         public volatile float TextWeight  = 1.0f;
         public volatile bool  ShowLabels  = true;
@@ -66,6 +103,63 @@ namespace EDes
         /// permanent scene drift. Motion is re-scaled past the threshold, so there is no
         /// jump at the edge.</summary>
         public volatile float NavDeadzone = 0.08f;
+
+        /// <summary>Rotate about the scene's own axes (true) or the display's fixed ones.
+        /// Local is what "turn the board over" means once the board is already tilted;
+        /// global is easier when lining the board up with the volume itself.</summary>
+        public volatile bool  NavLocalAxes = true;
+
+        /// <summary>Lock rotation about an individual axis during normal camera mode.
+        /// The axes are whichever frame NavLocalAxes selects, so a lock always means the
+        /// axis it is named after. Inspection mode locks all three regardless.</summary>
+        public volatile bool  LockRotX = false;
+        public volatile bool  LockRotY = false;
+        public volatile bool  LockRotZ = false;
+
+        // ── Inspection mode ───────────────────────────────────────────────────
+        /// <summary>Which inspector is active: 0 camera, 1 signal, 2 component.
+        ///
+        /// Both puck buttons together CYCLE through them. A cycle rather than a toggle
+        /// because the two inspectors answer different questions — one about copper, one
+        /// about parts — and each hides what the other needs, so there is no single view
+        /// that serves both.
+        ///
+        /// In any inspector the puck's translation drives a probe instead of panning;
+        /// rotation is locked so the board cannot slide out from under it. Everything dims
+        /// except whatever the probe is over. See EDesInspect.</summary>
+        public volatile int   InspectStage = 0;
+
+        /// <summary>Convenience over InspectStage: any inspector at all.</summary>
+        public bool InspectMode => InspectStage != 0;
+
+        /// <summary>Probe position, in DISPLAY space, clamped to the volume. Display space
+        /// rather than scene space on purpose: the probe is a physical pointer in the box,
+        /// so it must stay put when the scene is rotated around it.</summary>
+        public volatile float InspectX = 0f, InspectY = 0f, InspectZ = 0f;
+
+        /// <summary>Brightness for everything the probe is NOT over. 0.75 = 25% darker.</summary>
+        public volatile float InspectDim = 0.75f;
+
+        /// <summary>Probe speed, world units per second at full deflection.</summary>
+        public volatile float InspectRate = 3.0f;
+
+        /// <summary>How far the probe reaches for something to select, world units. A
+        /// reach rather than a hit test: traces are one voxel wide, so requiring the probe
+        /// to be exactly on one would make selection almost impossible by hand.</summary>
+        public volatile float InspectSnap = 0.6f;
+
+        /// <summary>A LATCHED selection made from the pick list, as "net:<id>" or
+        /// "comp:<designator>", or empty.
+        ///
+        /// Separate from what the probe is hovering, and deliberately so: a pick made by
+        /// name has to survive letting go of the puck and moving the view, which a
+        /// hover-derived selection cannot. When both exist the pick wins — it was chosen
+        /// explicitly, where a hover is wherever the pointer happens to be.</summary>
+        public string PickedKey = "";
+
+        /// <summary>What the probe is over, formatted for the shell's overlay. Written by
+        /// the game thread, read by the UI; string assignment is atomic.</summary>
+        public string InspectInfo = "";
 
         // ── Education mode: the circuit ───────────────────────────────────────
         public volatile int    PresetIndex = 0;
@@ -132,6 +226,36 @@ namespace EDes
         /// stays fixed to the part as the scene is rotated — which is what makes the
         /// shading read as the part's own form rather than as a rotating gradient.</summary>
         public volatile bool   PcbCadLighting = true;
+
+        /// <summary>Flat-shaded fill on the STEP model's planar faces, and how densely.
+        ///
+        /// Density is samples per voxel: 1.0 fills solid, lower is sparser. It defaults
+        /// below 1 because the fill is the most expensive thing on a board -- roughly
+        /// 42,000 voxels for the 1143 mm2 of planar face on a real 2-layer export at full
+        /// density -- and because the display is transparent, so a solid fill also shows
+        /// its own back faces through its front.</summary>
+        /// <summary>Convert STEP to a mesh with an external tessellator so CURVED faces
+        /// can be filled and lit. StepParser fills planar faces without a kernel, but a
+        /// round part is mostly curved faces, so it comes out as a sparse cage with nothing
+        /// to light. Off means wireframe-only, which is still perfectly usable.</summary>
+        public volatile bool   PcbTessellate = true;
+
+        /// <summary>Max element size for the tessellator, mm. Smaller is smoother and costs
+        /// triangles; this is the knob for a model that arrives too coarse or too heavy.</summary>
+        public volatile float  PcbTessellateTol = 0.4f;
+
+        /// <summary>Explicit tessellator command, or empty to auto-discover (gmsh, then
+        /// FreeCAD). Present so an unusual or commercial toolchain can be used without a
+        /// code change.</summary>
+        public          string PcbTessellator = "";
+
+        public volatile bool   PcbCadSurfaces = true;
+        public volatile float  PcbCadSurfaceDensity = 0.6f;
+
+        /// <summary>Nudge the 3D model along Z, world units. 0 seats it on the topmost
+        /// layer of the exploded stack, which is where it physically belongs — the Gerber
+        /// layers are the board, the STEP model is what is mounted on it.</summary>
+        public volatile float  PcbCadZOffset = 0f;
         public volatile float  PcbCadAmbient  = 0.35f;
         public volatile float  PcbCadLightX   = 0.3f;
         public volatile float  PcbCadLightY   = 0.2f;
@@ -146,6 +270,14 @@ namespace EDes
         public volatile bool   PcbComponentLabels = true;    // designators beside them
         public volatile int    PcbLabelLimit      = 150;     // skip labels above this part count
         public volatile bool   PcbShowDocs        = true;    // document inventory in the volume
+
+        /// <summary>Per-layer visibility and colour choices, keyed by layer file name:
+        /// "name|RRGGBB|1;name||0" — an empty colour field means "keep the default".
+        ///
+        /// Persisted because a re-import rebuilds every layer from scratch, and the last
+        /// board is re-imported on every launch. Without this, changing a layer colour
+        /// would look like it silently failed the next time the app opened.</summary>
+        public string PcbLayerPrefs = "";
 
         /// <summary>Set by the UI to ask the game thread to (re)import PcbPath.
         /// The game thread clears it — imports never run on the UI thread.</summary>

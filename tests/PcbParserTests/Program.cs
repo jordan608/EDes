@@ -160,8 +160,16 @@ Console.WriteLine("=== real Altium project outputs ===");
 failures += PcbParserTests.RealBoardCheck.Run();
 
 Console.WriteLine();
+Console.WriteLine("=== derived copper connectivity ===");
+failures += PcbParserTests.NetChecks.Run();
+
+Console.WriteLine();
 Console.WriteLine("=== via layer spans ===");
 failures += PcbParserTests.ViaSpanChecks.Run();
+
+Console.WriteLine();
+Console.WriteLine("=== STL / STEP tessellation ===");
+failures += PcbParserTests.StlChecks.Run();
 
 Console.WriteLine();
 Console.WriteLine("=== STEP ===");

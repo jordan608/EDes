@@ -308,11 +308,43 @@ END-ISO-10303-21;
             Ok("garbage input reports rather than throws", m == null && notes.Count > 0);
         }
 
-        // ── The real Altium export, when present ─────────────────────────────
-        const string real = @"C:\Users\VoxelUser\Downloads\Project Outputs for VLED_IRSensor_V1.0-20260821T004235Z-1-001\Project Outputs for VLED_IRSensor_V1.0\ExportSTEP\VLED_IRSensor_V1.0.step";
-        if (!File.Exists(real))
+        // ── A STEP file on its own, with no Gerbers ──────────────────────────
+        // The case that used to be rejected: PcbImporter counted gerbers, drills, meshes
+        // and parts as "geometry" but not SOLIDS, so a plain model returned early as "no
+        // geometry" -- before connectivity and designator linking even ran. And
+        // ComputeBounds ignored solids, so the extents stayed empty, which reads
+        // downstream as no geometry too and draws nothing.
         {
-            Console.WriteLine("SKIP  real STEP export not on this machine");
+            var board = new PcbBoard();
+            string only = Write("standalone.step", RectSolid(".MILLI.", 12, 7));
+            bool ok = PcbImporter.Import(only, board, 60_000);
+
+            Ok("a bare STEP file imports at all", ok);
+            Ok($"the solid came through ({board.Solids.Count})", board.Solids.Count == 1);
+            Ok("and it counts as geometry, so something will draw", board.HasGeometry);
+            Ok($"bounds come from the solid ({board.WidthMm:0.##} x {board.HeightMm:0.##} mm)",
+               Math.Abs(board.WidthMm - 12) < 0.01 && Math.Abs(board.HeightMm - 7) < 0.01);
+            Ok("no layers, as expected", board.Layers.Count == 0);
+            Ok("the import log records it as STEP",
+               board.ImportLog.Exists(f => f.Role == "STEP" && f.Used));
+
+            // A folder holding only a STEP must work the same way.
+            string dir = Path.Combine(Path.GetTempPath(), "edes_step_only");
+            Directory.CreateDirectory(dir);
+            File.Copy(only, Path.Combine(dir, "model.step"), overwrite: true);
+            var fromDir = new PcbBoard();
+            Ok("a folder containing only a STEP file also imports",
+               PcbImporter.Import(dir, fromDir, 60_000) && fromDir.Solids.Count == 1 &&
+               fromDir.HasGeometry);
+        }
+
+        // ── The real Altium export, when configured ──────────────────────────
+        // Found by searching the configured fixture folder, so neither the machine's
+        // paths nor the project's name appear in this repository.
+        string? real = TestData.BoardStepFile;
+        if (real == null)
+        {
+            Console.WriteLine($"SKIP  no real STEP export configured — {TestData.SkipReason}");
             return _failures;
         }
 
@@ -333,6 +365,59 @@ END-ISO-10303-21;
                           $"({100.0 * big.TotalNormals / Math.Max(1, big.TotalEdges):0.#}%)");
         Ok($"most real edges are shadeable ({big.TotalNormals}/{big.TotalEdges})",
            big.TotalNormals > big.TotalEdges / 2);
+
+        // ── Flat-shaded surfaces ─────────────────────────────────────────────
+        int faceCount = 0, degenerate = 0;
+        double triArea = 0;
+        foreach (var sol in big.Solids)
+            foreach (var fc in sol.Faces)
+            {
+                faceCount++;
+                double nl = Math.Sqrt(fc.NX * fc.NX + fc.NY * fc.NY + fc.NZ * fc.NZ);
+                if (Math.Abs(nl - 1.0) > 1e-3) degenerate++;
+                for (int t = 0; t < fc.TriCount; t++)
+                {
+                    int i = t * 3;
+                    double e1x = fc.X[i+1]-fc.X[i], e1y = fc.Y[i+1]-fc.Y[i], e1z = fc.Z[i+1]-fc.Z[i];
+                    double e2x = fc.X[i+2]-fc.X[i], e2y = fc.Y[i+2]-fc.Y[i], e2z = fc.Z[i+2]-fc.Z[i];
+                    double crx = e1y*e2z - e1z*e2y, cry = e1z*e2x - e1x*e2z, crz = e1x*e2y - e1y*e2x;
+                    triArea += 0.5 * Math.Sqrt(crx*crx + cry*cry + crz*crz);
+                }
+            }
+        Console.WriteLine($"      planar faces filled {faceCount}, triangles {big.TotalTriangles}, " +
+                          $"total area {triArea:0.#} mm^2");
+        Ok($"planar faces were triangulated ({faceCount} faces, {big.TotalTriangles} tris)",
+           faceCount > 50 && big.TotalTriangles >= faceCount);
+        Ok($"every face normal is unit length ({degenerate} bad)", degenerate == 0);
+        Ok($"triangle area is physically plausible for a 16x35 mm board ({triArea:0.#} mm^2)",
+           triArea > 100 && triArea < 100_000);
+
+        // Every triangle must lie IN its face's plane, or the fill will not look flat.
+        double worstOffPlane = 0;
+        foreach (var sol in big.Solids)
+            foreach (var fc in sol.Faces)
+            {
+                if (fc.TriCount == 0) continue;
+                double d0 = fc.X[0]*fc.NX + fc.Y[0]*fc.NY + fc.Z[0]*fc.NZ;
+                for (int i = 0; i < fc.TriCount * 3; i++)
+                {
+                    double d = fc.X[i]*fc.NX + fc.Y[i]*fc.NY + fc.Z[i]*fc.NZ;
+                    worstOffPlane = Math.Max(worstOffPlane, Math.Abs(d - d0));
+                }
+            }
+        Ok($"all triangles lie in their face plane (worst {worstOffPlane:0.0000} mm)",
+           worstOffPlane < 0.01);
+
+        // And the real assembly, imported on its own with no Gerbers alongside it.
+        {
+            var solo = new PcbBoard();
+            bool ok = PcbImporter.Import(real, solo, 60_000);
+            Console.WriteLine($"      standalone import: {ok}, {solo.Solids.Count} solid(s), " +
+                              $"{solo.WidthMm:0.##} x {solo.HeightMm:0.##} mm");
+            Ok("the real STEP imports standalone", ok && solo.Solids.Count > 10);
+            Ok("with usable bounds from the model alone",
+               solo.HasGeometry && solo.WidthMm > 1 && solo.HeightMm > 1);
+        }
 
         Ok($"found the 27 B-rep solids ({big.SolidCount})", big.SolidCount >= 20);
         Ok($"edge count is the right order ({big.TotalEdges})",

@@ -1,7 +1,11 @@
-// Import of a REAL Altium "Project Outputs" folder, if one is present on this
-// machine. Skipped (not failed) when the folder is absent, so the suite still
-// runs anywhere — but when it is there, this is the only check that exercises
-// genuine fab output rather than hand-written fixtures.
+// Import of a REAL Altium "Project Outputs" folder, if one is configured on this
+// machine. Skipped (not failed) when it is not, so the suite still runs anywhere —
+// but when it is there, this is the only check that exercises genuine fab output
+// rather than hand-written fixtures.
+//
+// The location comes from TestData, never from a literal here: a hardcoded absolute
+// path pins the suite to one machine and publishes a username, a folder layout and a
+// customer project name into the repository.
 
 using EDes.Pcb;
 
@@ -9,14 +13,12 @@ namespace PcbParserTests;
 
 public static class RealBoardCheck
 {
-    private const string Root =
-        @"C:\Users\VoxelUser\Downloads\Project Outputs for VLED_IRSensor_V1.0-20260821T004235Z-1-001\Project Outputs for VLED_IRSensor_V1.0";
-
     public static int Run()
     {
-        if (!Directory.Exists(Root))
+        string? Root = TestData.BoardFolder;
+        if (Root == null)
         {
-            Console.WriteLine("SKIP  real board folder not present on this machine");
+            Console.WriteLine($"SKIP  no real board folder configured — {TestData.SkipReason}");
             return 0;
         }
 
@@ -150,6 +152,38 @@ public static class RealBoardCheck
             CheckTrue("the wireframe fits the voxel budget with room to spare",
                       voxels > 0 && voxels < 100_000);
 
+            // The flat-shaded fill is the expensive part. Its cost is total triangle
+            // area / voxel area, so it can be predicted rather than discovered on the
+            // display when the backdrop silently vanishes.
+            double triAreaMm = 0;
+            int tris = 0;
+            foreach (var sol in board.Solids)
+                foreach (var fc in sol.Faces)
+                {
+                    tris += fc.TriCount;
+                    for (int t = 0; t < fc.TriCount; t++)
+                    {
+                        int i = t * 3;
+                        double e1x = fc.X[i+1]-fc.X[i], e1y = fc.Y[i+1]-fc.Y[i], e1z = fc.Z[i+1]-fc.Z[i];
+                        double e2x = fc.X[i+2]-fc.X[i], e2y = fc.Y[i+2]-fc.Y[i], e2z = fc.Z[i+2]-fc.Z[i];
+                        double crx = e1y*e2z - e1z*e2y, cry = e1z*e2x - e1x*e2z, crz = e1x*e2y - e1y*e2x;
+                        triAreaMm += 0.5 * Math.Sqrt(crx*crx + cry*cry + crz*crz);
+                    }
+                }
+
+            double areaWorld = triAreaMm * scale * scale;
+            double voxFull   = areaWorld / (0.03 * 0.03);
+            double voxDefault = areaWorld / ((0.03 / 0.6) * (0.03 / 0.6));
+            Console.WriteLine($"STEP surfaces: {tris} tri, {triAreaMm:0.#} mm^2 -> " +
+                              $"~{voxFull:N0} voxels at full density, " +
+                              $"~{voxDefault:N0} at the 0.6 default");
+
+            CheckTrue("surfaces were triangulated", tris > 100);
+            CheckTrue("the fill at the DEFAULT density fits the budget alongside everything else",
+                      voxDefault > 0 && voxDefault + voxels < 120_000);
+            CheckTrue("full density is still affordable on a board this size",
+                      voxFull + voxels < 150_000);
+
             var designators = new SortedSet<string>();
             foreach (var solid in board.Solids)
                 if (solid.Designator.Length > 0) designators.Add(solid.Designator);
@@ -165,6 +199,95 @@ public static class RealBoardCheck
         CheckTrue("aperture library was NOT parsed as a layer",
                   !board.Layers.Exists(l => l.Name.EndsWith(".apr", StringComparison.OrdinalIgnoreCase) ||
                                             l.Name.EndsWith(".APR_LIB", StringComparison.OrdinalIgnoreCase)));
+        // ── Derived copper connectivity ──────────────────────────────────────
+        {
+            var nets = board.Nets;
+            CheckTrue("nets were built", nets != null);
+            if (nets != null)
+            {
+                int copperObjects = 0, biggest = 0, singletons = 0;
+                for (int n = 0; n < nets.NetCount; n++)
+                {
+                    int sz = nets.Size(n);
+                    copperObjects += sz;
+                    if (sz > biggest) biggest = sz;
+                    if (sz == 1) singletons++;
+                }
+
+                int copperSegs = 0, copperPads = 0;
+                foreach (var l in board.Layers)
+                    if (l.Kind is PcbLayerKind.CopperTop or PcbLayerKind.CopperInner
+                                 or PcbLayerKind.CopperBottom)
+                    { copperSegs += l.Segs.Count; copperPads += l.Pads.Count; }
+
+                Console.WriteLine($"nets: {nets.NetCount} over {copperObjects} copper objects " +
+                                  $"({copperSegs} seg + {copperPads} pad), biggest {biggest}, " +
+                                  $"{singletons} singleton(s)");
+
+                // Every copper object must land on exactly one net — none orphaned, none
+                // double-counted. This is the invariant that catches an indexing slip.
+                CheckTrue("every copper object is on exactly one net",
+                          copperObjects == copperSegs + copperPads);
+
+                // Sanity on the shape of the answer. One giant net would mean the joining
+                // is too eager (mid-span crossings, or pours swallowed); all singletons
+                // would mean it is joining nothing at all.
+                CheckTrue("more than one net was found", nets.NetCount > 1);
+                CheckTrue("no single net swallowed the whole board",
+                          biggest < copperObjects);
+                CheckTrue("at least some objects actually joined up",
+                          singletons < nets.NetCount);
+
+                // Names are derived here, because this export carries no TO.N attributes.
+                CheckTrue("derived names say they are derived",
+                          nets.Name(0).Contains("derived"));
+                CheckTrue("no layer claimed real net names",
+                          board.Layers.TrueForAll(l => !l.HasNetNames));
+
+                // Determinism: the same board must give the same numbering, or a net's
+                // label and colour would change between imports.
+                var again = PcbNets.Build(board);
+                bool same = again.NetCount == nets.NetCount;
+                for (int li = 0; li < board.Layers.Count && same; li++)
+                    for (int i = 0; i < board.Layers[li].Segs.Count; i++)
+                        if (again.SegNet(li, i) != nets.SegNet(li, i)) { same = false; break; }
+                CheckTrue("net numbering is deterministic across rebuilds", same);
+            }
+        }
+
+        // ── Stack order is physically correct ────────────────────────────────
+        // The bug this guards: PcbLayerKind has one Silkscreen kind for BOTH sides, so
+        // before PcbLayer.Bottom existed the bottom silkscreen sorted to slot 0 and drew
+        // above the top copper and above the 3D components.
+        {
+            int Slot(string ext)
+                => board.Layers.FindIndex(l => l.Name.EndsWith(ext, StringComparison.OrdinalIgnoreCase));
+
+            int gto = Slot(".GTO"), gtp = Slot(".GTP"), gts = Slot(".GTS");
+            int gtl = Slot(".GTL"), gbl = Slot(".GBL");
+            int gbs = Slot(".GBS"), gbo = Slot(".GBO");
+            Console.WriteLine($"stack: GTO {gto}, GTP {gtp}, GTS {gts}, GTL {gtl}, " +
+                              $"GBL {gbl}, GBS {gbs}, GBO {gbo}");
+
+            CheckTrue("top silkscreen is above top copper", gto >= 0 && gtl >= 0 && gto < gtl);
+            CheckTrue("top paste is between silk and copper", gtp > gto && gtp < gtl);
+            CheckTrue("top mask is between paste and copper", gts > gtp && gts < gtl);
+            CheckTrue("top copper is above bottom copper", gtl < gbl);
+            CheckTrue("bottom mask is BELOW bottom copper", gbs > gbl);
+            CheckTrue("bottom silkscreen is BELOW bottom copper (the actual bug)",
+                      gbo > gbl);
+            CheckTrue("bottom silkscreen is the outermost bottom layer", gbo > gbs);
+            CheckTrue("the two silkscreens are on opposite sides of the copper",
+                      gto < gtl && gbo > gbl);
+
+            CheckTrue("sides were classified", board.Layers.Exists(l => l.Bottom) &&
+                                               board.Layers.Exists(l => !l.Bottom));
+            var gboLayer = board.Layers.Find(l => l.Name.EndsWith(".GBO", StringComparison.OrdinalIgnoreCase));
+            CheckTrue("bottom silk is flagged as bottom", gboLayer != null && gboLayer.Bottom);
+            var gtoLayer = board.Layers.Find(l => l.Name.EndsWith(".GTO", StringComparison.OrdinalIgnoreCase));
+            CheckTrue("top silk is NOT flagged as bottom", gtoLayer != null && !gtoLayer.Bottom);
+        }
+
         CheckTrue("mechanical drawing layers default to hidden",
                   board.Layers.TrueForAll(l => l.Kind != PcbLayerKind.Mechanical || !l.Visible));
 

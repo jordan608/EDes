@@ -87,6 +87,14 @@ namespace EDes.Pcb
         public PcbLayerKind Kind    = PcbLayerKind.Unknown;
         public bool         Visible = true;
 
+        /// <summary>Which side of the board this layer belongs to.
+        ///
+        /// Needed because PcbLayerKind does NOT distinguish sides for silkscreen, mask or
+        /// paste — there is one Silkscreen kind for both. Without this the stack order put
+        /// every silkscreen layer at the same height, so the BOTTOM silkscreen sorted to
+        /// the very top of the stack and appeared above the components.</summary>
+        public bool         Bottom;
+
         public readonly List<PcbSeg>    Segs    = new();
         public readonly List<PcbPad>    Pads    = new();
         public readonly List<PcbRegion> Regions = new();
@@ -98,21 +106,82 @@ namespace EDes.Pcb
 
         public int ObjectCount => Segs.Count + Pads.Count + Regions.Count;
 
-        /// <summary>Default colour for this layer kind (packed 0xRRGGBB).</summary>
-        public int Colour => Kind switch
+        // Net names from Gerber X2 %TO.N attributes. SPARSE dictionaries rather than
+        // arrays because the attributes are optional and usually absent — most exports
+        // carry none at all, and a name array per layer would then be pure overhead.
+        private Dictionary<int, string>? _segNets;
+        private Dictionary<int, string>? _padNets;
+
+        /// <summary>True if this layer carried any real net names.</summary>
+        public bool HasNetNames => _segNets != null || _padNets != null;
+
+        public void SetSegNetName(int segIndex, string net)
         {
-            PcbLayerKind.CopperTop    => 0xFF5A3C,
-            PcbLayerKind.CopperBottom => 0x3C8CFF,
-            PcbLayerKind.CopperInner  => 0xC8A03C,
-            PcbLayerKind.Silkscreen   => 0xF0F0F0,
-            PcbLayerKind.SolderMask   => 0x2C7A4B,
-            PcbLayerKind.Paste        => 0x9AA0A6,
-            PcbLayerKind.PadMaster    => 0xD08A5A,
-            PcbLayerKind.Outline      => 0xFFE066,
-            PcbLayerKind.Mechanical   => 0x7A6ACF,
-            PcbLayerKind.Drill        => 0x808080,
-            PcbLayerKind.Mesh         => 0x66D9C0,
-            _                         => 0x8899AA,
+            if (string.IsNullOrEmpty(net)) return;
+            (_segNets ??= new Dictionary<int, string>())[segIndex] = net;
+        }
+
+        public void SetPadNetName(int padIndex, string net)
+        {
+            if (string.IsNullOrEmpty(net)) return;
+            (_padNets ??= new Dictionary<int, string>())[padIndex] = net;
+        }
+
+        public string SegNetName(int segIndex)
+            => _segNets != null && _segNets.TryGetValue(segIndex, out var n) ? n : "";
+
+        public string PadNetName(int padIndex)
+            => _padNets != null && _padNets.TryGetValue(padIndex, out var n) ? n : "";
+
+        /// <summary>User-chosen colour, or null to use the kind's default. Separate from
+        /// the default rather than overwriting it so "reset to default" stays possible and
+        /// so a re-import can tell a deliberate choice from an untouched layer.</summary>
+        public int? ColourOverride;
+
+        /// <summary>Colour actually drawn (packed 0xRRGGBB).</summary>
+        public int Colour => ColourOverride ?? DefaultColour;
+
+        /// <summary>Colour for this layer kind, ignoring any override.
+        ///
+        /// All seven of the display's colours and nothing else -- see Palette's header.
+        /// There are more layer kinds than colours, so the ones that must share a colour
+        /// are separated by DefaultPattern instead. That is also how the two SIDES of
+        /// silkscreen, mask and paste are told apart, since they share a kind.</summary>
+        public int DefaultColour => Kind switch
+        {
+            PcbLayerKind.CopperTop    => Sim.Palette.Red,
+            PcbLayerKind.CopperBottom => Sim.Palette.Blue,
+            PcbLayerKind.CopperInner  => Sim.Palette.Green,
+            PcbLayerKind.Silkscreen   => Sim.Palette.White,
+            PcbLayerKind.SolderMask   => Sim.Palette.Cyan,
+            PcbLayerKind.Paste        => Sim.Palette.Magenta,
+            PcbLayerKind.PadMaster    => Sim.Palette.Yellow,
+            PcbLayerKind.Outline      => Sim.Palette.Yellow,
+            PcbLayerKind.Mechanical   => Sim.Palette.Magenta,
+            PcbLayerKind.Drill        => Sim.Palette.White,
+            PcbLayerKind.Mesh         => Sim.Palette.Cyan,
+            _                         => Sim.Palette.Magenta,
+        };
+
+        /// <summary>How this layer's tracks are stroked: 0 solid, 1 dashed, 2 dotted.
+        ///
+        /// The second axis of layer identity, because seven colours cannot label twelve
+        /// kinds across two sides. Colour says WHAT a layer is, pattern says which side or
+        /// which of a colour-sharing pair -- so Outline is solid yellow while PadMaster is
+        /// dotted yellow, and bottom-side layers dash where top-side layers do not.</summary>
+        public int Pattern => PatternOverride ?? DefaultPattern;
+
+        public int? PatternOverride;
+
+        public int DefaultPattern => Kind switch
+        {
+            PcbLayerKind.Silkscreen => Bottom ? 1 : 0,
+            PcbLayerKind.SolderMask => Bottom ? 1 : 0,
+            PcbLayerKind.Paste      => Bottom ? 2 : 0,
+            PcbLayerKind.PadMaster  => 2,
+            PcbLayerKind.Mechanical => 1,
+            PcbLayerKind.Drill      => 2,
+            _                       => 0,
         };
     }
 
@@ -214,6 +283,11 @@ namespace EDes.Pcb
         public readonly List<PcbHole>   Holes  = new();
         public readonly List<MeshCloud> Meshes = new();
 
+        /// <summary>Derived copper connectivity, or null until it is built. Rebuilt after
+        /// an import rather than on demand: it depends on every copper layer and every
+        /// hole, so building it lazily from a draw call would mean doing it mid-frame.</summary>
+        public PcbNets? Nets { get; set; }
+
         /// <summary>CAD solids from STEP imports, as edge wireframes. Kept separate from
         /// Meshes because they are drawn differently on purpose: a mesh becomes a surface
         /// point cloud, a CAD solid becomes its feature edges.</summary>
@@ -263,6 +337,7 @@ namespace EDes.Pcb
             Holes.Clear();
             Meshes.Clear();
             Solids.Clear();
+            Nets = null;
             ImportLog.Clear();
             ImportMs = 0;
             Components.Clear();
@@ -321,6 +396,20 @@ namespace EDes.Pcb
                 foreach (var r in l.Regions)
                     for (int i = 0; i < r.Count; i++) Hit(r.X[i], r.Y[i]);
             }
+
+            // A STEP-only import has no layers at all, so the solids ARE the extents.
+            // Folded in whenever there is no outline: with a board outline present the
+            // outline is the authority (a tall connector would otherwise inflate the
+            // footprint), but with no outline the model is all there is, and leaving it
+            // out left the bounds empty — which reads downstream as "no geometry" and
+            // nothing draws.
+            if (!haveOutline)
+                foreach (var sol in Solids)
+                {
+                    if (!sol.Visible || !sol.HasGeometry) continue;
+                    Hit(sol.MinX, sol.MinY);
+                    Hit(sol.MaxX, sol.MaxY);
+                }
 
             // Drills and parts are inside the outline by definition; only fold them in
             // when there is no outline to trust.
