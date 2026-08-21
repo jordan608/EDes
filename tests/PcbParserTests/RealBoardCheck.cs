@@ -152,6 +152,38 @@ public static class RealBoardCheck
             CheckTrue("the wireframe fits the voxel budget with room to spare",
                       voxels > 0 && voxels < 100_000);
 
+            // The flat-shaded fill is the expensive part. Its cost is total triangle
+            // area / voxel area, so it can be predicted rather than discovered on the
+            // display when the backdrop silently vanishes.
+            double triAreaMm = 0;
+            int tris = 0;
+            foreach (var sol in board.Solids)
+                foreach (var fc in sol.Faces)
+                {
+                    tris += fc.TriCount;
+                    for (int t = 0; t < fc.TriCount; t++)
+                    {
+                        int i = t * 3;
+                        double e1x = fc.X[i+1]-fc.X[i], e1y = fc.Y[i+1]-fc.Y[i], e1z = fc.Z[i+1]-fc.Z[i];
+                        double e2x = fc.X[i+2]-fc.X[i], e2y = fc.Y[i+2]-fc.Y[i], e2z = fc.Z[i+2]-fc.Z[i];
+                        double crx = e1y*e2z - e1z*e2y, cry = e1z*e2x - e1x*e2z, crz = e1x*e2y - e1y*e2x;
+                        triAreaMm += 0.5 * Math.Sqrt(crx*crx + cry*cry + crz*crz);
+                    }
+                }
+
+            double areaWorld = triAreaMm * scale * scale;
+            double voxFull   = areaWorld / (0.03 * 0.03);
+            double voxDefault = areaWorld / ((0.03 / 0.6) * (0.03 / 0.6));
+            Console.WriteLine($"STEP surfaces: {tris} tri, {triAreaMm:0.#} mm^2 -> " +
+                              $"~{voxFull:N0} voxels at full density, " +
+                              $"~{voxDefault:N0} at the 0.6 default");
+
+            CheckTrue("surfaces were triangulated", tris > 100);
+            CheckTrue("the fill at the DEFAULT density fits the budget alongside everything else",
+                      voxDefault > 0 && voxDefault + voxels < 120_000);
+            CheckTrue("full density is still affordable on a board this size",
+                      voxFull + voxels < 150_000);
+
             var designators = new SortedSet<string>();
             foreach (var solid in board.Solids)
                 if (solid.Designator.Length > 0) designators.Add(solid.Designator);

@@ -36,6 +36,22 @@ namespace EDes
         public uint    Accent     { get; init; } = 0xFF00CCFF;   // 0xAARRGGBB UI accent
     }
 
+    /// <summary>One row of the legend the shell overlays on the preview: a swatch and
+    /// what it means. Colour is packed 0xRRGGBB, matching everything else drawn.</summary>
+    public readonly struct LegendRow
+    {
+        public readonly string Label;
+        public readonly int    Colour;
+        /// <summary>Loaded but not currently drawn — shown greyed so it is clear the
+        /// layer EXISTS and is hidden, rather than simply missing.</summary>
+        public readonly bool   Hidden;
+
+        public LegendRow(string label, int colour, bool hidden = false)
+        {
+            Label = label; Colour = colour; Hidden = hidden;
+        }
+    }
+
     /// <summary>Engine services handed to the game in Init().</summary>
     public sealed class GameContext
     {
@@ -72,5 +88,13 @@ namespace EDes
         /// clicked and then rebuilds the game's settings panel, which is what lets a
         /// game show only the settings belonging to the mode on screen.</summary>
         int ActiveMode { get => 0; set { } }
+
+        /// <summary>What is currently on screen and in what colour, for the overlay in
+        /// the preview's corner. Empty (the default) means no legend is drawn.
+        ///
+        /// MUST return an immutable snapshot: the shell reads this from the UI thread
+        /// while the game thread is free to rebuild it, so handing back a live list
+        /// would tear or throw mid-enumeration. Swap a fresh array in instead.</summary>
+        IReadOnlyList<LegendRow> Legend => Array.Empty<LegendRow>();
     }
 }

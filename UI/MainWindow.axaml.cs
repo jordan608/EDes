@@ -29,6 +29,7 @@ using Avalonia.Platform;
 using Avalonia.Threading;
 using System;
 using System.Collections.Generic;
+using System.Text;
 using Voxon;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -328,6 +329,8 @@ namespace EDes.UI
 
             // The volume Tab key changes the mode behind the window back — notice it.
             if (_game != null && _game.ActiveMode != _shownMode) RefreshModePanel();
+
+            RefreshLegend();
         }
 
         // ── Splash ─────────────────────────────────────────────────────────────
@@ -367,6 +370,66 @@ namespace EDes.UI
         private void OnSaveClick (object? s, RoutedEventArgs e) => _s.Save();
         private void OnLoadClick (object? s, RoutedEventArgs e) { _s.Load(); RebuildActivePanel(); }
         private void OnResetClick(object? s, RoutedEventArgs e) { _s.Reset(); RebuildActivePanel(); }
+
+        // ── Legend overlay ────────────────────────────────────────────────────
+        // Rebuilt only when the CONTENT changes, not every tick. The status timer fires
+        // several times a second and this sits over a live preview, so rebuilding the
+        // visual tree unconditionally would churn layout for no visible difference.
+        private string _legendKey = "\u0001";
+
+        private void RefreshLegend()
+        {
+            var rows = _game?.Legend;
+            if (rows == null || rows.Count == 0)
+            {
+                if (LegendPanel.IsVisible) LegendPanel.IsVisible = false;
+                _legendKey = "";
+                return;
+            }
+
+            var sb = new StringBuilder(rows.Count * 16);
+            foreach (var r in rows)
+                sb.Append(r.Label).Append('|').Append(r.Colour).Append(r.Hidden ? '-' : '+')
+                  .Append(';');
+            string key = sb.ToString();
+            if (key == _legendKey) { LegendPanel.IsVisible = true; return; }
+            _legendKey = key;
+
+            LegendItems.Children.Clear();
+            foreach (var r in rows)
+            {
+                var swatch = new Border
+                {
+                    Width = 11, Height = 11,
+                    CornerRadius = new CornerRadius(2),
+                    Background = new SolidColorBrush(Color.FromRgb(
+                        (byte)((r.Colour >> 16) & 0xFF),
+                        (byte)((r.Colour >> 8)  & 0xFF),
+                        (byte)(r.Colour         & 0xFF))),
+                    BorderBrush = new SolidColorBrush(Color.Parse("#50FFFFFF")),
+                    BorderThickness = new Thickness(1),
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                    // A hidden layer keeps its colour but loses its solidity, so the row
+                    // still says WHICH colour that layer is when it comes back.
+                    Opacity = r.Hidden ? 0.25 : 1.0,
+                };
+
+                var label = new TextBlock
+                {
+                    Text       = r.Label,
+                    FontSize   = 10,
+                    Opacity    = r.Hidden ? 0.45 : 0.95,
+                    FontFamily = new FontFamily("Consolas,Menlo,monospace"),
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                };
+
+                var row = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, Spacing = 6 };
+                row.Children.Add(swatch);
+                row.Children.Add(label);
+                LegendItems.Children.Add(row);
+            }
+            LegendPanel.IsVisible = true;
+        }
 
         // ─────────────────────────────────────────────────────────────────────
         // Mode headers
@@ -487,10 +550,6 @@ namespace EDes.UI
             AddToggle(rend, "Show debug border", _s.ShowDebugBorder,           v => _s.ShowDebugBorder = v);
             AddSlider(rend, "Voxel density",    0.25, 3.0, _s.VoxelDensity,    v => _s.VoxelDensity    = (float)v, "F2");
             AddInfo(rend, "Voxel density re-meshes the model (higher = finer, more voxels).");
-
-            var perf = _ui.AddHeader(stack, "Performance");
-            AddToggle(perf, "Cap to 30 VPS", _s.CapVps30, v => _s.CapVps30 = v);
-            AddInfo(perf, "Display tops out at 30 VPS. Cap the loop to save CPU/heat.");
 
             var view = _ui.AddHeader(stack, "View");
             AddInfo(view, "Drag the preview to turn the volume. Wheel zooms the model, " +

@@ -45,6 +45,8 @@ namespace EDes.Pcb
         public bool  ShowCad;          // STEP solids, as edge wireframes
         public float CadBrightness;    // separate from Brightness: CAD sits above the board
         public bool  CadLighting;      // shade edges by their adjacent-face normals
+        public bool  CadSurfaces;     // flat-shaded fill on the planar faces
+        public float CadSurfaceDensity;// 1 = one sample per voxel; lower is sparser
         public float CadAmbient;       // floor brightness, so unlit edges never vanish
         public float CadLightX, CadLightY, CadLightZ;   // light direction, board frame
         public bool  ShowCursor;
@@ -120,6 +122,8 @@ namespace EDes.Pcb
             if (opt.ShowVias)  DrawVias(batch, cam, board, opt, cx, cy, z0, Spacing, slots);
             if (opt.ShowHoles) DrawHoles(batch, cam, board, cx, cy, z0, Spacing, slots, opt);
             if (opt.ShowCad)    DrawCadSolids(batch, cam, board, opt, cx, cy);
+            if (opt.ShowCad && opt.CadSurfaces)
+                DrawCadFaces(batch, cam, board, opt, cx, cy);
             if (opt.ShowMeshes) DrawMeshes(batch, cam, board, cx, cy, opt);
             if (opt.ShowComponents) DrawComponents(batch, hud, cam, board, opt, cx, cy, z0, slots);
             if (opt.ShowCursor) DrawCursor(batch, cam, board, opt, cx, cy, z0, Spacing, slots);
@@ -433,6 +437,102 @@ namespace EDes.Pcb
                     if (batch.BudgetHit) return;
                 }
             }
+        }
+
+        // ── CAD surfaces: flat shading ────────────────────────────────────────
+        // Flat shading in the strict sense: ONE normal per face, so every sample on a
+        // face takes the same brightness and the facets read as facets. That is what
+        // makes a solid legible here — a smooth-shaded gradient would fight the display,
+        // which has no viewpoint for a highlight to be consistent with.
+        //
+        // Lighting uses SIGNED max(0, N.L), unlike the edge pass which uses |N.L|. The
+        // difference is deliberate: an edge is shared by two faces pointing opposite ways
+        // so its sign is meaningless, whereas a face has one outward normal, and the sign
+        // is exactly what makes a face turned away from the light go dark. That darkening
+        // IS the shadowing — it is self-shading from the face angle, not cast shadows;
+        // casting would need occlusion tests, and an occluder means nothing on a display
+        // you can see straight through.
+        //
+        // Cost: the fill is by far the most expensive thing on the board. Measured on a
+        // real 2-layer export, 1143 mm^2 of planar face is ~42,000 voxels at full density,
+        // so the density knob is not decoration.
+        private void DrawCadFaces(VoxelBatch batch, SceneCamera cam, PcbBoard board,
+                                  in PcbViewOptions opt, float cx, float cy)
+        {
+            float bright = opt.CadBrightness > 0f ? opt.CadBrightness : opt.Brightness;
+
+            float lx = opt.CadLightX, ly = opt.CadLightY, lz = opt.CadLightZ;
+            float ll = MathF.Sqrt(lx * lx + ly * ly + lz * lz);
+            if (ll < 1e-6f) { lx = 0f; ly = 0f; lz = 1f; ll = 1f; }
+            lx /= ll; ly /= ll; lz /= ll;
+
+            float ambient = Math.Clamp(opt.CadAmbient, 0f, 1f);
+            float density = Math.Clamp(opt.CadSurfaceDensity <= 0f ? 0.6f
+                                                                  : opt.CadSurfaceDensity,
+                                       0.1f, 2f);
+            float step = batch.Spacing / density;
+
+            foreach (var solid in board.Solids)
+            {
+                if (!solid.Visible || solid.Faces.Count == 0) continue;
+
+                int baseCol = Palette.Scale(solid.Colour, bright);
+
+                foreach (var face in solid.Faces)
+                {
+                    float shade = ambient;
+                    if (opt.CadLighting)
+                    {
+                        float ndl = face.NX * lx + face.NY * ly + face.NZ * lz;
+                        if (ndl < 0f) ndl = 0f;
+                        shade = ambient + (1f - ambient) * ndl;
+                    }
+                    int col = Palette.Scale(baseCol, shade);
+
+                    for (int t = 0; t < face.TriCount; t++)
+                    {
+                        int i = t * 3;
+                        var a = cam.Transform(Wx(face.X[i],     cx), Wy(face.Y[i],     cy), -face.Z[i]     * Scale);
+                        var b = cam.Transform(Wx(face.X[i + 1], cx), Wy(face.Y[i + 1], cy), -face.Z[i + 1] * Scale);
+                        var c = cam.Transform(Wx(face.X[i + 2], cx), Wy(face.Y[i + 2], cy), -face.Z[i + 2] * Scale);
+                        FillTri(batch, a, b, c, col, step);
+                        if (batch.BudgetHit) return;
+                    }
+                }
+            }
+        }
+
+        /// <summary>Point-fill one triangle on a barycentric lattice.
+        ///
+        /// Rows are chosen from the LONGEST edge, so a long thin triangle still gets
+        /// samples along its length instead of a handful bunched at one end — sizing from
+        /// area would do exactly that on the sliver triangles ear clipping produces.</summary>
+        private static void FillTri(VoxelBatch batch, point3d a, point3d b, point3d c,
+                                    int col, float step)
+        {
+            float ab = Dist(a, b), bc = Dist(b, c), ca = Dist(c, a);
+            float longest = MathF.Max(ab, MathF.Max(bc, ca));
+            if (longest <= 1e-6f) { batch.Add(a, col); return; }
+
+            int n = (int)MathF.Ceiling(longest / MathF.Max(1e-6f, step));
+            n = Math.Clamp(n, 1, 512);
+
+            for (int r = 0; r <= n; r++)
+            for (int s = 0; s <= n - r; s++)
+            {
+                float u = r / (float)n;
+                float v = s / (float)n;
+                float w = 1f - u - v;
+                if (!batch.Add(a.x * w + b.x * u + c.x * v,
+                               a.y * w + b.y * u + c.y * v,
+                               a.z * w + b.z * u + c.z * v, col) && batch.BudgetHit) return;
+            }
+        }
+
+        private static float Dist(point3d p, point3d q)
+        {
+            float dx = p.x - q.x, dy = p.y - q.y, dz = p.z - q.z;
+            return MathF.Sqrt(dx * dx + dy * dy + dz * dz);
         }
 
         // ── Mechanical meshes ─────────────────────────────────────────────────

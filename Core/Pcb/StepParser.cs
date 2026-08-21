@@ -203,7 +203,8 @@ namespace EDes.Pcb
         //  Public entry point
         // ─────────────────────────────────────────────────────────────────────
 
-        public static CadModel? TryLoad(string path, List<string> notes)
+        public static CadModel? TryLoad(string path, List<string> notes,
+                                        bool wantSurfaces = true)
         {
             var model = new CadModel { SourceName = Path.GetFileName(path) };
             try
@@ -217,7 +218,7 @@ namespace EDes.Pcb
                 }
 
                 double unitMm = FindLengthUnitMm(file, model);
-                var ctx = new BuildContext(file, model, unitMm);
+                var ctx = new BuildContext(file, model, unitMm, wantSurfaces);
                 ctx.Build();
 
                 model.RecomputeBounds();
@@ -572,6 +573,8 @@ namespace EDes.Pcb
             private readonly Dictionary<int, List<(int child, Xf xf)>> _children = new();
 
             private int _splineApprox, _otherApprox, _skippedSolids;
+            private int _facesWithHoles, _facesTooBig, _facesUntriangulated;
+            private readonly bool _wantFaces;
             private readonly HashSet<int> _seenEdgeCurves = new();
 
             // Edge id → summed adjacent-face normals, and the order edges were first
@@ -579,9 +582,9 @@ namespace EDes.Pcb
             private readonly Dictionary<int, (double x, double y, double z)> _edgeNormal = new();
             private readonly List<int> _edgeOrder = new();
 
-            public BuildContext(StepFile f, CadModel m, double unitMm)
+            public BuildContext(StepFile f, CadModel m, double unitMm, bool wantFaces)
             {
-                _f = f; _m = m; _unit = unitMm;
+                _f = f; _m = m; _unit = unitMm; _wantFaces = wantFaces;
             }
 
             public void Build()
@@ -628,6 +631,13 @@ namespace EDes.Pcb
                     _m.Notes.Add($"{_otherApprox} edge(s) of unsupported curve type drawn as chords");
                 if (_skippedSolids > 0)
                     _m.Notes.Add($"{_skippedSolids} solid(s) had no usable edges");
+                if (_facesWithHoles > 0)
+                    _m.Notes.Add($"{_facesWithHoles} face(s) with holes left unfilled " +
+                                 "(filling them would cover the openings)");
+                if (_facesTooBig > 0)
+                    _m.Notes.Add($"{_facesTooBig} face(s) had too complex a boundary to fill");
+                if (_facesUntriangulated > 0)
+                    _m.Notes.Add($"{_facesUntriangulated} face(s) could not be triangulated");
             }
 
             // ── Assembly ──────────────────────────────────────────────────────
@@ -885,6 +895,8 @@ namespace EDes.Pcb
                     bool haveN = PlaneNormal(face.Arg(2).AsRef,
                                              out double nx, out double ny, out double nz);
 
+                    if (_wantFaces && haveN) BuildPlanarFace(face, nx, ny, nz, xf, cad);
+
                     // ADVANCED_FACE's same_sense flag flips the outward direction. Ignoring
                     // it lights half the faces from inside the solid.
                     if (haveN && face.Arg(3).Kind == VKind.Enum && face.Arg(3).Str == "F")
@@ -928,6 +940,189 @@ namespace EDes.Pcb
                 }
             }
 
+            /// <summary>Triangulate one planar face for flat shading.
+            ///
+            /// The boundary is already available as tessellated edges, so this is polygon
+            /// triangulation rather than surface evaluation — which is why it needs no
+            /// geometry kernel. Steps: chain the loop in order (honouring each oriented
+            /// edge's direction, or the polygon comes out as a star), project onto the
+            /// plane's own 2D basis, then ear-clip.
+            ///
+            /// Faces with more than one bound are SKIPPED, not filled. A second bound is a
+            /// hole, and filling the outer boundary while ignoring it would paste solid
+            /// material over every clearance and pad opening on the board — confidently
+            /// wrong beats absent here.</summary>
+            private void BuildPlanarFace(Rec face, double nx, double ny, double nz,
+                                         in Xf xf, CadSolid cad)
+            {
+                var bounds = face.Arg(1).AsList;
+                if (bounds.Count == 0) return;
+                if (bounds.Count > 1) { _facesWithHoles++; return; }
+
+                var bound = _f.GetAny(bounds[0].AsRef, "FACE_BOUND", "FACE_OUTER_BOUND");
+                if (bound == null) return;
+                var loop = _f.GetAny(bound.Arg(1).AsRef, "EDGE_LOOP");
+                if (loop == null) return;
+
+                // ── Chain the boundary ────────────────────────────────────────
+                var px = new List<double>();
+                var py = new List<double>();
+                var pz = new List<double>();
+
+                foreach (var oe in loop.Arg(1).AsList)
+                {
+                    var orient = _f.GetAny(oe.AsRef, "ORIENTED_EDGE");
+                    if (orient == null) return;
+                    if (!EdgePoints(orient.Arg(3).AsRef, out var ex, out var ey, out var ez))
+                        return;
+
+                    bool forward = orient.Arg(4).Kind != VKind.Enum || orient.Arg(4).Str == "T";
+                    int n = ex.Length;
+                    for (int i = 0; i < n; i++)
+                    {
+                        int k = forward ? i : n - 1 - i;
+                        // Skip the vertex shared with the previous edge, or every joint
+                        // becomes a zero-length span and the ear clipper stalls on it.
+                        if (px.Count > 0 &&
+                            Math.Abs(px[px.Count - 1] - ex[k]) < 1e-9 &&
+                            Math.Abs(py[py.Count - 1] - ey[k]) < 1e-9 &&
+                            Math.Abs(pz[pz.Count - 1] - ez[k]) < 1e-9) continue;
+                        px.Add(ex[k]); py.Add(ey[k]); pz.Add(ez[k]);
+                    }
+                }
+
+                // Drop a closing duplicate of the very first point.
+                if (px.Count > 2 &&
+                    Math.Abs(px[0] - px[px.Count - 1]) < 1e-9 &&
+                    Math.Abs(py[0] - py[py.Count - 1]) < 1e-9 &&
+                    Math.Abs(pz[0] - pz[pz.Count - 1]) < 1e-9)
+                {
+                    px.RemoveAt(px.Count - 1); py.RemoveAt(py.Count - 1); pz.RemoveAt(pz.Count - 1);
+                }
+
+                int cnt = px.Count;
+                if (cnt < 3) return;
+                if (cnt > 4096) { _facesTooBig++; return; }
+
+                // ── Project onto the plane ────────────────────────────────────
+                // Any two perpendicular axes in the plane will do; only the triangle
+                // topology comes out of the 2D step, and that is basis-independent.
+                double ux, uy, uz;
+                if (Math.Abs(nz) < 0.9) { ux = -ny; uy = nx; uz = 0; }
+                else                    { ux = 0;   uy = -nz; uz = ny; }
+                double ul = Math.Sqrt(ux * ux + uy * uy + uz * uz);
+                if (ul < 1e-12) return;
+                ux /= ul; uy /= ul; uz /= ul;
+                double vx = ny * uz - nz * uy;
+                double vy = nz * ux - nx * uz;
+                double vz = nx * uy - ny * ux;
+
+                var u2 = new double[cnt];
+                var v2 = new double[cnt];
+                for (int i = 0; i < cnt; i++)
+                {
+                    u2[i] = px[i] * ux + py[i] * uy + pz[i] * uz;
+                    v2[i] = px[i] * vx + py[i] * vy + pz[i] * vz;
+                }
+
+                // Ear clipping assumes CCW; a CW loop would report every ear as invalid.
+                double area2 = 0;
+                for (int i = 0; i < cnt; i++)
+                {
+                    int j = (i + 1) % cnt;
+                    area2 += u2[i] * v2[j] - u2[j] * v2[i];
+                }
+                var order = new int[cnt];
+                for (int i = 0; i < cnt; i++) order[i] = area2 < 0 ? cnt - 1 - i : i;
+
+                var tris = EarClip(u2, v2, order);
+                if (tris.Count == 0) { _facesUntriangulated++; return; }
+
+                // ── Emit ──────────────────────────────────────────────────────
+                var fx = new float[tris.Count];
+                var fy = new float[tris.Count];
+                var fz = new float[tris.Count];
+                for (int i = 0; i < tris.Count; i++)
+                {
+                    int vi = tris[i];
+                    xf.Apply(px[vi], py[vi], pz[vi], out double ox, out double oy, out double oz);
+                    fx[i] = (float)ox; fy[i] = (float)oy; fz[i] = (float)oz;
+
+                    if (fx[i] < cad.MinX) cad.MinX = fx[i]; if (fx[i] > cad.MaxX) cad.MaxX = fx[i];
+                    if (fy[i] < cad.MinY) cad.MinY = fy[i]; if (fy[i] > cad.MaxY) cad.MaxY = fy[i];
+                    if (fz[i] < cad.MinZ) cad.MinZ = fz[i]; if (fz[i] > cad.MaxZ) cad.MaxZ = fz[i];
+                }
+
+                cad.Faces.Add(new CadFace
+                {
+                    X = fx, Y = fy, Z = fz,
+                    TriCount = tris.Count / 3,
+                    NX = (float)(xf.XX * nx + xf.XY * ny + xf.XZ * nz),
+                    NY = (float)(xf.YX * nx + xf.YY * ny + xf.YZ * nz),
+                    NZ = (float)(xf.ZX * nx + xf.ZY * ny + xf.ZZ * nz),
+                });
+            }
+
+            /// <summary>Ear clipping. Returns vertex indices, 3 per triangle.
+            ///
+            /// Chosen over a fan because CAD faces are routinely non-convex — an L-shaped
+            /// pour or a bracket outline fans into triangles that lie outside the shape.
+            /// The bail-out counter matters: a self-intersecting or degenerate loop (STEP
+            /// exports do contain them) otherwise spins here forever.</summary>
+            private static List<int> EarClip(double[] u, double[] v, int[] order)
+            {
+                var result = new List<int>();
+                var poly = new List<int>(order);
+                int guard = poly.Count * poly.Count + 16;
+
+                while (poly.Count > 3 && guard-- > 0)
+                {
+                    bool clipped = false;
+                    for (int i = 0; i < poly.Count; i++)
+                    {
+                        int i0 = poly[(i + poly.Count - 1) % poly.Count];
+                        int i1 = poly[i];
+                        int i2 = poly[(i + 1) % poly.Count];
+
+                        double cross = (u[i1] - u[i0]) * (v[i2] - v[i0])
+                                     - (v[i1] - v[i0]) * (u[i2] - u[i0]);
+                        if (cross <= 0) continue;                 // reflex, not an ear
+
+                        bool contains = false;
+                        for (int k = 0; k < poly.Count && !contains; k++)
+                        {
+                            int p = poly[k];
+                            if (p == i0 || p == i1 || p == i2) continue;
+                            if (PointInTri(u[p], v[p], u[i0], v[i0], u[i1], v[i1], u[i2], v[i2]))
+                                contains = true;
+                        }
+                        if (contains) continue;
+
+                        result.Add(i0); result.Add(i1); result.Add(i2);
+                        poly.RemoveAt(i);
+                        clipped = true;
+                        break;
+                    }
+                    if (!clipped) break;      // no ear found: degenerate loop, take what we have
+                }
+
+                if (poly.Count == 3) { result.Add(poly[0]); result.Add(poly[1]); result.Add(poly[2]); }
+                return result;
+            }
+
+            private static bool PointInTri(double px, double py,
+                                           double ax, double ay,
+                                           double bx, double by,
+                                           double cx, double cy)
+            {
+                double d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by);
+                double d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy);
+                double d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay);
+                bool neg = d1 < 0 || d2 < 0 || d3 < 0;
+                bool pos = d1 > 0 || d2 > 0 || d3 > 0;
+                return !(neg && pos);
+            }
+
             /// <summary>Outward normal of a PLANE surface — its placement's own Z axis.
             /// Returns false for anything else, including cylinders and NURBS, whose
             /// normal varies across the face and so cannot be reduced to one value.</summary>
@@ -963,7 +1158,9 @@ namespace EDes.Pcb
                 var circle = _f.GetAny(geomId, "CIRCLE");
                 if (circle != null)
                 {
-                    AddArc(circle, sx, sy, sz, ex, ey, ez, sameSense, xf, cad);
+                    ArcPoints(circle, sx, sy, sz, ex, ey, ez, sameSense,
+                              out var axs, out var ays, out var azs);
+                    AddPolyline(axs, ays, azs, xf, cad);
                     return;
                 }
 
@@ -980,6 +1177,35 @@ namespace EDes.Pcb
                 else _otherApprox++;
 
                 AddPolyline(new[] { sx, ex }, new[] { sy, ey }, new[] { sz, ez }, xf, cad);
+            }
+
+            /// <summary>An edge's tessellated points in FILE space, with no side effects.
+            /// Shared by the edge emitter and the face builder — a face's boundary is
+            /// exactly its edges, so tessellating them twice would risk the fill and the
+            /// wireframe disagreeing along the same edge.</summary>
+            private bool EdgePoints(int ecId, out double[] xs, out double[] ys, out double[] zs)
+            {
+                xs = ys = zs = Array.Empty<double>();
+
+                var ec = _f.GetAny(ecId, "EDGE_CURVE");
+                if (ec == null) return false;
+                if (!VertexPoint(ec.Arg(1).AsRef, out double sx, out double sy, out double sz))
+                    return false;
+                if (!VertexPoint(ec.Arg(2).AsRef, out double ex, out double ey, out double ez))
+                    return false;
+
+                int  geomId    = ec.Arg(3).AsRef;
+                bool sameSense = ec.Arg(4).Kind != VKind.Enum || ec.Arg(4).Str == "T";
+
+                var circle = _f.GetAny(geomId, "CIRCLE");
+                if (circle != null)
+                {
+                    ArcPoints(circle, sx, sy, sz, ex, ey, ez, sameSense, out xs, out ys, out zs);
+                    return true;
+                }
+
+                xs = new[] { sx, ex }; ys = new[] { sy, ey }; zs = new[] { sz, ez };
+                return true;
             }
 
             private bool VertexPoint(int vId, out double x, out double y, out double z)
@@ -1064,10 +1290,11 @@ namespace EDes.Pcb
             /// axis has two candidates that differ by 2*pi minus each other, and taking
             /// the wrong one draws the complement — a fillet becomes a three-quarter
             /// hoop sticking out of the part. The edge sense picks which.</summary>
-            private void AddArc(Rec circle,
-                                double sx, double sy, double sz,
-                                double ex, double ey, double ez,
-                                bool sameSense, in Xf xf, CadSolid cad)
+            private void ArcPoints(Rec circle,
+                                   double sx, double sy, double sz,
+                                   double ex, double ey, double ez,
+                                   bool sameSense,
+                                   out double[] outX, out double[] outY, out double[] outZ)
             {
                 double r = circle.Arg(2).AsNum * _unit;
                 Xf pl = PlacementXf(circle.Arg(1).AsRef);
@@ -1079,7 +1306,7 @@ namespace EDes.Pcb
 
                 if (r <= 1e-9)
                 {
-                    AddPolyline(new[] { sx, ex }, new[] { sy, ey }, new[] { sz, ez }, xf, cad);
+                    outX = new[] { sx, ex }; outY = new[] { sy, ey }; outZ = new[] { sz, ez };
                     return;
                 }
 
@@ -1125,7 +1352,7 @@ namespace EDes.Pcb
                     ys[i] = cy + ay * ct + by * st;
                     zs[i] = cz + az * ct + bz * st;
                 }
-                AddPolyline(xs, ys, zs, xf, cad);
+                outX = xs; outY = ys; outZ = zs;
             }
 
             // Carried from AddEdgeCurve to AddPolyline rather than threaded through every

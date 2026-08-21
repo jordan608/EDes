@@ -125,6 +125,7 @@ namespace EDes
             HandleKeys(dt);
             DriveCamera(input, dt);
             Sync();
+            RebuildLegend(dt);
 
             if (_s.PcbImportRequested) ImportBoard();
 
@@ -592,6 +593,8 @@ namespace EDes
                 ShowCad       = _s.PcbCad,
                 CadBrightness = _s.PcbCadBright,
                 CadLighting   = _s.PcbCadLighting,
+                CadSurfaces   = _s.PcbCadSurfaces,
+                CadSurfaceDensity = _s.PcbCadSurfaceDensity,
                 CadAmbient    = _s.PcbCadAmbient,
                 CadLightX     = _s.PcbCadLightX,
                 CadLightY     = _s.PcbCadLightY,
@@ -765,6 +768,61 @@ namespace EDes
         }
 
         // ── Settings tab ──────────────────────────────────────────────────────
+
+        // Immutable snapshot handed to the shell, swapped by reference. Rebuilt on the
+        // GAME thread; read on the UI thread. Never mutated in place — see IVoxonGame.Legend.
+        private volatile LegendRow[] _legend = Array.Empty<LegendRow>();
+        private float _legendAge;
+
+        public IReadOnlyList<LegendRow> Legend => _legend;
+
+        /// <summary>Rebuild the legend, at most a few times a second.
+        ///
+        /// Time-based rather than dirty-flagged on purpose: what belongs in the legend
+        /// depends on the mode, the loaded board, per-layer visibility, the isolate
+        /// setting and several toggles, and a dirty flag that misses one of those shows
+        /// the user a stale legend — which is worse than no legend, because they will
+        /// believe it. One small array twice a second is not worth outsmarting.</summary>
+        private void RebuildLegend(float dt)
+        {
+            _legendAge += dt;
+            if (_legendAge < 0.4f) return;
+            _legendAge = 0f;
+
+            var rows = new List<LegendRow>();
+
+            if ((EDesMode)_s.Mode == EDesMode.Pcb && _board.HasGeometry)
+            {
+                for (int li = 0; li < _board.Layers.Count; li++)
+                {
+                    var layer = _board.Layers[li];
+                    bool isolatedOut = _s.PcbIsolate >= 0 && _s.PcbIsolate != li;
+                    bool shown = layer.Visible && !isolatedOut;
+                    rows.Add(new LegendRow($"{layer.Kind}  {layer.Name}", layer.Colour, !shown));
+                }
+
+                if (_s.PcbVias && _board.Holes.Count > 0)
+                {
+                    int copper = _board.CopperLayerCount();
+                    int blind = 0, through = 0;
+                    foreach (var h in _board.Holes)
+                    {
+                        if (!PcbBoard.IsVia(h, _s.PcbViaMaxDia)) continue;
+                        if (h.IsBlind(copper)) blind++; else through++;
+                    }
+                    if (through > 0) rows.Add(new LegendRow($"via (through) x{through}", 0xE8A020));
+                    if (blind   > 0) rows.Add(new LegendRow($"via (blind/buried) x{blind}", 0x40D0E8));
+                }
+
+                if (_s.PcbCad && _board.Solids.Count > 0)
+                    rows.Add(new LegendRow($"STEP wireframe x{_board.Solids.Count}", 0x9FC5E8));
+
+                if (_s.PcbMeshes && _board.Meshes.Count > 0)
+                    rows.Add(new LegendRow($"mesh x{_board.Meshes.Count}", 0x66D9C0));
+            }
+
+            _legend = rows.ToArray();
+        }
 
         /// <summary>The mode headers the shell draws across the top of the window.
         /// Order must match EDesMode.</summary>
@@ -949,6 +1007,10 @@ namespace EDes
             ui.AddToggle(sec, "STEP / CAD wireframe", _s.PcbCad,     v => _s.PcbCad = v);
             ui.AddSlider(sec, "CAD brightness", 0.2, 2.0, _s.PcbCadBright,
                          v => _s.PcbCadBright = (float)v, "F2");
+            ui.AddToggle(sec, "CAD flat-shaded surfaces", _s.PcbCadSurfaces,
+                         v => _s.PcbCadSurfaces = v);
+            ui.AddSlider(sec, "Surface fill density", 0.1, 2.0, _s.PcbCadSurfaceDensity,
+                         v => _s.PcbCadSurfaceDensity = (float)v, "F2");
             ui.AddToggle(sec, "CAD lighting", _s.PcbCadLighting, v => _s.PcbCadLighting = v);
             ui.AddSlider(sec, "CAD ambient", 0, 1.0, _s.PcbCadAmbient,
                          v => _s.PcbCadAmbient = (float)v, "F2");
@@ -975,8 +1037,12 @@ namespace EDes
                     edges += s.Edges.Count;
                     lit   += s.NormalCount;
                 }
+                int tris = 0, faces = 0;
+                foreach (var s in _board.Solids)
+                    foreach (var fc in s.Faces) { faces++; tris += fc.TriCount; }
                 return $"{_board.Solids.Count} CAD solid(s), {linked} matched to a designator, "
-                     + $"{pts} edge point(s), {lit}/{edges} edge(s) shadeable";
+                     + $"{pts} edge point(s), {lit}/{edges} edge(s) shadeable, "
+                     + $"{faces} planar face(s) / {tris} triangle(s)";
             }, 0.5);
             ui.AddSlider(sec, "Via max diameter (mm)", 0.1, 2.0, _s.PcbViaMaxDia,
                          v => _s.PcbViaMaxDia = (float)v, "F2");

@@ -132,6 +132,16 @@ namespace EDes
         /// stays fixed to the part as the scene is rotated — which is what makes the
         /// shading read as the part's own form rather than as a rotating gradient.</summary>
         public volatile bool   PcbCadLighting = true;
+
+        /// <summary>Flat-shaded fill on the STEP model's planar faces, and how densely.
+        ///
+        /// Density is samples per voxel: 1.0 fills solid, lower is sparser. It defaults
+        /// below 1 because the fill is the most expensive thing on a board -- roughly
+        /// 42,000 voxels for the 1143 mm2 of planar face on a real 2-layer export at full
+        /// density -- and because the display is transparent, so a solid fill also shows
+        /// its own back faces through its front.</summary>
+        public volatile bool   PcbCadSurfaces = true;
+        public volatile float  PcbCadSurfaceDensity = 0.6f;
         public volatile float  PcbCadAmbient  = 0.35f;
         public volatile float  PcbCadLightX   = 0.3f;
         public volatile float  PcbCadLightY   = 0.2f;

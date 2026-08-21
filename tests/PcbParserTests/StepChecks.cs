@@ -336,6 +336,48 @@ END-ISO-10303-21;
         Ok($"most real edges are shadeable ({big.TotalNormals}/{big.TotalEdges})",
            big.TotalNormals > big.TotalEdges / 2);
 
+        // ── Flat-shaded surfaces ─────────────────────────────────────────────
+        int faceCount = 0, degenerate = 0;
+        double triArea = 0;
+        foreach (var sol in big.Solids)
+            foreach (var fc in sol.Faces)
+            {
+                faceCount++;
+                double nl = Math.Sqrt(fc.NX * fc.NX + fc.NY * fc.NY + fc.NZ * fc.NZ);
+                if (Math.Abs(nl - 1.0) > 1e-3) degenerate++;
+                for (int t = 0; t < fc.TriCount; t++)
+                {
+                    int i = t * 3;
+                    double e1x = fc.X[i+1]-fc.X[i], e1y = fc.Y[i+1]-fc.Y[i], e1z = fc.Z[i+1]-fc.Z[i];
+                    double e2x = fc.X[i+2]-fc.X[i], e2y = fc.Y[i+2]-fc.Y[i], e2z = fc.Z[i+2]-fc.Z[i];
+                    double crx = e1y*e2z - e1z*e2y, cry = e1z*e2x - e1x*e2z, crz = e1x*e2y - e1y*e2x;
+                    triArea += 0.5 * Math.Sqrt(crx*crx + cry*cry + crz*crz);
+                }
+            }
+        Console.WriteLine($"      planar faces filled {faceCount}, triangles {big.TotalTriangles}, " +
+                          $"total area {triArea:0.#} mm^2");
+        Ok($"planar faces were triangulated ({faceCount} faces, {big.TotalTriangles} tris)",
+           faceCount > 50 && big.TotalTriangles >= faceCount);
+        Ok($"every face normal is unit length ({degenerate} bad)", degenerate == 0);
+        Ok($"triangle area is physically plausible for a 16x35 mm board ({triArea:0.#} mm^2)",
+           triArea > 100 && triArea < 100_000);
+
+        // Every triangle must lie IN its face's plane, or the fill will not look flat.
+        double worstOffPlane = 0;
+        foreach (var sol in big.Solids)
+            foreach (var fc in sol.Faces)
+            {
+                if (fc.TriCount == 0) continue;
+                double d0 = fc.X[0]*fc.NX + fc.Y[0]*fc.NY + fc.Z[0]*fc.NZ;
+                for (int i = 0; i < fc.TriCount * 3; i++)
+                {
+                    double d = fc.X[i]*fc.NX + fc.Y[i]*fc.NY + fc.Z[i]*fc.NZ;
+                    worstOffPlane = Math.Max(worstOffPlane, Math.Abs(d - d0));
+                }
+            }
+        Ok($"all triangles lie in their face plane (worst {worstOffPlane:0.0000} mm)",
+           worstOffPlane < 0.01);
+
         Ok($"found the 27 B-rep solids ({big.SolidCount})", big.SolidCount >= 20);
         Ok($"edge count is the right order ({big.TotalEdges})",
            big.TotalEdges > 500 && big.TotalEdges < 2000);
