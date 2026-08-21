@@ -6,7 +6,7 @@
 //    EDUCATION  Four built-in circuits solved live (Ohm's law + series/parallel),
 //               drawn as a 3D schematic with heat-coloured resistors, animated
 //               current flow, per-component readouts, and the scope strip below.
-//    SCOPE      The oscilloscope full-size on the y = PlaneY plane: up to four
+//    SCOPE      The oscilloscope full-size on the flat HUD plane: up to four
 //               channels from USB (or a synthetic signal), software trigger,
 //               and a bench-style measurement row.
 //    PCB        An imported board (Gerber + Excellon + mechanical meshes) with
@@ -25,8 +25,11 @@
 //      HUD text. When the budget runs out the text is what disappears.
 //
 //  Axes: -Z is up, X is the layout's left/right, Y is depth. The HUD and scope
-//  live on the constant-Y plane PlaneY (default 0.1) and are NOT camera-
-//  transformed, so readouts stay legible while the scene is flown around.
+//  live on one constant-Y plane and are NOT camera-transformed, so readouts stay
+//  legible while the scene is flown around. That plane, and the text anchor on it,
+//  are set as FRACTIONS of the live display bounds (HudFracX/Y/Z) rather than in
+//  world units, so one setting lands in the same visual place on a VX2 and a
+//  VX2-XL instead of being a VX2 measurement baked into a default.
 // ═══════════════════════════════════════════════════════════════════════════
 
 using System;
@@ -537,7 +540,7 @@ namespace EDes
                 // Start at the centre rather than wherever it was left: the volume may have
                 // been re-fitted or a different board loaded since, and a probe resuming
                 // off in a corner reads as a broken control.
-                _s.InspectX = 0f; _s.InspectY = _s.PlaneY; _s.InspectZ = 0f;
+                _s.InspectX = 0f; _s.InspectY = _planeY; _s.InspectZ = 0f;
             }
             else _s.InspectInfo = "";
 
@@ -582,10 +585,30 @@ namespace EDes
         {
             get
             {
-                float y = _s.PlaneY;
+                float y = _planeY;
                 float inside = _radius * _radius - y * y;
-                float edge = inside > 0f ? MathF.Sqrt(inside) : _radius;
-                return -edge * 0.995f;
+                float edge = (inside > 0f ? MathF.Sqrt(inside) : _radius) * 0.995f;
+
+                // The fraction scales the HALF-WIDTH AT THE PLANE, so -1 is exactly the
+                // leftmost point text can occupy and 0 is the centre line -- on any
+                // display size, which is the whole reason the setting is a fraction.
+                return Math.Clamp(_s.HudFracX, -1f, 1f) * edge;
+            }
+        }
+
+        /// <summary>How far the whole HUD has been shifted sideways from its default
+        /// hard-left anchor. Centred blocks add this so they travel WITH the left-aligned
+        /// ones instead of staying nailed to x = 0 while everything else moves -- one
+        /// anchor setting that only moved half the text would be worse than none.</summary>
+        private float TextShiftX => TextLeftX - LeftEdgeX;
+
+        /// <summary>The leftmost x text can occupy at the HUD plane: the anchor's -1.</summary>
+        private float LeftEdgeX
+        {
+            get
+            {
+                float inside = _radius * _radius - _planeY * _planeY;
+                return -(inside > 0f ? MathF.Sqrt(inside) : _radius) * 0.995f;
             }
         }
 
@@ -605,7 +628,7 @@ namespace EDes
                            ? _board.SourceName
                            : "(no board)";
 
-            _hud.Text(new point3d(TextLeftX, _s.PlaneY, _topText.Row()), _textSize,
+            _hud.Text(new point3d(TextLeftX, _planeY, _topText.Row()), _textSize,
                       Palette.TextHilite, board.ToUpperInvariant() + "   " + mode);
         }
 
@@ -670,16 +693,16 @@ namespace EDes
 
             if (!probe.Hit)
             {
-                _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.TextDim,
+                _hud.Text(new point3d(x, _planeY, st.Row()), size, Palette.TextDim,
                           "move the probe over a layer or part");
                 _s.InspectInfo = "Inspection mode\nNothing under the probe.";
                 return;
             }
 
-            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.Trace,
+            _hud.Text(new point3d(x, _planeY, st.Row()), size, Palette.Trace,
                       probe.Kind.ToUpperInvariant() + "  " + probe.Title);
             foreach (string line in probe.Lines)
-                _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.Text, line);
+                _hud.Text(new point3d(x, _planeY, st.Row()), size, Palette.Text, line);
 
             var sb = new StringBuilder();
             sb.Append(probe.Kind.ToUpperInvariant()).Append("  ").Append(probe.Title).Append('\n');
@@ -703,7 +726,8 @@ namespace EDes
             // top, and a footer sized to the rows this mode will actually need. Blocks
             // then draw into their own band and cannot collide. See Sim/Layout.cs.
             int headerRows = _s.ShowHudPanel ? 2 : 0;
-            _layout = new FrameLayout(_zHalf, _step, headerRows, ReadoutRowsForMode());
+            _layout = new FrameLayout(_zHalf, _step, headerRows, ReadoutRowsForMode(),
+                                      _hudTopZ);
 
             // ONE cursor for every text block this frame, handed out first-come. That is
             // what keeps two blocks from writing into the same rows now that they all
@@ -815,9 +839,29 @@ namespace EDes
             //     -GetAspectRatioZ .. +GetAspectRatioZ   vertical (-Z is up)
             // Both are read every frame so one build fills a VX2 or a VX2-XL.
             float radius = ledHost.GetAspectRatioX(ref vs);
-            float zHalf  = ledHost.GetAspectRatioZ(ref vs);
             if (radius <= 0.1f) radius = 4f;                  // pre-init frame
-            if (zHalf  <= 0.1f) zHalf  = radius;
+
+            // The vertical half-height, which is NOT GetAspectRatioZ.
+            //
+            // LedHostCS.GetAspectRatioZ returns xsiz/64 -- literally the same expression as
+            // GetAspectRatioX, with a comment in the wrapper saying "Aspect Ratio Z is the
+            // same as X". That is the RADIUS. Trusting it told this app the volume was
+            // 3.92 units tall instead of 2 on a VX2, so the text band was anchored at
+            // z = -3.92: nearly twice as high as the top of the display. Because the bounds
+            // check inside VoxelBatch used the same wrong number, nothing clipped it and
+            // the rows simply drew outside the volume.
+            //
+            // Order of preference: vs.boundz (the SDK's own crop bound, "World units for
+            // cropping"), then ysiz/64 -- ysiz counts the VERTICAL LEDs, so it is the axis
+            // actually wanted -- then the ZHalfRatio setting as a last resort. Each is
+            // sanity-checked rather than trusted, because a wrong value here silently
+            // relocates every row of text.
+            float ratio  = Math.Clamp(_s.ZHalfRatio, 0.1f, 2f);
+            float fallbk = radius * ratio;
+            float zHalf  = fallbk;
+            if (Plausible(vs.boundz, radius))               zHalf = vs.boundz;
+            else if (Plausible(ledHost.GetAspectRatioY(ref vs), radius))
+                                                           zHalf = ledHost.GetAspectRatioY(ref vs);
 
             // 2% inset only, so a glyph's last voxel never lands exactly on the wall.
             _radius = radius * 0.98f;
@@ -838,12 +882,40 @@ namespace EDes
             // fixed floor of 0.04 was roughly a QUARTER of a voxel per cell at default
             // density, i.e. far past unreadable, so text could be configured into
             // illegibility and look like a rendering fault.
-            float minSize = _spacing / GLYPH_CELL_FRACTION *
+            // The floor comes from the PHYSICAL voxel pitch, not from _spacing.
+            //
+            // _spacing is pitch divided by the density slider, so using it made the text
+            // grow and shrink as the density was changed -- a render-budget knob silently
+            // resizing the UI, which is not what anyone reaches for it to do. And it was
+            // wrong on its own terms: a glyph's stroke is filled with nsub sub-steps of the
+            // cell, never at _spacing, so the density slider has no bearing on whether a
+            // character is legible. What does is how many REAL voxels one cell covers,
+            // which is fixed by the hardware.
+            float minSize = pitch / GLYPH_CELL_FRACTION *
                             MathF.Max(1f, _s.MinTextCellVoxels);
-            _textSize = MathF.Max(minSize, _s.TextSize * (radius / 4f));
+            float wanted  = _s.TextSize * (radius / 4f);
+            _textSize = MathF.Max(minSize, wanted);
             _step     = Hud.LineStep(_textSize);
-            _textFloored = _textSize > _s.TextSize * (radius / 4f) + 1e-6f;
+            _textFloored = _textSize > wanted + 1e-6f;
+
+            // The HUD plane and the top row, from the fraction settings. Resolved here so
+            // every text call this frame reads one already-scaled world value, and so the
+            // clamps live in one place rather than at twenty call sites.
+            _planeY  = Math.Clamp(_s.HudFracY, -0.95f, 0.95f) * _radius;
+            _hudTopZ = Math.Clamp(_s.HudFracZ, -1f, 1f) * _zHalf;
         }
+
+        /// <summary>Is this a believable vertical half-height for a volume of this
+        /// radius? Guards against a zero/unfilled SDK field and against a value that is
+        /// really the radius in disguise.</summary>
+        private static bool Plausible(float zHalf, float radius)
+            => zHalf > 0.1f && zHalf < radius * 0.99f;
+
+        /// <summary>Depth of the HUD/scope plane in world units, from HudFracY.</summary>
+        private float _planeY = 0.1f;
+
+        /// <summary>Z of the first text row in world units, from HudFracZ.</summary>
+        private float _hudTopZ = -2f;
 
         /// <summary>The single top-of-display text cursor for this frame. Every text block
         /// draws from it, which is what stops two of them landing in the same rows now that
@@ -908,13 +980,13 @@ namespace EDes
 
             // Footer: the law this circuit demonstrates, then its solved totals.
             ref TextStack f = ref _topText;
-            _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.TextHilite,
+            _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize, Palette.TextHilite,
                              _scene.Active.Law);
-            _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.Text,
+            _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize, Palette.Text,
                 "RT " + Hud.Eng(_scene.TotalResistance, "R") +
                 "   IT " + Hud.Eng(_scene.TotalCurrent, "A") +
                 "   PT " + Hud.Eng(_scene.TotalPower, "W"));
-            _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.TextDim,
+            _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize, Palette.TextDim,
                 "V " + Hud.Eng(_scene.SourceVolts, "V") + "   =   I X R");
         }
 
@@ -926,7 +998,7 @@ namespace EDes
 
             if (!_s.ShowLabels) return;
             ref TextStack f = ref _topText;
-            _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize * 0.85f, Palette.TextDim,
+            _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize * 0.85f, Palette.TextDim,
                 _scope.Identity.Length > 0 ? _scope.Identity : _scope.Status);
             if (_s.ScopeMeasurements) DrawScopeMeasurements(ref f);
         }
@@ -937,7 +1009,7 @@ namespace EDes
             // rows go in the reserved footer, not below the face.
             var panel = new ScopePanel
             {
-                Y       = _s.PlaneY,
+                Y       = _planeY,
                 X0      = -halfWidth,
                 X1      =  halfWidth,
                 ZTop    = zTop + _step,      // the face starts one row below the header
@@ -960,7 +1032,7 @@ namespace EDes
             {
                 if ((_s.ScopeChannelMask & (1 << ch)) == 0) continue;
                 var st = _scopeRenderer.Stats[ch];
-                _hud.Text(new point3d(-_radius * 0.88f, _s.PlaneY, f.Row()), _textSize,
+                _hud.Text(new point3d(TextLeftX, _planeY, f.Row()), _textSize,
                           ScopeRenderer.ChannelColour(ch),
                           "CH" + (ch + 1) +
                           "  VPP " + Hud.Eng(st.Vpp, "V") +
@@ -1015,6 +1087,12 @@ namespace EDes
                 CadLightX     = _s.PcbCadLightX,
                 CadLightY     = _s.PcbCadLightY,
                 CadLightZ     = _s.PcbCadLightZ,
+                CadPointLight = _s.PcbCadPointLight,
+                CadLightFx    = _s.PcbCadLightFx,
+                CadLightFy    = _s.PcbCadLightFy,
+                CadLightFz    = _s.PcbCadLightFz,
+                CadLightRange = _s.PcbCadLightRange,
+                CadShowLight  = _s.PcbCadShowLight,
                 ShowCursor   = _s.PcbCursor,
                 CursorXmm    = _s.PcbCursorX,
                 CursorYmm    = _s.PcbCursorY,
@@ -1034,17 +1112,17 @@ namespace EDes
 
             if (!_board.HasGeometry)
             {
-                _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.Warning,
+                _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize, Palette.Warning,
                                  "NO BOARD LOADED - SET A PATH IN THE PCB TAB");
                 return;
             }
 
-            _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.Text,
+            _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize, Palette.Text,
                 _board.WidthMm.ToString("0.0") + " X " + _board.HeightMm.ToString("0.0") + " MM   " +
                 _board.CopperLayerCount() + " CU   " + _board.Holes.Count + " HOLES" +
                 (_board.Components.Count > 0 ? "   " + _board.Components.Count + " PARTS" : ""));
 
-            _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.TextDim,
+            _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize, Palette.TextDim,
                 "MIN TRACK " + _board.MinTrackWidth().ToString("0.000") + "MM   " +
                 "MIN DRILL " + _board.MinDrill().ToString("0.000") + "MM");
 
@@ -1055,7 +1133,7 @@ namespace EDes
             // on information that is better presented on screen.
 
             if (_s.PcbCursor)
-                _hud.TextCentred(0f, _s.PlaneY, f.Row(), _textSize, Palette.TextHilite,
+                _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize, Palette.TextHilite,
                     "CURSOR X " + _s.PcbCursorX.ToString("0.00") +
                     "  Y " + _s.PcbCursorY.ToString("0.00") + " MM");
         }
@@ -1071,13 +1149,13 @@ namespace EDes
                 EDesMode.Scope     => "OSCILLOSCOPE",
                 _                  => "PCB  " + _board.SourceName.ToUpperInvariant(),
             };
-            _hud.TextCentred(0f, _s.PlaneY, _layout.HeaderZ, size, Palette.Text, mode);
+            _hud.TextCentred(TextShiftX, _planeY, _layout.HeaderZ, size, Palette.Text, mode);
 
             // Voxel budget readout — the single most useful number when tuning a
             // scene for this display, so it is on the glass, not just in the UI.
             string budget = _lastVoxels + " / " + _s.MaxVoxels + " VOX";
             if (_lastDropped > 0) budget += "   +" + _lastDropped + " DROPPED";
-            _hud.TextCentred(0f, _s.PlaneY, _layout.SubHeaderZ, size * 0.8f,
+            _hud.TextCentred(TextShiftX, _planeY, _layout.SubHeaderZ, size * 0.8f,
                              _lastDropped > 0 ? Palette.Warning : Palette.TextDim, budget);
         }
 
@@ -1091,22 +1169,22 @@ namespace EDes
             ref TextStack st = ref _topText;   // shared top-of-display cursor
 
             bool detected = _nav.Present || _navHostUsable || _nav.Devices > 0;
-            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size,
+            _hud.Text(new point3d(x, _planeY, st.Row()), size,
                       detected ? Palette.Trace : Palette.Warning,
                       "SPACENAV " + (detected ? "DETECTED" : "NOT DETECTED") +
                       "  DEV " + _nav.Devices + "  SRC " + _navSource.ToUpperInvariant());
 
-            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.Text,
+            _hud.Text(new point3d(x, _planeY, st.Row()), size, Palette.Text,
                       "LW  X " + F(_nav.Dx) + "  Y " + F(_nav.Dy) + "  Z " + F(_nav.Dz) +
                       "   RX " + F(_nav.Ax) + "  RY " + F(_nav.Ay) + "  RZ " + F(_nav.Az));
 
-            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size, Palette.Text,
+            _hud.Text(new point3d(x, _planeY, st.Row()), size, Palette.Text,
                       "LH  X " + F(_navHost.dx) + "  Y " + F(_navHost.dy) + "  Z " + F(_navHost.dz) +
                       "   RX " + F(_navHost.ax) + "  RY " + F(_navHost.ay) + "  RZ " + F(_navHost.az) +
                       "   RC " + _navHostRc);
 
             int buttons = _nav.Buttons | _navHost.but;
-            _hud.Text(new point3d(x, _s.PlaneY, st.Row()), size,
+            _hud.Text(new point3d(x, _planeY, st.Row()), size,
                       buttons != 0 ? Palette.TextHilite : Palette.TextDim,
                       "BTN L " + ((buttons & 1) != 0 ? "DOWN" : "UP") +
                       "   BTN R " + ((buttons & 2) != 0 ? "DOWN" : "UP") +
@@ -1541,9 +1619,35 @@ namespace EDes
             ui.AddToggle(sec, "CAD lighting", _s.PcbCadLighting, v => _s.PcbCadLighting = v);
             ui.AddSlider(sec, "CAD ambient", 0, 1.0, _s.PcbCadAmbient,
                          v => _s.PcbCadAmbient = (float)v, "F2");
+            ui.AddToggle(sec, "Point light (off = directional)", _s.PcbCadPointLight,
+                         v => _s.PcbCadPointLight = v);
+            ui.AddInfo(sec, "A POINT light has a position, so each face gets its own " +
+                            "direction and distance -- that is what makes one side of a " +
+                            "part brighter than the other and stops two identical " +
+                            "components at opposite corners shading identically. A " +
+                            "DIRECTIONAL light has only an angle, which is cheaper to " +
+                            "reason about and sometimes clearer on a crowded board.");
+
+            ui.AddNumber(sec, "Light pos X (board half-widths)", _s.PcbCadLightFx,
+                         v => _s.PcbCadLightFx = (float)v, "F2");
+            ui.AddNumber(sec, "Light pos Y (board half-heights)", _s.PcbCadLightFy,
+                         v => _s.PcbCadLightFy = (float)v, "F2");
+            ui.AddNumber(sec, "Light pos Z (part heights above board)", _s.PcbCadLightFz,
+                         v => _s.PcbCadLightFz = (float)v, "F2");
+            ui.AddNumber(sec, "Falloff distance (board diagonals, 0 = none)",
+                         _s.PcbCadLightRange, v => _s.PcbCadLightRange = (float)v, "F2");
+            ui.AddToggle(sec, "Show the lamp", _s.PcbCadShowLight,
+                         v => _s.PcbCadShowLight = v);
+            ui.AddInfo(sec, "Position is in fractions of the BOARD's own size, not " +
+                            "millimetres, so one setting aims the same way on any board. " +
+                            "0,0,3 is centred high above it; 1,1,1 sits over a corner. " +
+                            "At the falloff distance the light is half strength.");
+
+            ui.AddHeader(sec, "Directional light angle");
             ui.AddSlider(sec, "Light X", -1, 1, _s.PcbCadLightX, v => _s.PcbCadLightX = (float)v, "F2");
             ui.AddSlider(sec, "Light Y", -1, 1, _s.PcbCadLightY, v => _s.PcbCadLightY = (float)v, "F2");
             ui.AddSlider(sec, "Light Z", -1, 1, _s.PcbCadLightZ, v => _s.PcbCadLightZ = (float)v, "F2");
+            ui.AddInfo(sec, "Used only when the point light is off.");
             ui.AddInfo(sec, "Edges are shaded by the faces meeting at them, which only " +
                             "planar faces can supply — edges between curved surfaces stay " +
                             "unlit rather than mis-lit. The light is fixed to the BOARD, " +
@@ -1735,6 +1839,34 @@ namespace EDes
                          () => _s.FontIndex = (_s.FontIndex + 1) % 3);
             ui.AddToggle(sec, "Labels & readouts", _s.ShowLabels,   v => _s.ShowLabels = v);
             ui.AddToggle(sec, "Title / voxel readout", _s.ShowHudPanel, v => _s.ShowHudPanel = v);
+
+            var hud = ui.AddHeader(sec, "HUD text position");
+            ui.AddInfo(hud, "Fractions of the display's own size, NOT world units, so the " +
+                            "same value lands in the same visual place on a VX2 and a " +
+                            "VX2-XL. X: -1 hard left, 0 centre, +1 hard right (measured at " +
+                            "the plane, so -1 is genuinely the leftmost point text can " +
+                            "occupy in a cylinder). Y: depth of the flat HUD plane. " +
+                            "Z: -1 the very top, +1 the bottom -- remember -Z is up.");
+            ui.AddNumber(hud, "HUD X (-1 left .. +1 right)", _s.HudFracX,
+                         v => _s.HudFracX = (float)v, "F3");
+            ui.AddNumber(hud, "HUD Y (plane depth, fraction of radius)", _s.HudFracY,
+                         v => _s.HudFracY = (float)v, "F3");
+            ui.AddNumber(hud, "HUD Z (-1 top .. +1 bottom)", _s.HudFracZ,
+                         v => _s.HudFracZ = (float)v, "F3");
+            ui.AddNumber(hud, "Volume height / radius (fallback only)", _s.ZHalfRatio,
+                         v => _s.ZHalfRatio = (float)v, "F3");
+            ui.AddLiveInfo(hud, () =>
+                $"HUD anchor ({TextLeftX:0.00}, {_planeY:0.00}, {_layout.TopZ:0.00}) world"
+              + $"   in a volume r={_radius:0.00}, z +/-{_zHalf:0.00}"
+              + (_layout.TopZ > _hudTopZ + 1e-4f ? "   (Z clamped INTO the volume)" : ""),
+                0.5);
+            ui.AddInfo(hud, "The Z anchor is clamped so the first row can never sit above " +
+                            "the top of the display. A row above -zHalf is not slightly " +
+                            "off, it is outside the volume and clipped away completely, " +
+                            "which looks like the text failing to render rather than like " +
+                            "a setting being out of range. The fallback ratio is only used " +
+                            "when the SDK reports no usable height of its own -- see the " +
+                            "note on GetAspectRatioZ in EDesApp.ReadBounds.");
             // No backdrop row, because there is no backdrop: the grid floor and
             // orientation rings are gone entirely. They were decoration competing for
             // budget with the board, and on a transparent display they also crossed

@@ -68,7 +68,43 @@ namespace EDes
         public volatile float TextWeight  = 1.0f;
         public volatile bool  ShowLabels  = true;
         public volatile bool  ShowHudPanel = true;  // title / totals / voxel readout
-        public volatile float PlaneY       = 0.1f;  // the HUD + scope plane
+        // -- HUD text anchor, as FRACTIONS of the live display extents ---------
+        //
+        // Fractions rather than world units, because the anchor has to mean the same
+        // thing on a VX2 and a VX2-XL. -1 is the left/top edge, +1 the right/bottom,
+        // 0 the centre; the app multiplies by the radius and half-height it read from
+        // the SDK this frame, so one setting lands in the same visual place on any unit.
+        //
+        // This replaces the old absolute PlaneY (0.1 world units) -- a VX2 measurement
+        // hard-coded into a setting, which would have sat in a different relative place
+        // on every other display size.
+
+        /// <summary>Horizontal anchor of the left-aligned text column, as a fraction of
+        /// the usable half-width AT the HUD plane. -1 = hard left. Deliberately a fraction
+        /// of the half-width at the plane rather than of the radius: the volume is a
+        /// cylinder, so the leftmost point at the HUD plane's y is INSIDE the radius, and
+        /// scaling the radius would push the first glyph column out of the volume where it
+        /// is clipped -- text that silently loses its first character.</summary>
+        public volatile float HudFracX = -1.0f;
+
+        /// <summary>Depth of the HUD/scope plane, as a fraction of the radius. The old
+        /// absolute default was 0.1 world units against a 4-unit radius, i.e. 0.025.</summary>
+        public volatile float HudFracY = 0.025f;
+
+        /// <summary>Vertical anchor of the first text row, as a fraction of the display's
+        /// half-height. -1 = the very top (remember -Z is up). Clamped in ReadBounds so
+        /// the band can never start above the top of the volume.</summary>
+        public volatile float HudFracZ = -1.0f;
+
+        /// <summary>Vertical half-height of the volume as a fraction of its radius, used
+        /// ONLY when the SDK does not report a usable bound of its own.
+        ///
+        /// It exists because LedHostCS.GetAspectRatioZ returns xsiz/64 -- the same value as
+        /// GetAspectRatioX, with a comment saying so. That is the RADIUS, not the vertical
+        /// half-height, so trusting it told this app the volume was twice as tall as it is
+        /// and every text row was anchored roughly double its intended height. 0.5 matches
+        /// a VX2 (radius 4, half-height 2). See EDesApp.ReadBounds.</summary>
+        public volatile float ZHalfRatio = 0.5f;
 
         // ── Camera / SpaceNavigator ───────────────────────────────────────────
         public volatile bool  ShowNavDiag = false;   // SpaceNav readout in the volume (key V)
@@ -277,6 +313,29 @@ namespace EDes
         public volatile float  PcbCadLightX   = 0.3f;
         public volatile float  PcbCadLightY   = 0.2f;
         public volatile float  PcbCadLightZ   = 1.0f;
+
+        // -- Point light ------------------------------------------------------
+        /// <summary>Light the CAD from a POSITION rather than a direction. On by default:
+        /// a directional light gives every face on the board the same L, so two identical
+        /// parts at opposite corners shade identically and the whole board reads flat. A
+        /// point light is what makes one side of a component brighter than the other.</summary>
+        public volatile bool   PcbCadPointLight = true;
+
+        /// <summary>Light position as fractions of the board's own half-width, half-height
+        /// and tallest part -- not millimetres, so the same numbers put the lamp in the same
+        /// relative place on a 16 mm sensor board and a 300 mm backplane. Default: off one
+        /// corner, well above the board.</summary>
+        public volatile float  PcbCadLightFx = 0.8f;
+        public volatile float  PcbCadLightFy = -0.8f;
+        public volatile float  PcbCadLightFz = 3.0f;
+
+        /// <summary>Half-strength distance, as a fraction of the board diagonal. 0 turns
+        /// falloff off entirely, leaving direction without distance.</summary>
+        public volatile float  PcbCadLightRange = 1.2f;
+
+        /// <summary>Draw a marker at the lamp. On by default -- three position numbers with
+        /// no visible referent are very hard to aim.</summary>
+        public volatile bool   PcbCadShowLight = true;
         public volatile bool   PcbCursor     = false;
         public volatile float  PcbCursorX    = 0f;     // mm, board coordinates
         public volatile float  PcbCursorY    = 0f;

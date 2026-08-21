@@ -24,6 +24,7 @@
          display's seven colours instead of duplicating hex literals here, without
          dragging in the Avalonia/Voxon chain this harness exists to avoid. -->
     <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Sim\Palette.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Sim\Layout.cs" />
     <Compile Include="$(PcbSrc)\PcbBoard.cs" />
     <Compile Include="$(PcbSrc)\GerberParser.cs" />
     <Compile Include="$(PcbSrc)\ExcellonParser.cs" />
@@ -43,6 +44,8 @@
     <Compile Include="ViaSpanChecks.cs" />
     <Compile Include="NetChecks.cs" />
     <Compile Include="StlChecks.cs" />
+    <Compile Include="LayoutChecks.cs" />
+    <Compile Include="LightChecks.cs" />
   </ItemGroup>
 
   <ItemGroup>

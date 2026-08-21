@@ -172,6 +172,14 @@ Console.WriteLine("=== STL / STEP tessellation ===");
 failures += PcbParserTests.StlChecks.Run();
 
 Console.WriteLine();
+Console.WriteLine("=== CAD point light + STEP tessellation ===");
+failures += PcbParserTests.LightChecks.Run();
+
+Console.WriteLine();
+Console.WriteLine("=== HUD text band placement ===");
+failures += PcbParserTests.LayoutChecks.Run();
+
+Console.WriteLine();
 Console.WriteLine("=== STEP ===");
 failures += PcbParserTests.StepChecks.Run();
 

@@ -70,6 +70,31 @@ namespace EDes.Pcb
         public string PickedDesignator;
         public float CadAmbient;       // floor brightness, so unlit edges never vanish
         public float CadLightX, CadLightY, CadLightZ;   // light direction, board frame
+
+        /// <summary>Treat the light as a POINT at CadLightX/Y/Z rather than a direction.
+        ///
+        /// A directional light gives every face on the board the same L, so two identical
+        /// parts at opposite corners shade identically and the board reads flat. A point
+        /// light gives each face its own L and its own distance, which is what makes one
+        /// side of a component brighter than the other and what makes the model look like
+        /// it is sitting in a room rather than in a diagram.</summary>
+        public bool  CadPointLight;
+
+        /// <summary>Where the point light is, as a fraction of the board's own half-extents
+        /// (X, Y) and height (Z). 0,0,2 is centred two board-heights above it; 1,1,1 is over
+        /// one corner. Fractions rather than millimetres so the same setting means the same
+        /// thing on a 16 mm sensor board and a 300 mm backplane.</summary>
+        public float CadLightFx, CadLightFy, CadLightFz;
+
+        /// <summary>Falloff distance as a fraction of the board diagonal. At exactly this
+        /// distance the light is half strength. 0 or less disables falloff, leaving a point
+        /// light with direction but no distance -- useful when the falloff is fighting the
+        /// seven-colour palette and you only want the directional cue.</summary>
+        public float CadLightRange;
+
+        /// <summary>Draw a marker where the point light is. Otherwise its position is only
+        /// visible through its effect, which makes it very hard to aim.</summary>
+        public bool  CadShowLight;
         public bool  ShowCursor;
         public float CursorXmm, CursorYmm;
         public float Brightness;
@@ -598,14 +623,8 @@ namespace EDes.Pcb
             float bright   = opt.CadBrightness > 0f ? opt.CadBrightness : opt.Brightness;
             float brightMul = 1f / MathF.Max(0.05f, bright);
 
-            // Normalise the light once, not per edge. A zero vector would divide by zero
-            // and blacken the model, so it falls back to lighting from above.
-            float lx = opt.CadLightX, ly = opt.CadLightY, lz = opt.CadLightZ;
-            float ll = MathF.Sqrt(lx * lx + ly * ly + lz * lz);
-            if (ll < 1e-6f) { lx = 0f; ly = 0f; lz = 1f; ll = 1f; }
-            lx /= ll; ly /= ll; lz /= ll;
-
-            float ambient = Math.Clamp(opt.CadAmbient, 0f, 1f);
+            var light = CadLight.Build(opt, board);
+            if (opt.CadShowLight) DrawLightMarker(batch, cam, light, cx, cy, zBase);
 
             for (int si = 0; si < board.Solids.Count; si++)
             {
@@ -630,8 +649,12 @@ namespace EDes.Pcb
                     float mul = 1f;
                     if (opt.CadLighting && e.HasNormal)
                     {
-                        float ndl   = MathF.Abs(e.NX * lx + e.NY * ly + e.NZ * lz);
-                        float shade = ambient + (1f - ambient) * ndl;
+                        // Shaded at the edge's MIDPOINT. A point light varies along a long
+                        // edge, but an edge is one polyline drawn at one spacing, so it gets
+                        // one sample; the midpoint is the least wrong single choice.
+                        int mid = e.Count / 2;
+                        float shade = light.Shade(e.NX, e.NY, e.NZ,
+                                                  e.X[mid], e.Y[mid], e.Z[mid], true);
                         mul = 1f / MathF.Max(0.15f, shade);
                     }
                     mul *= solidDim * brightMul;
@@ -722,6 +745,119 @@ namespace EDes.Pcb
             }
         }
 
+        // ── The light ─────────────────────────────────────────────────────────
+        //
+        // One place that answers "how lit is this point, facing this way", so the edge
+        // pass and the surface pass cannot drift apart. They differ only in whether the
+        // normal's SIGN counts, which is a property of what is being shaded rather than
+        // of the light: an edge is shared by two faces pointing opposite ways so its sign
+        // is meaningless, while a face has one outward normal and the sign is exactly what
+        // makes it turn away.
+        private readonly struct CadLight
+        {
+            public readonly bool  Point;
+            public readonly float X, Y, Z;        // mm in the board frame
+            public readonly float InvRange2;      // 0 = no distance falloff
+            public readonly float Ambient;
+            public readonly bool  On;
+
+            private CadLight(bool on, bool point, float x, float y, float z,
+                             float invRange2, float ambient)
+            {
+                On = on; Point = point; X = x; Y = y; Z = z;
+                InvRange2 = invRange2; Ambient = ambient;
+            }
+
+            public static CadLight Build(in PcbViewOptions opt, PcbBoard board)
+            {
+                float ambient = Math.Clamp(opt.CadAmbient, 0f, 1f);
+                if (!opt.CadLighting) return new CadLight(false, false, 0, 0, 1, 0f, ambient);
+
+                if (!opt.CadPointLight)
+                {
+                    // Normalise once, not per edge. A zero vector would divide by zero and
+                    // blacken the whole model, so it falls back to lighting from above.
+                    float dx = opt.CadLightX, dy = opt.CadLightY, dz = opt.CadLightZ;
+                    float l = MathF.Sqrt(dx * dx + dy * dy + dz * dz);
+                    if (l < 1e-6f) { dx = 0f; dy = 0f; dz = 1f; l = 1f; }
+                    return new CadLight(true, false, dx / l, dy / l, dz / l, 0f, ambient);
+                }
+
+                // Fractions -> millimetres, using the board's own size.
+                float halfW = MathF.Max(0.5f, board.WidthMm  * 0.5f);
+                float halfH = MathF.Max(0.5f, board.HeightMm * 0.5f);
+                float tall  = MathF.Max(1f, TallestSolid(board));
+
+                float px = board.CentreX + opt.CadLightFx * halfW;
+                float py = board.CentreY + opt.CadLightFy * halfH;
+                float pz = opt.CadLightFz * tall;
+
+                // Falloff distance from the board diagonal, so "range 1" means "about one
+                // board away" whatever size the board is.
+                float diag  = MathF.Sqrt(halfW * halfW * 4f + halfH * halfH * 4f);
+                float range = opt.CadLightRange * diag;
+                float inv2  = range > 1e-3f ? 1f / (range * range) : 0f;
+
+                return new CadLight(true, true, px, py, pz, inv2, ambient);
+            }
+
+            /// <summary>Tallest point of any solid, in mm. The board itself carries no Z
+            /// bound -- it is a 2D artwork stack -- so the height that the light's Z
+            /// fraction scales against has to come from the 3D models sitting on it.</summary>
+            private static float TallestSolid(PcbBoard board)
+            {
+                float top = 0f;
+                foreach (var s in board.Solids)
+                    if (s.MaxZ > top && s.MaxZ < 1e6f) top = s.MaxZ;
+                return top;
+            }
+
+            /// <summary>0..1 shade for a surface at (px,py,pz) mm facing (nx,ny,nz).
+            /// twoSided ignores the normal's sign; see the note above.</summary>
+            public float Shade(float nx, float ny, float nz,
+                               float px, float py, float pz, bool twoSided)
+            {
+                if (!On) return Ambient;
+
+                float lx = X, ly = Y, lz = Z, att = 1f;
+                if (Point)
+                {
+                    lx = X - px; ly = Y - py; lz = Z - pz;
+                    float d2 = lx * lx + ly * ly + lz * lz;
+                    if (d2 < 1e-9f) return 1f;                 // sitting inside the lamp
+                    float d = MathF.Sqrt(d2);
+                    lx /= d; ly /= d; lz /= d;
+                    if (InvRange2 > 0f) att = 1f / (1f + d2 * InvRange2);
+                }
+
+                float ndl = nx * lx + ny * ly + nz * lz;
+                ndl = twoSided ? MathF.Abs(ndl) : MathF.Max(0f, ndl);
+                return Ambient + (1f - Ambient) * ndl * att;
+            }
+        }
+
+        /// <summary>A small cross where the point light is, so its position can be aimed
+        /// by eye instead of by guessing at three numbers.</summary>
+        private void DrawLightMarker(VoxelBatch batch, SceneCamera cam, in CadLight light,
+                                     float cx, float cy, float zBase)
+        {
+            if (!light.On || !light.Point) return;
+
+            var p = cam.Transform(Wx(light.X, cx), Wy(light.Y, cy), zBase - light.Z * Scale);
+            float r = batch.Spacing * 3f;
+            batch.Blob(p, r, Palette.Yellow);
+            // Arms, so it reads as a marker rather than as a stray voxel of the model.
+            for (int a = 0; a < 3; a++)
+            {
+                var q = p; var w = p;
+                float arm = r * 2.5f;
+                if (a == 0) { q.x -= arm; w.x += arm; }
+                if (a == 1) { q.y -= arm; w.y += arm; }
+                if (a == 2) { q.z -= arm; w.z += arm; }
+                batch.Line(q, w, Palette.Yellow);
+            }
+        }
+
         // ── CAD surfaces: flat shading ────────────────────────────────────────
         // Flat shading in the strict sense: ONE normal per face, so every sample on a
         // face takes the same brightness and the facets read as facets. That is what
@@ -750,12 +886,7 @@ namespace EDes.Pcb
             float bright   = opt.CadBrightness > 0f ? opt.CadBrightness : opt.Brightness;
             float brightMul = 1f / MathF.Max(0.05f, bright);
 
-            float lx = opt.CadLightX, ly = opt.CadLightY, lz = opt.CadLightZ;
-            float ll = MathF.Sqrt(lx * lx + ly * ly + lz * lz);
-            if (ll < 1e-6f) { lx = 0f; ly = 0f; lz = 1f; ll = 1f; }
-            lx /= ll; ly /= ll; lz /= ll;
-
-            float ambient = Math.Clamp(opt.CadAmbient, 0f, 1f);
+            var light = CadLight.Build(opt, board);
             float density = Math.Clamp(opt.CadSurfaceDensity <= 0f ? 0.6f
                                                                   : opt.CadSurfaceDensity,
                                        0.1f, 2f);
@@ -780,19 +911,28 @@ namespace EDes.Pcb
                     // facing away is sampled sparsely. That is what flat shading looks like
                     // on a display with seven colours and no brightness axis — it is
                     // dithering, which is the honest way to get tone out of one bit.
-                    float shade = ambient;
-                    if (opt.CadLighting && face.HasNormalSet)
-                    {
-                        float ndl = face.NX * lx + face.NY * ly + face.NZ * lz;
-                        if (ndl < 0f) ndl = 0f;
-                        shade = ambient + (1f - ambient) * ndl;
-                    }
-                    int   col      = baseCol;
-                    float faceStep = step / MathF.Max(0.12f, shade) * solidDim * brightMul;
+                    // Still FLAT shading -- one normal for the whole face, so facets read
+                    // as facets. But the shade is evaluated per TRIANGLE, at its centroid,
+                    // because a point light genuinely does vary across a large face and
+                    // collapsing that to one value per face is what makes a point light
+                    // look directional. With a directional light every triangle of a face
+                    // gets the same answer anyway, so this costs nothing there.
+                    bool  lit    = opt.CadLighting && face.HasNormalSet;
+                    int   col    = baseCol;
+                    float dimMul = solidDim * brightMul;
 
                     for (int t = 0; t < face.TriCount; t++)
                     {
                         int i = t * 3;
+                        float shade = light.Ambient;
+                        if (lit)
+                        {
+                            float mx = (face.X[i] + face.X[i + 1] + face.X[i + 2]) / 3f;
+                            float my = (face.Y[i] + face.Y[i + 1] + face.Y[i + 2]) / 3f;
+                            float mz = (face.Z[i] + face.Z[i + 1] + face.Z[i + 2]) / 3f;
+                            shade = light.Shade(face.NX, face.NY, face.NZ, mx, my, mz, false);
+                        }
+                        float faceStep = step / MathF.Max(0.12f, shade) * dimMul;
                         var a = cam.Transform(Wx(face.X[i],     cx), Wy(face.Y[i],     cy), zBase - face.Z[i]     * Scale);
                         var b = cam.Transform(Wx(face.X[i + 1], cx), Wy(face.Y[i + 1], cy), zBase - face.Z[i + 1] * Scale);
                         var c = cam.Transform(Wx(face.X[i + 2], cx), Wy(face.Y[i + 2], cy), zBase - face.Z[i + 2] * Scale);

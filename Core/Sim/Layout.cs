@@ -73,21 +73,29 @@ namespace EDes.Sim
         public readonly float ContentBottomZ;     // last free row (the volume floor)
         public readonly float ReadoutTopZ;        // first readout row, under the header
 
-        public FrameLayout(float zHalf, float step, int headerRows, int readoutRows)
+        /// <param name="topZ">Where the text band starts. Comes from the HUD anchor
+        /// setting, and is CLAMPED here to the volume: the band may not begin above the
+        /// top of the display, because a row above -zHalf is not merely off-centre, it is
+        /// outside the display and gets clipped away entirely -- text that is configured
+        /// into invisibility and reads as a rendering fault. The clamp also leaves room
+        /// for one row, so the anchor cannot be pushed to the floor and produce a band
+        /// with nowhere to draw.</param>
+        public FrameLayout(float zHalf, float step, int headerRows, int readoutRows,
+                           float topZ)
         {
             // Use the FULL height of the volume: z runs -zHalf .. +zHalf.
-            TopZ    = -zHalf;
+            TopZ    = Math.Clamp(topZ, -zHalf, MathF.Max(-zHalf, zHalf - step));
             BottomZ =  zHalf;
             Step    = step;
 
             HeaderZ    = TopZ;
             SubHeaderZ = TopZ + step;
 
-            // The text band starts at TopZ EXACTLY, i.e. z = -zHalf, the top of the
-            // volume. It used to start below a reserved header block, which left the top
-            // few rows of the display empty and made the first line of text look
-            // mis-anchored. Header rows are now simply the first rows taken from the same
-            // cursor, so whatever draws first lands on the top row.
+            // The text band starts at TopZ EXACTLY -- the HUD anchor, clamped above. It
+            // used to start below a reserved header block, which left the top few rows of
+            // the display empty and made the first line of text look mis-anchored. Header
+            // rows are now simply the first rows taken from the same cursor, so whatever
+            // draws first lands on the top row.
             ReadoutTopZ = TopZ;
 
             // The text band is CAPPED to the top half. Without this it can swallow the
