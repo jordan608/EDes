@@ -110,6 +110,11 @@ namespace EDes
         /// would tear or throw mid-enumeration. Swap a fresh array in instead.</summary>
         IReadOnlyList<LegendRow> Legend => Array.Empty<LegendRow>();
 
+        /// <summary>Key/control reference, shown permanently by the shell rather than
+        /// hidden behind a panel section — a control list you have to go looking for is one
+        /// you do not read. Empty for none.</summary>
+        string ControlsHelp => "";
+
         /// <summary>Free text the shell overlays on the top-left of the preview, or empty
         /// for none. Preformatted by the game: the first line is used as a heading.
         ///

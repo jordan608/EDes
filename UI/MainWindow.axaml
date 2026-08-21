@@ -106,10 +106,13 @@
              ══════════════════════════════════════════════════════════════ -->
         <Grid Grid.Row="2" ColumnDefinitions="320,4,*,4,320">
 
-            <!-- ── Left: the active mode's settings ───────────────────────── -->
+            <!-- ── Left: the active mode's settings, with the controls pinned below.
+                 The control list used to be an accordion section, which meant it was
+                 collapsed exactly when someone needed it. It is short and it never
+                 changes, so it costs less to leave on screen than to go looking for. -->
             <Grid Grid.Column="0"
                   MinWidth="220" MaxWidth="560"
-                  RowDefinitions="Auto,1,*"
+                  RowDefinitions="Auto,1,*,1,Auto"
                   Background="#0A0A12">
                 <TextBlock Grid.Row="0"
                            x:Name="GamePanelTitle"
@@ -119,6 +122,23 @@
                            Margin="12,10,12,8"/>
                 <Border Grid.Row="1" Background="#22FFFFFF" Margin="8,0"/>
                 <ContentControl Grid.Row="2" x:Name="GamePanelArea"/>
+
+                <Border Grid.Row="3" Background="#22FFFFFF" Margin="8,0"/>
+                <Border Grid.Row="4" x:Name="ControlsPanel"
+                        Background="#0D0D16" Padding="12,8"
+                        IsVisible="False">
+                    <StackPanel Spacing="3">
+                        <TextBlock Text="CONTROLS"
+                                   FontSize="10" FontWeight="Bold"
+                                   Opacity="0.55"/>
+                        <TextBlock x:Name="ControlsText"
+                                   Text=""
+                                   FontSize="10"
+                                   Opacity="0.85"
+                                   TextWrapping="Wrap"
+                                   FontFamily="Consolas,Menlo,monospace"/>
+                    </StackPanel>
+                </Border>
             </Grid>
 
             <GridSplitter Grid.Column="1"

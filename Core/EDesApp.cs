@@ -511,36 +511,6 @@ namespace EDes
             _s.InspectInfo = sb.ToString();
         }
 
-        /// <summary>Everything known about the puck, for the settings panel and the
-        /// in-volume readout. This is a diagnostic, so it shows the RAW numbers from
-        /// both paths rather than a tidy summary.</summary>
-        public string NavDiagnostics()
-        {
-            var sb = new StringBuilder();
-            sb.Append("driving: ").Append(_navSource).Append('\n');
-            sb.Append("LedWin  devices=").Append(_nav.Devices)
-              .Append("  present=").Append(_nav.Present ? "yes" : "no").Append('\n');
-            sb.Append($"  dir  X {_nav.Dx,7:0.000}  Y {_nav.Dy,7:0.000}  Z {_nav.Dz,7:0.000}\n");
-            sb.Append($"  ang  P {_nav.Ax,7:0.000}  Y {_nav.Ay,7:0.000}  R {_nav.Az,7:0.000}\n");
-            sb.Append($"  sum  X {_nav.Sx,7:0.000}  Y {_nav.Sy,7:0.000}  Z {_nav.Sz,7:0.000}\n");
-            sb.Append("  buttons ").Append(_nav.Buttons)
-              .Append("  L=").Append((_nav.Buttons & 1) != 0 ? "DOWN" : "up")
-              .Append("  R=").Append((_nav.Buttons & 2) != 0 ? "DOWN" : "up").Append('\n');
-            sb.Append($"  live X {_navLive.Dx,7:0.000}  Y {_navLive.Dy,7:0.000}  Z {_navLive.Dz,7:0.000}"
-                    + $"   P {_navLive.Ax,7:0.000}  Y {_navLive.Ay,7:0.000}  R {_navLive.Az,7:0.000}\n");
-            sb.Append($"  peak raw   translation {_navPeakTrans:0.0} (scale {_s.NavFullScaleTrans:0.0})"
-                    + $"   rotation {_navPeakRot:0.0} (scale {_s.NavFullScaleRot:0.0})\n");
-            sb.Append($"  dead-zone {_s.NavDeadzone * 100f:0.#}%   pan {_s.NavPanRate:0.0}/s"
-                    + $"   rot {_s.NavRotRate:0.0} rad/s\n");
-            sb.Append("LedHost vxl_nav_read rc=").Append(_navHostRc).Append('\n');
-            sb.Append($"  d    X {_navHost.dx,7:0.000}  Y {_navHost.dy,7:0.000}  Z {_navHost.dz,7:0.000}\n");
-            sb.Append($"  a    X {_navHost.ax,7:0.000}  Y {_navHost.ay,7:0.000}  Z {_navHost.az,7:0.000}\n");
-            sb.Append("  buttons ").Append(_navHost.but)
-              .Append("  L=").Append((_navHost.but & 1) != 0 ? "DOWN" : "up")
-              .Append("  R=").Append((_navHost.but & 2) != 0 ? "DOWN" : "up");
-            return sb.ToString();
-        }
-
         private static bool Down(VX_KEYS k)   => NativeInput.OnDown(k) == 1;
         private static bool IsDown(VX_KEYS k) => NativeInput.IsDown(k) == 1;
 
@@ -1201,7 +1171,6 @@ namespace EDes
 
             BuildRenderSection(ui, stack, group);
             BuildCameraSection(ui, stack, group);
-            BuildControlsSection(ui, stack, group);
 
             return ui.Wrap(stack);
         }
@@ -1645,24 +1614,38 @@ namespace EDes
             ui.AddLiveInfo(sec, () =>
                 $"yaw {_cam.Yaw:0.00}  pitch {_cam.Pitch:0.00}  roll {_cam.Roll:0.00}  zoom {_cam.Zoom:0.00}");
 
-            sec = ui.AddSection(stack, "SpaceNavigator diagnostics", group);
-            ui.AddInfo(sec, "Live raw values from BOTH read paths, refreshed 5x/second. " +
-                            "Press V in the volume for the same readout on the display. " +
-                            "Move the puck: whichever block changes is the one that works.");
-            ui.AddToggle(sec, "Readout in the volume (V)", _s.ShowNavDiag,
-                         v => _s.ShowNavDiag = v);
-            ui.AddLiveInfo(sec, NavDiagnostics, 0.2);
         }
 
-        private void BuildControlsSection(PanelBuilder ui, StackPanel stack, List<Expander> group)
+        /// <summary>The control reference the shell pins to the bottom of the window.
+        ///
+        /// Mode-specific rather than the whole list at once: showing every mode's keys
+        /// means the four fifths that do nothing right now are competing with the fifth
+        /// that does. GLOBAL and CAMERA always apply, so they always show.</summary>
+        public string ControlsHelp
         {
-            var sec = ui.AddSection(stack, "Controls", group);
-            ui.AddInfo(sec,
-                "GLOBAL   Tab mode - L labels - G backdrop - R reset camera - Esc quit\n" +
-                "CAMERA   WASD orbit - Q/E roll - , / . zoom - SpaceNav 6DOF - left-drag preview\n" +
-                "CIRCUIT  1-4 preset - left/right select resistor - up/down +-10% - -/= source volts - P pause\n" +
-                "SCOPE    1-4 channels - up/down V/div - left/right trigger level - T trigger ch - E edge - P freeze\n" +
-                "PCB      arrows move cursor (Shift = 0.1mm) - C cursor - H drills - P pads - F hatch - N/M isolate layer");
+            get
+            {
+                string modeKeys = (EDesMode)_s.Mode switch
+                {
+                    EDesMode.Education =>
+                        "1-4 preset   left/right select resistor   up/down +-10%\n" +
+                        "-/= source volts   P pause flow",
+                    EDesMode.Scope =>
+                        "1-4 channels   up/down V/div   left/right trigger level\n" +
+                        "T trigger ch   E edge   P freeze",
+                    _ =>
+                        "arrows move cursor (Shift = 0.1mm)   C cursor\n" +
+                        "H drills   P pads   F hatch   N/M isolate layer",
+                };
+
+                return "GLOBAL\n" +
+                       "Tab mode   L labels   G backdrop   R reset camera   Esc quit\n" +
+                       "\nCAMERA\n" +
+                       "WASD orbit   Q/E roll   , / . zoom   left-drag preview\n" +
+                       "SpaceNav 6DOF   both puck buttons = inspection mode\n" +
+                       "\n" + ((EDesMode)_s.Mode).ToString().ToUpperInvariant() + "\n" +
+                       modeKeys;
+            }
         }
     }
 }

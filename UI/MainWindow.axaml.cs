@@ -332,6 +332,7 @@ namespace EDes.UI
 
             RefreshLegend();
             RefreshProbe();
+            RefreshControls();
         }
 
         // ── Splash ─────────────────────────────────────────────────────────────
@@ -371,6 +372,22 @@ namespace EDes.UI
         private void OnSaveClick (object? s, RoutedEventArgs e) => _s.Save();
         private void OnLoadClick (object? s, RoutedEventArgs e) { _s.Load(); RebuildActivePanel(); }
         private void OnResetClick(object? s, RoutedEventArgs e) { _s.Reset(); RebuildActivePanel(); }
+
+        // ── Controls reference ────────────────────────────────────────────────
+        // Pinned, not tucked into a section. Refreshed on the tick because the list is
+        // mode-specific and the mode can change from the volume's Tab key, not just from
+        // the header buttons.
+        private string _controlsShown = "\u0001";
+
+        private void RefreshControls()
+        {
+            string help = _game?.ControlsHelp ?? "";
+            if (help == _controlsShown) return;
+            _controlsShown = help;
+
+            ControlsText.Text     = help;
+            ControlsPanel.IsVisible = help.Length > 0;
+        }
 
         // ── Probe readout ─────────────────────────────────────────────────────
         // The game thread writes one preformatted string; this only splits the first line
