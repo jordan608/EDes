@@ -156,3 +156,19 @@ changing the game loop or adding a draw path.
   settings tab is built once, before a board is loaded).
 - Layer stack spacing is uniform — it is a legibility aid, not a to-scale dielectric stackup.
 - Only verifiable on hardware: SpaceNavigator axis directions and the controller axis signs.
+
+## Verifying a change
+
+Four suites, 526 assertions, none needing the display:
+
+```sh
+dotnet build -t:Compile
+dotnet run --project tests/PcbParserTests
+dotnet run --project tests/ScpiTests
+python fusion/tests/test_protocol.py
+python fusion/tests/test_addin.py
+```
+
+**[docs/TESTING.md](docs/TESTING.md)** covers what each one is for, the optional board
+fixture, and the step-by-step for testing the Fusion 360 bridge on a machine that has
+Fusion installed.

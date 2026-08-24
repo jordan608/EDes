@@ -19,7 +19,9 @@ The app (`Core/EDesApp.cs`, an `IVoxonGame`) has three modes, cycled with `Tab`:
 | **PCB** | Imported Gerber + Excellon + meshes: layers spread along Z, drills bored through the stack, measurement cursor, fab/DRC-lite readout. |
 
 `DemoGame`/`YourGame` remain as engine reference examples; they are not wired up.
-See `README.md` (user-facing), `docs/PCB_IMPORT.md` and `docs/SCOPE_USB.md` (formats).
+See `README.md` (user-facing), `docs/PCB_IMPORT.md` and `docs/SCOPE_USB.md` (formats),
+`docs/FUSION_BRIDGE.md` (the Fusion 360 bridge design) and **`docs/TESTING.md`** (how to
+run all four suites, and the walkthrough for testing the Fusion bridge on real hardware).
 
 ## Build & verify
 
