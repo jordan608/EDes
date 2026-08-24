@@ -40,6 +40,14 @@ dotnet build -t:Compile      # compile ONLY — use this to type-check while the
   Avalonia/Voxon dependency chain and can never drift from the shipping files. `tests/**` is
   excluded from `EDes.csproj`. Run it after ANY change to a parser - the coordinate-format code is
   the part that silently corrupts boards.
+- **Fusion bridge tests** (plain Python, no Fusion needed, no dependencies):
+  `python fusion/tests/test_protocol.py` (the wire format + the cm/mm maths) and
+  `python fusion/tests/test_addin.py` (the add-in RUN against a stub `adsk` that dispatches
+  custom events on a separate thread, so the worker-to-main-thread marshalling is really
+  exercised). Run both after ANY change under `fusion/` - and note
+  `fusion/tests/golden_frame.bin` is a cross-language fixture: Python writes it, the C#
+  suite parses it, so the two implementations of one format cannot drift. Regenerate it
+  ONLY when the format changes on purpose (`python fusion/tests/make_golden.py`).
 - Pre-existing warnings (~260) live in the SDK wrapper files (`VoxonTypes.cs`, `LedHostCS.cs`,
   `LedWinCS.cs`). New code should add none. Filter with `grep -iE ": error"`.
 

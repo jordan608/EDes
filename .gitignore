@@ -491,3 +491,5 @@ game.json
 edes.json
 yourgame.json
 profiles/
+__pycache__/
+*.pyc

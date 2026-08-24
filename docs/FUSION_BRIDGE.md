@@ -4,9 +4,10 @@ Streams a whole Fusion assembly into the volume while you model it. **Fusion is
 authoritative** for position, orientation and visibility; EDes applies only a scale and a
 fixed origin offset.
 
-Status: **planned, not built.** This is the agreed design. The full plan with milestones,
-verification steps and risks is an artifact; this file is the part that has to stay next to
-the code.
+Status: **built, untested on real Fusion.** Both halves exist and are verified without
+Autodesk installed anywhere — the EDes client and renderer under `Core/Cad/`, the add-in
+under `fusion/`. What remains is running it against real geometry; see *What the Fusion
+machine still has to confirm* at the end.
 
 ---
 
@@ -54,15 +55,23 @@ component locally, but a refresh re-applies Fusion's state. Fusion wins.
     display.y =  fusion.y * 10 * scale  +  originY
     display.z = -fusion.z * 10 * scale  +  originZ     // Fusion Z up -> display -Z up
 
-Origin defaults to `(0, 0, -2)` as specified. **Note that this is the top centre of the
-volume** — `z = -zHalf` is the ceiling, since -Z is up — so with Fusion's +Z mapping to
-display -Z, anything above the Fusion origin falls outside the volume and is clipped. That is
-correct for an assembly that hangs downward from its origin; an assembly that grows upward
-wants `(0, 0, +2)`. A live clipped-fraction readout sits beside the setting so it is never a
-mystery.
+Origin is **`(0, 0, +zHalf)` — the FLOOR, centre.** `z = +zHalf` is the bottom of the volume
+because -Z is up, so with Fusion's +Z mapping to display -Z the assembly stands on the floor
+and grows upward through the full height.
+
+It is stored as a **fraction** of zHalf (`FusionOriginZFrac`, default `+1`), so it means the
+same thing on a VX2 and a VX2-XL — the same reasoning as the HUD anchor.
+
+The first draft of this plan specified `(0, 0, -2)`, which is the CEILING. That clips
+everything above the Fusion origin, so a normal upward-growing assembly is almost entirely
+invisible. Both cases are now asserted in the suite: a floor-anchored 20 mm cube clips
+nothing, and the same cube anchored to the ceiling reports 76% of its samples outside the
+volume. A live clipped-fraction readout appears in the panel AND in the volume, so a wrong
+origin announces itself instead of looking like a broken import.
 
 No auto-centring and no per-component fitting: either would fight Fusion for control of
-position. Scale is one setting with a one-shot "Fit once" button.
+position. Scale is one setting with a one-shot "Fit once" button that computes a number and
+then stops being involved.
 
 ## Wire protocol
 
@@ -122,12 +131,12 @@ the token changes.
 
 | # | What | Needs Fusion |
 |---|---|---|
-| 1 | Add-in skeleton answering `ping` with the document name | yes |
-| 2 | EDes client + fake server, framing and grouping | no |
-| 3 | Real tessellation via occurrence body proxies | yes |
-| 4 | Wire into the app: source, placement, readouts | no |
-| 5 | Revision-token polling for live refresh | yes |
-| 6 | Budget and tolerance negotiation | no |
+| 1 | Add-in skeleton answering `ping` with the document name | **done** |
+| 2 | EDes client + fake server, framing and grouping | **done** |
+| 3 | Real tessellation via occurrence body proxies | **written**, needs real geometry |
+| 4 | Wire into the app: its own Fusion CAD mode, placement, readouts | **done** |
+| 5 | Revision-token polling for live refresh | **done** |
+| 6 | Budget and tolerance negotiation | **done** |
 
 The add-in's own protocol framing, unit conversion, header assembly and triangle capping are
 ordinary Python with no Fusion in them, so a stub `adsk` module makes them testable without
@@ -160,6 +169,31 @@ combined naively — cut an assembly open and the revealed faces were classified
 moment ago, so the cull hides exactly what you cut open to see. The rule is *the cut re-exposes
 what it reveals*: suspend exposure culling at and behind the cut plane. Written down here
 because it is invisible until both features exist, at which point the section tool looks broken.
+
+## What the Fusion machine still has to confirm
+
+Everything below is written and passing against a stub. None of it has met real Fusion, and
+these are the claims a stub cannot settle. Run `python fusion/tests/probe.py` first — it
+isolates "is the add-in working" from "is EDes working".
+
+1. **Body proxies bake the assembly transform.** THE assertion. Move a body 50 mm in Fusion
+   and its coordinates must move 50 mm with no change on our side. Then rotate it; then nest
+   it in a sub-assembly and move the PARENT. If this fails, the fallback is `transform2`
+   applied per body — more code, same outcome.
+2. **cm → mm on real geometry.** `probe.py geometry` prints the extent. A 10 mm cube must
+   read `0.00..10.00`. If it reads `0.00..1.00`, the conversion is missing.
+3. **Custom events dispatch under a real UI.** The stub models "Fusion is busy" with a flag;
+   only the real thing proves an open modal dialog behaves the same way and that the
+   timeout message is the one you actually see.
+4. **`createMeshCalculator().calculate()` and `surfaceTolerance`** exist with those exact
+   names and semantics. Read from the docs, never executed. Note `surfaceTolerance` is in
+   CENTIMETRES like everything else, so the tolerance conversion runs the OPPOSITE way to
+   the coordinates — `tolerance_mm_to_cm` divides while `cm_to_mm` multiplies.
+5. **`occurrence.fullPathName` format.** Used only as an opaque key, so the format does not
+   matter — but it must be stable across refreshes or the legend loses its rows.
+6. **Tessellation cost on a real assembly.** The tolerance is the throttle, and it runs on
+   Fusion's UI thread because the API gives no choice. Worth knowing what 0.4 mm costs on
+   your actual enclosure before turning on Follow changes.
 
 ## Verified against Autodesk's docs
 

@@ -425,7 +425,80 @@ namespace PcbParserTests
                 Ok($"a tight budget is not exceeded ({b5.Count} <= 2000)", b5.Count <= 2000);
             }
 
+            // ── Cross-language conformance: Python writes, C# reads ──────────
+            //
+            // The add-in that BUILDS this format is Python; the client that READS it is
+            // this code. Two implementations of one format is exactly where they drift,
+            // and the drift would show up as subtly wrong geometry on hardware rather
+            // than as an error. So a frame produced by the real add-in code path is
+            // checked in as a fixture and asserted here.
+            //
+            // Regenerate it only when the format changes ON PURPOSE:
+            //     python fusion/tests/make_golden.py
+            {
+                string golden = FindGolden();
+                if (golden == null)
+                {
+                    Console.WriteLine("SKIP  golden frame not found "
+                                    + "(fusion/tests/golden_frame.bin)");
+                }
+                else
+                {
+                    byte[] bytes = File.ReadAllBytes(golden);
+                    var f = FusionWire.Parse(bytes, bytes.Length);
+
+                    Ok($"the add-in's own frame parses here ({(f.Failed ? f.Error : "ok")})",
+                       !f.Failed);
+
+                    if (!f.Failed)
+                    {
+                        Ok($"document survives the language boundary ('{f.Document}')",
+                           f.Document == "GoldenCube");
+                        Ok($"revision survives ('{f.Revision}')", f.Revision == "gold01");
+                        Ok($"the dropped count survives ({f.Dropped})", f.Dropped == 7);
+                        Ok($"two bodies, 24 triangles ({f.Bodies.Count}, {f.TriangleCount})",
+                           f.Bodies.Count == 2 && f.TriangleCount == 24);
+
+                        // Offsets are in TRIANGLES, not bytes. If the two sides disagreed
+                        // about that, the second body would read garbage that still drew.
+                        Ok($"the second body's offset is in triangles "
+                         + $"({f.Bodies[1].Offset})", f.Bodies[1].Offset == 12);
+
+                        Ok("Fusion's visibility crosses intact",
+                           f.Bodies[0].Visible && !f.Bodies[1].Visible);
+                        Ok($"paths keep duplicate names apart "
+                         + $"('{f.Bodies[1].Path}')",
+                           f.Bodies[0].Path != f.Bodies[1].Path
+                           && f.Bodies[1].Path.Contains("Hidden"));
+
+                        // THE units assertion. The add-in was handed a 1 cm cube and must
+                        // have converted it to 10 mm. A missing x10 here is the single
+                        // most plausible-looking bug in the whole bridge.
+                        var solids = FusionWire.ToSolids(f, notes);
+                        Ok($"a 1 cm cube arrived as 10 mm — the cm->mm conversion holds "
+                         + $"({solids[0].MaxX:0.###})",
+                           solids.Count == 2 && Math.Abs(solids[0].MaxX - 10f) < 1e-4
+                                             && Math.Abs(solids[0].MinX) < 1e-4);
+
+                        Ok($"and it still collapses to six faces "
+                         + $"({solids[0].Faces.Count})", solids[0].Faces.Count == 6);
+                    }
+                }
+            }
+
             return _failures;
+        }
+
+        /// <summary>Find the checked-in fixture from wherever the test binary runs.</summary>
+        private static string? FindGolden()
+        {
+            var dir = new DirectoryInfo(AppContext.BaseDirectory);
+            for (int up = 0; up < 8 && dir != null; up++, dir = dir.Parent)
+            {
+                string p = Path.Combine(dir.FullName, "fusion", "tests", "golden_frame.bin");
+                if (File.Exists(p)) return p;
+            }
+            return null;
         }
 
         private static string Trim(string s)

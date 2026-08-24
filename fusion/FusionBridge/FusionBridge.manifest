@@ -1,0 +1,13 @@
+{
+    "autodeskProduct": "Fusion",
+    "type": "addin",
+    "id": "edes-fusion-bridge",
+    "author": "EDes",
+    "description": {
+        "": "Serves the active assembly's geometry to the EDes volumetric display."
+    },
+    "version": "1.0.0",
+    "runOnStartup": true,
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}
