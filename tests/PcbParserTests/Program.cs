@@ -172,6 +172,10 @@ Console.WriteLine("=== STL / STEP tessellation ===");
 failures += PcbParserTests.StlChecks.Run();
 
 Console.WriteLine();
+Console.WriteLine("=== teaching circuits ===");
+failures += PcbParserTests.CircuitChecks.Run();
+
+Console.WriteLine();
 Console.WriteLine("=== CAD point light + STEP tessellation ===");
 failures += PcbParserTests.LightChecks.Run();
 

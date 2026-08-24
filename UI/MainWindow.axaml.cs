@@ -68,6 +68,7 @@ namespace EDes.UI
         // headers + left panel when they disagree. Without it the volume and the
         // window would sit there showing different modes.
         private int _shownMode = -1;
+        private int _shownRevision = -1;
 
         // True while the simulator preview holds keyboard focus. When set, game
         // keys are swallowed before they reach the settings controls.
@@ -334,7 +335,12 @@ namespace EDes.UI
             }
 
             // The volume Tab key changes the mode behind the window back — notice it.
-            if (_game != null && _game.ActiveMode != _shownMode) RefreshModePanel();
+            // Mode change OR shape change. The second is why PanelRevision exists: the
+            // Education circuits have different numbers of resistors, so the controls
+            // themselves differ between two presets of the same mode.
+            if (_game != null &&
+                (_game.ActiveMode != _shownMode || _game.PanelRevision != _shownRevision))
+                RefreshModePanel();
 
             RefreshLegend();
             RefreshSlider();
@@ -861,6 +867,7 @@ namespace EDes.UI
             }
 
             _shownMode            = _game.ActiveMode;
+            _shownRevision        = _game.PanelRevision;
             GamePanelArea.Content = _game.BuildSettingsPanel(_ui);
             GamePanelTitle.Text   = ActiveModeName() + " settings";
             HighlightModeHeader(_shownMode);

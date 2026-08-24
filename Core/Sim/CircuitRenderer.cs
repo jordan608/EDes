@@ -47,6 +47,8 @@ namespace EDes.Sim
                     DrawBattery(batch, hud, cam, seg, scene, textSize, showLabels);
                 else if (seg.Body != null)
                     DrawResistor(batch, hud, cam, seg, scene, bulgeMax, textSize, textStep, showLabels);
+                else if (seg.Led != null)
+                    DrawDiode(batch, hud, cam, seg, textSize, showLabels);
                 else
                     DrawWire(batch, cam, seg, maxCurrent);
             }
@@ -61,6 +63,67 @@ namespace EDes.Sim
             float f   = (float)Math.Clamp(seg.Current / maxCurrent, 0.0, 1.0);
             int   col = Palette.Mix(Palette.WireDim, Palette.WireBright, 0.35f + 0.65f * f);
             batch.Line(cam.Transform(seg.Start), cam.Transform(seg.End), col);
+        }
+
+        // ── Diode: the schematic triangle-and-bar, lit when it conducts ───────
+        //
+        // Whether it is CONDUCTING is the whole lesson, so that is what the drawing
+        // encodes: passing current it is a solid bright wedge, below its forward drop it
+        // is a dim outline. Not a colour change alone -- on a seven-colour display with no
+        // brightness axis, "dimmer" has to mean "sparser", so the non-conducting state is
+        // drawn as an outline while the conducting one is filled.
+        private static void DrawDiode(VoxelBatch batch, Hud hud, SceneCamera cam,
+                                      in WireSegment seg, float textSize, bool showLabels)
+        {
+            var d = seg.Led!;
+            bool on = d.Current > 1e-9;
+
+            // Leads in, symbol in the middle third: the standard schematic proportions,
+            // so it reads as a diode rather than as a decorated wire.
+            point3d a = seg.Start, b = seg.End;
+            point3d p1 = CircuitScene.Lerp(a, b, 0.34f);
+            point3d p2 = CircuitScene.Lerp(a, b, 0.66f);
+
+            int col  = on ? Palette.Warning : Palette.TextDim;
+            int lead = on ? Palette.WireBright : Palette.WireDim;
+
+            batch.Line(cam.Transform(a),  cam.Transform(p1), lead);
+            batch.Line(cam.Transform(p2), cam.Transform(b),  lead);
+
+            // The triangle points along the current: anode at p1, cathode bar at p2.
+            float h = Dist(p1, p2) * 0.55f;
+            var upA = new point3d(p1.x, p1.y, p1.z - h);
+            var dnA = new point3d(p1.x, p1.y, p1.z + h);
+            var upB = new point3d(p2.x, p2.y, p2.z - h);
+            var dnB = new point3d(p2.x, p2.y, p2.z + h);
+
+            batch.Line(cam.Transform(upA), cam.Transform(dnA), col);   // back of the wedge
+            batch.Line(cam.Transform(upA), cam.Transform(p2),  col);   // to the tip
+            batch.Line(cam.Transform(dnA), cam.Transform(p2),  col);
+            batch.Line(cam.Transform(upB), cam.Transform(dnB), col);   // the cathode bar
+
+            // Filled only when conducting -- that fill IS the "it is on" signal.
+            if (on)
+                for (int i = 1; i < 5; i++)
+                {
+                    float t = i / 5f;
+                    var s = CircuitScene.Lerp(upA, p2, t);
+                    var e = CircuitScene.Lerp(dnA, p2, t);
+                    batch.Line(cam.Transform(s), cam.Transform(e), col);
+                }
+
+            if (!showLabels) return;
+
+            string label = d.Name + "  VF " + d.Vf.ToString("0.##") + "V";
+            if (!on) label += "  OFF";
+            var at = new point3d(p1.x, p1.y, p1.z - h - textSize * 0.8f);
+            hud.Text(cam.Transform(at), textSize * 0.7f, col, label);
+        }
+
+        private static float Dist(point3d a, point3d b)
+        {
+            float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+            return MathF.Sqrt(dx * dx + dy * dy + dz * dz);
         }
 
         // ── Resistor: schematic zigzag, heat colour, power bulge ──────────────

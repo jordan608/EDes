@@ -68,6 +68,10 @@ namespace EDes
         /// derived from the renderer's real metric rather than a guess about it.</summary>
         private const float GLYPH_CELL_FRACTION = 0.18f;
 
+        /// <summary>Supply range, from the one place that defines it (Sim.Supply).</summary>
+        private const float MIN_VOLTS = (float)Supply.MinVolts,
+                            MAX_VOLTS = (float)Supply.MaxVolts;
+
         /// <summary>True when the requested text size was raised to stay legible, so the
         /// panel can say so instead of appearing to ignore the slider.</summary>
         private bool _textFloored;
@@ -158,9 +162,14 @@ namespace EDes
         {
             _scene.SetPreset(_s.PresetIndex);
             _scene.SetSourceVolts(_s.SourceVolts);
-            _scene.SetResistor(0, _s.R1);
-            _scene.SetResistor(1, _s.R2);
-            _scene.SetResistor(2, _s.R3);
+
+            // Every resistor the ACTIVE preset has, not a fixed three. A saved value wins;
+            // otherwise the preset keeps the default it was built with, which is what lets
+            // a new circuit be added without touching persistence.
+            var rs = _scene.Active.Resistors;
+            for (int i = 0; i < rs.Length; i++)
+                if (_s.Resistors.TryGetValue(ResistorKey(_s.PresetIndex, i), out float v))
+                    _scene.SetResistor(i, v);
 
             _scope.Configure((ScopeInput)Math.Clamp(_s.ScopeMode, 0, 3),
                              _s.ScopePort, _s.ScopeBaud,
@@ -226,10 +235,24 @@ namespace EDes
 
         private void EducationKeys()
         {
-            if (Down(VX_KEYS.KB_1)) _s.PresetIndex = 0;
-            if (Down(VX_KEYS.KB_2)) _s.PresetIndex = 1;
-            if (Down(VX_KEYS.KB_3)) _s.PresetIndex = 2;
-            if (Down(VX_KEYS.KB_4)) _s.PresetIndex = 3;
+            // 1-9, one per circuit. It used to stop at 4, so the keys silently could not
+            // reach half the presets the moment any were added -- and a key that does
+            // nothing reads as a broken key, not as a missing feature.
+            var presetKeys = new[]
+            {
+                VX_KEYS.KB_1, VX_KEYS.KB_2, VX_KEYS.KB_3, VX_KEYS.KB_4, VX_KEYS.KB_5,
+                VX_KEYS.KB_6, VX_KEYS.KB_7, VX_KEYS.KB_8, VX_KEYS.KB_9,
+            };
+            int limit = Math.Min(presetKeys.Length, _scene.Presets.Length);
+            for (int i = 0; i < limit; i++)
+                if (Down(presetKeys[i]) && _s.PresetIndex != i)
+                {
+                    _s.PresetIndex = i;
+                    // The panel's SHAPE follows the circuit, so a preset picked from the
+                    // volume has to rebuild it too -- otherwise the boxes on screen belong
+                    // to the previous circuit.
+                    RequestPanelRebuild();
+                }
 
             if (Down(VX_KEYS.KB_Arrow_Left))  _scene.SelectNext(-1);
             if (Down(VX_KEYS.KB_Arrow_Right)) _scene.SelectNext(+1);
@@ -240,21 +263,32 @@ namespace EDes
             if (Down(VX_KEYS.KB_Arrow_Up))   ScaleResistor(sel, 1.1);
             if (Down(VX_KEYS.KB_Arrow_Down)) ScaleResistor(sel, 1.0 / 1.1);
 
-            if (Down(VX_KEYS.KB_Minus))  _s.SourceVolts = Math.Clamp(_s.SourceVolts - 1f, 1f, 24f);
-            if (Down(VX_KEYS.KB_Equals)) _s.SourceVolts = Math.Clamp(_s.SourceVolts + 1f, 1f, 24f);
+            if (Down(VX_KEYS.KB_Minus))
+                _s.SourceVolts = Math.Clamp(_s.SourceVolts - 1f, MIN_VOLTS, MAX_VOLTS);
+            if (Down(VX_KEYS.KB_Equals))
+                _s.SourceVolts = Math.Clamp(_s.SourceVolts + 1f, MIN_VOLTS, MAX_VOLTS);
             if (Down(VX_KEYS.KB_P))      _s.FlowPaused = !_s.FlowPaused;
         }
 
+        /// <summary>Bumped whenever the settings panel's set of controls changes, so the
+        /// shell rebuilds it. See IVoxonGame.PanelRevision.</summary>
+        private int _panelRevision;
+        public  int PanelRevision => _panelRevision;
+        private void RequestPanelRebuild() => _panelRevision++;
+
+        /// <summary>Scale one resistor of the ACTIVE preset, from the volume keys.
+        ///
+        /// Goes through the same per-preset store the panel writes, so the keys and the
+        /// typed boxes cannot disagree -- they used to read three separate fields that the
+        /// solver only partly consumed.</summary>
         private void ScaleResistor(int index, double factor)
         {
-            float v = index switch { 0 => _s.R1, 1 => _s.R2, _ => _s.R3 };
-            v = (float)Math.Clamp(v * factor, 1, 10_000);
-            switch (index)
-            {
-                case 0: _s.R1 = v; break;
-                case 1: _s.R2 = v; break;
-                default: _s.R3 = v; break;
-            }
+            var rs = _scene.Active.Resistors;
+            if (index < 0 || index >= rs.Length) return;
+
+            double v = Math.Clamp(rs[index].R * factor, Resistor.MinOhms, Resistor.MaxOhms);
+            _s.Resistors[ResistorKey(_s.PresetIndex, index)] = (float)v;
+            _scene.SetResistor(index, v);
         }
 
         private void ScopeKeys()
@@ -1497,24 +1531,116 @@ namespace EDes
             return ui.Wrap(stack);
         }
 
+        /// <summary>Persistence key for one resistor of one preset. Per preset on purpose:
+        /// see EDesSettings.Resistors.</summary>
+        internal static string ResistorKey(int preset, int index) => preset + ":" + index;
+
         private void BuildCircuitSection(PanelBuilder ui, StackPanel stack, List<Expander> group)
         {
             var sec = ui.AddSection(stack, "Circuit (Education)", group);
-            ui.AddInfo(sec, "Four built-in topologies. Keys 1-4 in the volume.");
+            ui.AddInfo(sec, $"{_scene.Presets.Length} worked circuits, easiest first — so " +
+                            "walking down the list is a course rather than a menu. Keys 1-9 " +
+                            "in the volume select them too.");
+
             for (int i = 0; i < _scene.Presets.Length; i++)
             {
                 int idx = i;
-                ui.AddButton(sec, $"{i + 1}. {_scene.Presets[i].Name}", () => _s.PresetIndex = idx);
+                ui.AddButton(sec, $"{i + 1}. {_scene.Presets[i].Name}", () =>
+                {
+                    _s.PresetIndex = idx;
+                    // The inputs below are per-preset and vary in COUNT, so the panel has
+                    // to be rebuilt rather than just re-read -- a four-resistor bridge
+                    // cannot be edited through three boxes left over from the last circuit.
+                    RequestPanelRebuild();
+                });
             }
-            ui.AddSlider(sec, "Source voltage (V)", 1, 24, _s.SourceVolts, v => _s.SourceVolts = (float)v, "F1");
-            ui.AddSlider(sec, "R1 (ohms)", 1, 10000, _s.R1, v => _s.R1 = (float)v, "F0");
-            ui.AddSlider(sec, "R2 (ohms)", 1, 10000, _s.R2, v => _s.R2 = (float)v, "F0");
-            ui.AddSlider(sec, "R3 (ohms)", 1, 10000, _s.R3, v => _s.R3 = (float)v, "F0");
-            ui.AddSlider(sec, "Flow animation speed", 0, 4, _s.FlowSpeed, v => _s.FlowSpeed = (float)v, "F2");
+
+            // ── The active circuit's own inputs ───────────────────────────────
+            var p  = _scene.Active;
+            var rs = p.Resistors;
+
+            ui.AddHeader(sec, p.Name);
+            ui.AddInfo(sec, p.Law);
+            if (p.Try.Length  > 0) ui.AddInfo(sec, "TRY: " + p.Try);
+            if (p.Note.Length > 0) ui.AddInfo(sec, "NOTE: " + p.Note);
+
+            // TYPED, not sliders. A resistor is a value you know -- 4k7, 220R, 1M -- so it
+            // is typed in, and the range spans real parts (0.1 ohm to 10M) which no usable
+            // slider can. Same reason the source is typed: 3.3 and 5.0 are exact numbers,
+            // not places on a track.
+            ui.AddNumber(sec, "Source voltage (V)", _s.SourceVolts,
+                         v => _s.SourceVolts = (float)v, "F2");
+
+            for (int i = 0; i < rs.Length; i++)
+            {
+                int    idx  = i;
+                string name = rs[i].Name;
+                ui.AddNumber(sec, name + " (ohms)", rs[i].R, v =>
+                {
+                    _s.Resistors[ResistorKey(_s.PresetIndex, idx)] = (float)v;
+                    _scene.SetResistor(idx, v);
+                }, "F1");
+            }
+
+            if (p.Root is SeriesGroup sg)
+                foreach (var child in sg.Children)
+                    if (child is Diode d)
+                        ui.AddNumber(sec, d.Name + " forward drop Vf (V)", d.Vf, v =>
+                        {
+                            d.Vf = v;
+                            _scene.MarkDirty();
+                        }, "F2");
+
+            ui.AddButton(sec, "Reset this circuit to its defaults", () =>
+            {
+                for (int i = 0; i < rs.Length; i++)
+                    _s.Resistors.Remove(ResistorKey(_s.PresetIndex, i));
+                _scene.ResetActiveDefaults();
+                RequestPanelRebuild();
+            });
+
+            ui.AddNumber(sec, "Flow animation speed", _s.FlowSpeed,
+                         v => _s.FlowSpeed = (float)v, "F2");
             ui.AddToggle(sec, "Pause current flow", _s.FlowPaused, v => _s.FlowPaused = v);
+
+            // Per-element, not just totals. The totals were the only readout, so a series
+            // circuit could not be checked against the law it was demonstrating -- you
+            // could not see that the drops sum to the supply without the drops.
             ui.AddLiveInfo(sec, () =>
-                $"Rt {_scene.TotalResistance:0.##} ohm   It {_scene.TotalCurrent * 1000:0.##} mA   " +
-                $"Pt {_scene.TotalPower:0.###} W");
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.Append($"Rt {Hud.Eng(_scene.TotalResistance, "")}ohm   ")
+                  .Append($"It {Hud.Eng(_scene.TotalCurrent, "A")}   ")
+                  .Append($"Pt {Hud.Eng(_scene.TotalPower, "W")}\n");
+
+                double sumV = 0;
+                foreach (var r in _scene.Active.Resistors)
+                {
+                    sumV += r.Voltage;
+                    sb.Append($"\n{r.Name,-5} {Hud.Eng(r.R, "")}ohm  ")
+                      .Append($"{Hud.Eng(r.Voltage, "V")}  ")
+                      .Append($"{Hud.Eng(r.Current, "A")}  ")
+                      .Append($"{Hud.Eng(r.Power, "W")}");
+                }
+                if (_scene.Active.Root is SeriesGroup s2)
+                    foreach (var c in s2.Children)
+                        if (c is Diode dd)
+                        {
+                            sumV += dd.Voltage;
+                            sb.Append($"\n{dd.Name,-5} Vf {dd.Vf:0.##}V  ")
+                              .Append($"{Hud.Eng(dd.Voltage, "V")}  ")
+                              .Append($"{Hud.Eng(dd.Current, "A")}")
+                              .Append(dd.Current < 1e-9 ? "   (NOT CONDUCTING)" : "");
+                        }
+
+                // Only meaningful in a single series loop; in a parallel topology the
+                // drops are across branches and summing them means nothing.
+                if (_scene.Active.Root is SeriesGroup)
+                    sb.Append($"\n\nsum of drops {sumV:0.###}V vs source ")
+                      .Append($"{_scene.SourceVolts:0.###}V");
+
+                return sb.ToString();
+            }, 0.3);
         }
 
         private void BuildScopeSection(PanelBuilder ui, StackPanel stack, List<Expander> group)

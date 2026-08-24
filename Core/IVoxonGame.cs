@@ -184,6 +184,16 @@ namespace EDes
         /// <summary>Recolour what a legend row stands for (packed 0xRRGGBB).</summary>
         void SetLegendColour(string key, int colour) { }
 
+        /// <summary>Bumped by the game when the settings panel's SHAPE changes -- not its
+        /// values, which are read live, but the set of controls itself.
+        ///
+        /// Needed because a panel can change without the MODE changing: picking a different
+        /// teaching circuit changes how many resistor boxes there are, and a four-resistor
+        /// bridge cannot be edited through three boxes left over from the last circuit.
+        /// A counter rather than an event so the shell can poll it on the tick it already
+        /// runs, and so a game that never changes shape needs no code at all.</summary>
+        int PanelRevision => 0;
+
         /// <summary>One value the shell offers as a large vertical slider beside the
         /// preview, or null (the default) for none.
         ///

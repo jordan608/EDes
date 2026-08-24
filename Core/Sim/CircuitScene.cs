@@ -34,6 +34,7 @@ namespace EDes.Sim
         public point3d   Start, End;
         public double    Current;      // amps through this piece
         public Resistor? Body;         // non-null: draw a resistor here
+        public Diode?    Led;          // non-null: draw a diode here
         public bool      IsBattery;    // draw the source symbol
     }
 
@@ -78,7 +79,7 @@ namespace EDes.Sim
 
         public void SetSourceVolts(double v)
         {
-            v = Math.Clamp(v, 1.0, 24.0);
+            v = Math.Clamp(v, Supply.MinVolts, Supply.MaxVolts);
             if (Math.Abs(v - SourceVolts) < 1e-9) return;
             SourceVolts = v;
             _dirty      = true;
@@ -93,7 +94,28 @@ namespace EDes.Sim
         public void ScaleSelected(double factor)
         {
             var r = Active.Resistors[Selected];
-            r.R    = Math.Clamp(r.R * factor, 1.0, 10_000.0);
+            r.R    = Math.Clamp(r.R * factor, Resistor.MinOhms, Resistor.MaxOhms);
+            _dirty = true;
+        }
+
+        /// <summary>Put the active circuit back to the values it was built with.
+        ///
+        /// Rebuilt from CircuitPresets rather than from a remembered copy, so the defaults
+        /// are defined in exactly one place -- the preset itself -- and adding a circuit
+        /// cannot forget to register its own defaults somewhere else.</summary>
+        public void ResetActiveDefaults()
+        {
+            var fresh = CircuitPresets.Build()[PresetIndex];
+            var mine  = Active.Resistors;
+            for (int i = 0; i < mine.Length && i < fresh.Resistors.Length; i++)
+                mine[i].R = fresh.Resistors[i].R;
+
+            // Diodes too: Vf is editable, so it is part of what "defaults" means.
+            if (Active.Root is SeriesGroup a && fresh.Root is SeriesGroup b)
+                for (int i = 0; i < a.Children.Length && i < b.Children.Length; i++)
+                    if (a.Children[i] is Diode da && b.Children[i] is Diode db)
+                        da.Vf = db.Vf;
+
             _dirty = true;
         }
 
@@ -102,7 +124,7 @@ namespace EDes.Sim
         {
             var rs = Active.Resistors;
             if (index < 0 || index >= rs.Length) return;
-            ohms = Math.Clamp(ohms, 1.0, 10_000.0);
+            ohms = Math.Clamp(ohms, Resistor.MinOhms, Resistor.MaxOhms);
             if (Math.Abs(rs[index].R - ohms) < 1e-9) return;
             rs[index].R = ohms;
             _dirty      = true;
@@ -195,6 +217,16 @@ namespace EDes.Sim
             {
                 case Resistor r:
                     Add(a, b, r.Current, r);
+                    return;
+
+                // Without this case the LED preset drew a GAP where the diode is: Emit
+                // fell through the switch and simply never added a segment, so the circuit
+                // appeared to be broken at exactly the component the lesson is about.
+                case Diode d:
+                    Segments.Add(new WireSegment
+                    {
+                        Start = a, End = b, Current = d.Current, Led = d,
+                    });
                     return;
 
                 case SeriesGroup s:

@@ -10,6 +10,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 
@@ -219,7 +220,17 @@ namespace EDes
         // float, not double: volatile requires a 32-bit type, and 24-bit float
         // precision is far beyond what a resistor value needs.
         public volatile float  SourceVolts = 12.0f;
-        public volatile float  R1 = 100f, R2 = 220f, R3 = 470f;
+        /// <summary>Resistor values, keyed "presetIndex:resistorIndex".
+        ///
+        /// Replaces three fixed R1/R2/R3 fields. Those capped every circuit at three
+        /// tunable parts -- so the four-resistor Wheatstone bridge could not be set up at
+        /// all -- and they were SHARED across presets, so the sliders for a one-resistor
+        /// circuit were dead controls that silently rewrote another circuit's values.
+        ///
+        /// Per preset as well as per resistor, so switching circuits does not carry a 26k
+        /// divider leg into a 100-ohm parallel demo. A missing key means "use the
+        /// preset's own default", which is what makes new presets need no migration.</summary>
+        public Dictionary<string, float> Resistors { get; set; } = new();
         public volatile float  FlowSpeed  = 1.0f;
         public volatile bool   FlowPaused = false;
 
