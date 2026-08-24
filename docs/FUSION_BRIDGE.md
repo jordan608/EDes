@@ -79,36 +79,57 @@ Request — one line of JSON, newline-terminated:
 
     {"cmd":"geometry","tolerance_mm":0.4,"max_triangles":300000}
 
-Response:
+**Streamed, one frame per body**, not one frame holding the whole assembly: the add-in pushes
+each body's frame the moment it finishes tessellating, so the worker thread can start sending
+body 1 while the main thread is still tessellating body 2. A big assembly's overlap comes for
+free; nothing else about the format needed to change for it to work, because every frame below
+is already fully self-describing on its own.
+
+Each frame:
 
     magic       4 bytes   "EDS1"
     headerLen   uint32    little-endian
     header      JSON, headerLen bytes
-    payload     float32[] little-endian, 9 per triangle (3 verts x xyz), mm,
-                          already in ASSEMBLY space
+    payload     vertices, THEN indices — see below
+
+**A real indexed mesh, not a flattened triangle soup.** The payload is every vertex ONCE
+(float32 x,y,z, mm, already in ASSEMBLY space) followed by every triangle as three uint32
+vertex indices. Two triangles sharing an edge share the same two index values on the wire —
+this is what lets a cutting plane's cross-section walk the intersection as a graph of shared
+edges instead of matching independent triangles' floating-point positions, and it also runs
+roughly a third smaller than the soup format it replaced (Fusion's own tessellation already
+comes back indexed; the old format threw that away by expanding it before sending).
 
     header = {
       "ok": true,
       "unit": "mm",
       "revision": "a91f...",
       "document": "IRSensor v4",
+      "bodyIndex": 0, "bodyCount": 2,
       "bodies": [
-        {"path":"Enclosure:1",       "name":"Enclosure", "visible":true,
-         "triangles":19044, "offset":0},
-        {"path":"Enclosure:1/PCB:1", "name":"PCB",       "visible":true,
-         "triangles":812,   "offset":19044}
+        {"path":"Enclosure:1", "name":"Enclosure", "visible":true,
+         "vertices":9522, "triangles":19044, "vertexOffset":0, "triangleOffset":0}
       ],
       "dropped": 0,
       "note": ""
     }
+
+In practice a frame carries exactly one body (or, for the terminator frame that closes the
+sequence, none — see below). Several bodies sharing one frame is still supported, for a
+hand-built test fixture's convenience: their vertex/index data shares one payload, and every
+index is GLOBAL (already offset into the shared vertex array), so a reader never has to re-base
+anything itself. `bodyIndex`/`bodyCount` are a progress hint only, for a receiver that wants to
+show "body 3 of 12" — every frame is fully parseable without them.
+
+The sequence ends with a **terminator frame**: `"bodies": []`, carrying the overall `dropped`
+count and `note` that a single-frame reply used to carry directly.
 
 `path` is `occurrence.fullPathName` and is the **stable identity**: Fusion permits duplicate
 component names, so `name` cannot key the legend or survive a refresh. `name` is for display.
 
 **Normals are not transmitted.** Fusion offers `TriangleMesh.normalVectors`, but `StlMesh`
 already recomputes from winding and treats stored normals as untrustworthy — a decision that
-earned itself when STL files turned out to lie. Recomputing keeps one code path and a third
-less on the wire.
+earned itself when STL files turned out to lie. Recomputing keeps one code path.
 
 ### Networking
 
@@ -154,15 +175,25 @@ shows its internals through its own shell and reads as fog. All three *reduce* v
   sound, because a surface no exterior ray reaches is both invisible and unlit, so one pass
   answers both. Coarse occupancy grid, march inward from six directions, mark first hits as
   exposed. Per-triangle, so a half-buried part shows its exposed half. The engine already has
-  the per-body version in `LightingSystem`'s six-face shell map.
+  the per-body version in `LightingSystem`'s six-face shell map. **Not started** for Fusion CAD.
 - **Ghost or crease-edge wireframe**, per component, from the legend. Ghost = low sample
   density, which is already how dimming works here. Crease edges = keep mesh edges whose
   adjacent face normals differ beyond a threshold, because the Fusion path has no exact edges
-  and drawing every tessellation edge would be noise.
+  and drawing every tessellation edge would be noise. **Shipped**, as the per-body render-mode
+  picker (`CadDrawMode`: Lit/Flat/Wireframe/Hidden, plus a global Ghost toggle) — Wireframe
+  draws every tessellation edge rather than only crease edges, since that refinement was never
+  built; it is noisier on a dense mesh than the crease-only version described here.
 - **Section plane**, nearly free: faces are filled by point-sampling a barycentric lattice, so
   rejecting samples on one side of a plane gives an exact cut with no triangle clipping. Plus,
   eventually, aligning the active sketch's plane to `y = 0.1` and sectioning the near side, so
-  you draw on the glass with the model cut back behind it.
+  you draw on the glass with the model cut back behind it. **Shipped** as `CutPlane` in
+  `CadSceneRenderer` (fixed to the assembly's own axes, not the display's, so rotating the
+  scene never changes what is cut away), with a highlighted colour band for the cut face. Still
+  missing a real flat CAP where the plane cuts through a solid body — the mesh is surface-only,
+  so today's cut exposes the shell's own far interior wall rather than a true cross-section; a
+  real cap needs a mesh-slicing pass (walk the plane/mesh intersection, close the contour, fill
+  it) that the indexed wire format above exists to make tractable, but that pass itself is not
+  built yet. The active-sketch-plane alignment was never built either.
 
 **The interaction to get right:** exposure culling and the section plane fight each other if
 combined naively — cut an assembly open and the revealed faces were classified interior a

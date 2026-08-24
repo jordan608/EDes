@@ -52,6 +52,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Cad\FusionClient.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Cad\CadPlacement.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Cad\CadSceneRenderer.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Cad\CadProbe.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Pcb\CadLight.cs" />
     <Compile Include="TestData.cs" />
     <Compile Include="DesignTreeChecks.cs" />
@@ -65,6 +66,7 @@
     <Compile Include="CircuitChecks.cs" />
     <Compile Include="SchematicChecks.cs" />
     <Compile Include="FusionChecks.cs" />
+    <Compile Include="CameraChecks.cs" />
   </ItemGroup>
 
   <ItemGroup>

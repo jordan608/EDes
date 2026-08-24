@@ -42,6 +42,7 @@ import queue
 import socket
 import sys
 import threading
+import time
 import traceback
 
 import adsk.core
@@ -85,12 +86,23 @@ _jobs = queue.Queue()
 
 
 class _Job:
-    """One request, handed from the worker to the main thread and back."""
+    """One request, handed from the worker to the main thread and back.
+
+    `frames` exists so a "geometry" request can be answered as a SEQUENCE of
+    single-body frames, put here one at a time as the main thread finishes
+    tessellating each body, and drained by the worker thread concurrently —
+    the worker starts sending body 1 while the main thread is still
+    tessellating body 2, instead of the whole assembly sitting in memory as
+    one reply before a single byte goes over the socket. `reply` is still used
+    for the small, single-frame "rev"/"ping" replies, which have nothing to
+    gain from streaming.
+    """
 
     def __init__(self, req):
         self.req = req
         self.done = threading.Event()
         self.reply = None
+        self.frames = queue.Queue()
 
 
 # ══ Main thread: everything that touches adsk ═════════════════════════════
@@ -154,7 +166,13 @@ def _iter_bodies():
 
 
 def _tessellate(body, tolerance_cm):
-    """One body to a flat triangle soup in millimetres, or None."""
+    """One body to (vertices_mm, triangle_indices), or None.
+
+    An indexed mesh, not a flattened triangle soup: two triangles sharing an
+    edge keep sharing the same two vertex numbers all the way to the wire,
+    which is what makes a cutting plane's contour a shared-edge walk instead
+    of a search for near-duplicate floating point positions.
+    """
     try:
         calc = body.meshManager.createMeshCalculator()
         if calc is None:
@@ -163,62 +181,96 @@ def _tessellate(body, tolerance_cm):
         mesh = calc.calculate()
         if mesh is None:
             return None
-        return protocol.expand_triangles(mesh.nodeCoordinatesAsFloat, mesh.nodeIndices)
+        verts = protocol.convert_vertices_mm(mesh.nodeCoordinatesAsFloat)
+        idx = protocol.valid_triangle_indices(mesh.nodeIndices, len(verts) // 3)
+        return verts, idx
     except Exception:
         return None
 
 
-def _build_geometry(req):
-    """Walk, tessellate, cap, frame. MAIN THREAD ONLY.
+def _build_geometry(req, job):
+    """Walk, tessellate and STREAM one frame per body. MAIN THREAD ONLY.
 
-    This is the slow part and it runs on the UI thread, because the API gives no
-    choice — so the tolerance in the request is the operator's throttle on how
-    long Fusion freezes for.
+    Tessellation is the slow part and it runs on the UI thread because the API
+    gives no choice — so the tolerance in the request is the operator's
+    throttle on how long Fusion freezes for. What this function does NOT do
+    any more is hold the whole assembly's triangles in memory as one frame:
+    each body is pushed onto `job.frames` the moment it is tessellated, so the
+    worker thread can start sending it while this loop moves on to the next
+    body. A big assembly's tessellation time is unchanged, but the transfer
+    overlaps it instead of starting only after every body is done.
+
+    The triangle cap is honoured the same way `protocol.cap_bodies` always
+    did — bodies kept in order until the running total would exceed it — just
+    decided incrementally instead of after tessellating everything: once the
+    cap is reached, remaining bodies are neither tessellated nor sent. The one
+    difference from the old batch behaviour is the "nothing fit" fallback: it
+    used to keep the SMALLEST body (which requires knowing every size first);
+    streaming can only guarantee the FIRST tessellated body is always sent,
+    even if it alone is over the cap, so at least one body still shows.
     """
     design = _design()
     if design is None:
-        return protocol.error_frame(
+        job.frames.put(protocol.error_frame(
             "no active Design — switch to the Design workspace and open a document"
-        )
+        ))
+        return
 
     tol_cm = protocol.tolerance_mm_to_cm(req["tolerance_mm"])
+    max_tris = req["max_triangles"]
+    document, revision = _document_name(), _revision()
 
-    bodies, failed = [], 0
-    for path, name, visible, body in _iter_bodies():
-        tris = _tessellate(body, tol_cm)
-        if tris is None:
+    body_list = list(_iter_bodies())     # cheap: no tessellation yet
+    total_bodies = len(body_list)
+
+    sent, running_total, failed, dropped_tris, dropped_bodies = 0, 0, 0, 0, 0
+
+    for i, (path, name, visible, body) in enumerate(body_list):
+        tessellated = _tessellate(body, tol_cm)
+        if tessellated is None:
             failed += 1
             continue
-        bodies.append(
-            {
-                "path": path,
-                "name": name,
-                "visible": visible,
-                "triangles": len(tris) // 9,
-                "tris": tris,
-            }
-        )
+        verts, idx = tessellated
 
-    kept, dropped = protocol.cap_bodies(bodies, req["max_triangles"])
+        n = len(idx) // 3
+        if running_total + n > max_tris and sent > 0:
+            # This body's size IS known (it was just tessellated) so it counts
+            # exactly; everything after it stays UNtessellated, so their sizes
+            # never get measured at all — dropped_tris is a lower bound, not
+            # the true total, and the note says so rather than implying
+            # precision streaming cannot deliver.
+            dropped_bodies = total_bodies - i
+            dropped_tris = n
+            break
+
+        running_total += n
+        sent += 1
+        job.frames.put(protocol.build_frame(
+            [{"path": path, "name": name, "visible": visible,
+              "vertices": verts, "indices": idx}],
+            document=document, revision=revision,
+            body_index=sent - 1, body_count=total_bodies,
+        ))
 
     notes = []
-    if dropped:
+    if dropped_bodies:
         notes.append(
-            "%d triangle(s) in %d body(s) dropped to stay under the cap"
-            % (dropped, len(bodies) - len(kept))
+            "%d body(s) not sent (>= %d triangle(s)), over the %d-triangle cap"
+            % (dropped_bodies, dropped_tris, max_tris)
         )
     if failed:
         notes.append("%d body(s) could not be tessellated" % failed)
-    if not bodies:
+    if not body_list:
         notes.append("the document contains no B-Rep bodies to send")
 
-    return protocol.build_frame(
-        kept,
-        document=_document_name(),
-        revision=_revision(),
-        dropped=dropped,
-        note="; ".join(notes),
-    )
+    # The terminator: zero bodies, so a client can tell "one more body" apart
+    # from "that was the last one" without relying on EOF alone. Carries the
+    # notes a single-frame reply used to carry directly.
+    job.frames.put(protocol.build_frame(
+        [], document=document, revision=revision,
+        dropped=dropped_tris, note="; ".join(notes),
+        body_index=sent, body_count=total_bodies,
+    ))
 
 
 def _document_name():
@@ -261,7 +313,10 @@ def _serve_on_main_thread():
         try:
             cmd = job.req.get("cmd")
             if cmd == "geometry":
-                job.reply = _build_geometry(job.req)
+                # Pushes its own frames onto job.frames as it goes; job.done
+                # (set below, in `finally`) fires only once every frame this
+                # request will ever produce has already been queued.
+                _build_geometry(job.req, job)
             elif cmd == "rev":
                 job.reply = protocol.build_frame(
                     [], document=_document_name(), revision=_revision()
@@ -279,10 +334,18 @@ def _serve_on_main_thread():
                     job.req.get("error") or "unknown command"
                 )
         except Exception:
-            job.reply = protocol.error_frame(
+            err = protocol.error_frame(
                 "the add-in raised while building a reply: %s"
                 % traceback.format_exc(limit=3).replace("\n", " ")
             )
+            # The geometry path is drained from job.frames, not job.reply — an
+            # exception that unwound partway through streaming bodies still
+            # needs a terminator there, or the worker waits out the full idle
+            # timeout for a reply that job.reply was never going to carry.
+            if job.req.get("cmd") == "geometry":
+                job.frames.put(err)
+            else:
+                job.reply = err
         finally:
             job.done.set()
 
@@ -300,6 +363,46 @@ class _RequestHandler(adsk.core.CustomEventHandler):
 
 
 # ══ Worker thread: the socket, and nothing else ═══════════════════════════
+
+
+def _stream_frames(conn, job):
+    """Send job.frames as they appear, instead of waiting for job.done.
+
+    This is the entire point of the split: the main thread is still
+    tessellating body 2 while this loop is already sending body 1's frame.
+    Falls back to the same "Fusion never went idle" explanation the old
+    single-reply path used, for the common case where a modal dialog blocks
+    the main thread and NOTHING ever arrives.
+    """
+    got_any = False
+    deadline = time.monotonic() + IDLE_TIMEOUT_S
+
+    while True:
+        try:
+            frame = job.frames.get(timeout=0.2)
+        except queue.Empty:
+            if job.done.is_set():
+                break
+            if not got_any and time.monotonic() > deadline:
+                conn.sendall(protocol.error_frame(
+                    "Fusion did not become idle within %ds — a modal dialog or "
+                    "an active command blocks the API. Close it and retry."
+                    % int(IDLE_TIMEOUT_S)
+                ))
+                return
+            continue
+        got_any = True
+        conn.sendall(frame)
+
+    # job.done can be set the instant the last frame is queued, which can win
+    # a race against this loop's own Empty check above — drain whatever is
+    # left with no further waiting rather than risk dropping the last frame.
+    while True:
+        try:
+            frame = job.frames.get_nowait()
+        except queue.Empty:
+            return
+        conn.sendall(frame)
 
 
 def _handle_client(conn):
@@ -325,18 +428,22 @@ def _handle_client(conn):
         if _app is not None:
             _app.fireCustomEvent(_EVENT_ID, "")
 
-        if not job.done.wait(IDLE_TIMEOUT_S):
-            # Fusion never went idle. Say so: this is by far the most common
-            # confusing state, and "the add-in sent nothing" would not explain it.
-            reply = protocol.error_frame(
-                "Fusion did not become idle within %ds — a modal dialog or an "
-                "active command blocks the API. Close it and retry."
-                % int(IDLE_TIMEOUT_S)
-            )
+        if req["cmd"] == "geometry":
+            # Streamed body-by-body; see _build_geometry and _stream_frames.
+            _stream_frames(conn, job)
         else:
-            reply = job.reply or protocol.error_frame("the add-in produced no reply")
+            if not job.done.wait(IDLE_TIMEOUT_S):
+                # Fusion never went idle. Say so: this is by far the most common
+                # confusing state, and "the add-in sent nothing" would not explain it.
+                reply = protocol.error_frame(
+                    "Fusion did not become idle within %ds — a modal dialog or an "
+                    "active command blocks the API. Close it and retry."
+                    % int(IDLE_TIMEOUT_S)
+                )
+            else:
+                reply = job.reply or protocol.error_frame("the add-in produced no reply")
 
-        conn.sendall(reply)
+            conn.sendall(reply)
     except Exception:
         pass
     finally:
@@ -444,7 +551,9 @@ def stop(context):
                 job = _jobs.get_nowait()
             except queue.Empty:
                 break
-            job.reply = protocol.error_frame("the add-in was stopped")
+            err = protocol.error_frame("the add-in was stopped")
+            job.reply = err
+            job.frames.put(err)   # in case this was a "geometry" job
             job.done.set()
     except Exception:
         pass

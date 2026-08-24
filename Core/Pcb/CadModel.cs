@@ -16,6 +16,7 @@
 //  -Z-is-up convention, exactly as it already does for mesh clouds.
 // ═══════════════════════════════════════════════════════════════════════════
 
+using System;
 using System.Collections.Generic;
 
 namespace EDes.Pcb
@@ -100,6 +101,16 @@ namespace EDes.Pcb
         /// <summary>Triangulated planar faces, for the optional flat-shaded fill. Empty
         /// when the solid has no planar faces, or when surfaces were not requested.</summary>
         public readonly List<CadFace> Faces = new();
+
+        /// <summary>The real indexed mesh (Fusion bodies only — empty for STEP/mesh-loader
+        /// imports, which never carry this): every vertex once (3 floats each, mm, LOCAL to
+        /// this solid — 0-based, not the wire frame's shared numbering) and every triangle
+        /// as 3 indices into it. Faces above are what the renderer actually draws (grouped
+        /// by direction, one flat array per group); these are for anything that needs real
+        /// shared-edge connectivity instead — a cutting plane walking a cut contour along
+        /// shared edges, for instance, rather than matching independent triangles' floats.</summary>
+        public float[] Vertices = Array.Empty<float>();
+        public int[]   Indices  = Array.Empty<int>();
 
         public float MinX, MinY, MinZ, MaxX, MaxY, MaxZ;
 

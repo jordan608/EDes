@@ -22,6 +22,21 @@ namespace EDes
     /// would have meant threading "none of the above" through every board setting.</summary>
     public enum EDesMode { Education = 0, Scope = 1, Pcb = 2, Cad = 3 }
 
+    /// <summary>The Fusion CAD tab's own both-buttons cycle — the PCB tab's probe stages
+    /// (EDesInspect) mean nothing there, so it gets a cycle of its own on the same
+    /// gesture instead of sharing one that would not make sense in this tab.</summary>
+    public enum FusionInteraction
+    {
+        /// <summary>Normal camera driving — pan/rotate/zoom, same as every other mode.</summary>
+        Normal = 0,
+        /// <summary>The SpaceNav's translation axes move the cutting plane instead of
+        /// panning the scene — see FusionCutEnabled/Axis/Fraction.</summary>
+        CuttingPlane = 1,
+        /// <summary>The SpaceNav's translation axes move a 3D cursor instead of panning the
+        /// scene; whichever body the cursor is nearest to (or inside) is auto-picked.</summary>
+        CursorProbe = 2,
+    }
+
     /// <summary>The inspection stages the both-buttons gesture cycles through.</summary>
     public enum EDesInspect
     {
@@ -92,6 +107,13 @@ namespace EDes
         /// rather than truncating one mid-surface, and reports what it dropped.</summary>
         public volatile int    FusionMaxTriangles = 300_000;
 
+        /// <summary>Socket read timeout, in seconds — applies to EVERY read across the whole
+        /// streamed transfer, so effectively "how long may the SLOWEST single body take to
+        /// tessellate". 120s covers a genuinely complex part; raise it further for a large
+        /// assembly with one especially heavy body rather than lowering the triangle cap or
+        /// tolerance just to dodge a timeout on an otherwise-fine fetch.</summary>
+        public volatile float  FusionTimeoutSeconds = 120f;
+
         /// <summary>Set by the UI to ask the game thread to fetch. Same one-way request
         /// pattern as PcbImportRequested — the UI thread must never touch a socket.</summary>
         public volatile bool   FusionFetchRequested = false;
@@ -121,6 +143,130 @@ namespace EDes
         public volatile float  FusionDensity    = 0.6f;
         public volatile float  FusionBrightness = 1.0f;
         public volatile bool   FusionGhost      = false;
+
+        /// <summary>Per-body overrides, keyed by CadSolid.AssemblyPath — the same stable
+        /// occurrence-path identity FusionWire already carries, so an override survives a
+        /// re-fetch even though bodies arrive as a fresh array every time. A missing key
+        /// means "use the default": FusionBodyColour absent means the body's own Colour
+        /// (0x9FC5E8 for a Fusion body, since Fusion sends no appearance data); FusionBodyMode
+        /// absent means CadDrawMode.Solid, or CadDrawMode.Ghost while FusionGhost is on.
+        ///
+        /// Same lock-guarded pattern as Resistors, for the same reason: the UI thread writes
+        /// from the per-body colour/mode pickers, the game thread reads them every Draw, and
+        /// Save enumerates them.</summary>
+        public Dictionary<string, int> FusionBodyColour { get; set; } = new();
+        /// <summary>CadDrawMode, stored as its int value so this dictionary needs no
+        /// dependency on EDes.Cad from this file.</summary>
+        public Dictionary<string, int> FusionBodyMode { get; set; } = new();
+
+        private readonly object _fusionBodyLock = new();
+
+        public void SetFusionBodyColour(string key, int colour)
+        {
+            lock (_fusionBodyLock) FusionBodyColour[key] = colour;
+        }
+        public bool TryGetFusionBodyColour(string key, out int colour)
+        {
+            lock (_fusionBodyLock) return FusionBodyColour.TryGetValue(key, out colour);
+        }
+        public void ClearFusionBodyColour(string key)
+        {
+            lock (_fusionBodyLock) FusionBodyColour.Remove(key);
+        }
+
+        public void SetFusionBodyMode(string key, int mode)
+        {
+            lock (_fusionBodyLock) FusionBodyMode[key] = mode;
+        }
+        public bool TryGetFusionBodyMode(string key, out int mode)
+        {
+            lock (_fusionBodyLock) return FusionBodyMode.TryGetValue(key, out mode);
+        }
+
+        // ── Fusion CAD: extra movable point lights + shadows ──────────────────
+        //
+        // Light 1 is the EXISTING PcbCadLighting/PcbCadPointLight/PcbCadLightX/Y/Z/
+        // Fx/Fy/Fz/Range fields above, unchanged — those are shared with the PCB
+        // viewer's own STEP-model overlay (CadLight.ForBoard), so widening THEM would
+        // also relight the PCB tab. Lights 2-4 are Fusion-only and additive: PcbCadLighting
+        // still gates the whole rig (no lights at all when it is off), but only the
+        // Fusion CAD renderer ever reads Light2..4 or the two shadow toggles below.
+        //
+        // Absolute Fusion millimetres, not PcbCadLightFx/Fy/Fz's board-relative
+        // fractions — "move it around" sliders are more legible as plain numbers than
+        // as fractions of a bounding box the operator cannot see while typing.
+        public volatile bool  FusionLight2On;
+        public volatile float FusionLight2X, FusionLight2Y;
+        public volatile float FusionLight2Z = 50f;
+        public volatile float FusionLight2Range;
+
+        public volatile bool  FusionLight3On;
+        public volatile float FusionLight3X = 50f, FusionLight3Y;
+        public volatile float FusionLight3Z = 50f;
+        public volatile float FusionLight3Range;
+
+        public volatile bool  FusionLight4On;
+        public volatile float FusionLight4X, FusionLight4Y = 50f;
+        public volatile float FusionLight4Z = 50f;
+        public volatile float FusionLight4Range;
+
+        /// <summary>Whether a body's OWN geometry can shadow itself — the concave side of
+        /// a bracket reading darker than the side facing the light, say. Off by default:
+        /// the shadow test is a coarse approximation (see CadSceneRenderer's ShadowMap),
+        /// and self-shadowing is where its bucket-resolution error shows up soonest.</summary>
+        public volatile bool  FusionSelfShadow  = false;
+
+        /// <summary>Whether one body can block light from reaching ANOTHER body — global,
+        /// not per-body, because a shadow is a relationship between two bodies and there is
+        /// no single body it could be "a setting of".</summary>
+        public volatile bool  FusionCastShadows = false;
+
+        /// <summary>When on and a body is picked, every OTHER body draws Hidden regardless
+        /// of its own render-mode override — the picked body's own mode (Lit/Flat/
+        /// Wireframe) is left alone, so isolating does not also flatten how it looks.</summary>
+        public volatile bool  FusionIsolatePicked = false;
+
+        // ── Fusion CAD: both-buttons interaction mode ──────────────────────────
+        //
+        // int, not FusionInteraction, for the same reason every other enum-backed setting
+        // here is an int: GameSettings is JSON round-tripped, and storing the numeric value
+        // directly means a future rename of the enum's members cannot silently break a
+        // saved settings file the way renaming a string-serialized enum would.
+        public volatile int   FusionInteractionMode = (int)FusionInteraction.Normal;
+
+        /// <summary>Whether the cutting plane is actually applied to the render. Separate
+        /// from FusionInteractionMode: entering CuttingPlane mode turns this on, but leaving
+        /// the mode (to go back to normal orbiting) does not turn it back off — the point of
+        /// slicing through a model is usually to keep LOOKING at the slice afterward, not
+        /// only while the puck is actively moving the plane.</summary>
+        public volatile bool  FusionCutEnabled  = false;
+        /// <summary>0 = X, 1 = Y, 2 = Z. Z (Fusion's up axis, the usual print build
+        /// direction) is the default because "simulate slice buildup" is the tool's main
+        /// use case.</summary>
+        public volatile int   FusionCutAxis     = 2;
+        /// <summary>0..1 along the assembly's OWN extent on that axis — a fraction rather
+        /// than an absolute mm value, so "half printed" means the same thing on a tiny
+        /// bracket and a full-size enclosure without the operator doing the arithmetic.</summary>
+        public volatile float FusionCutFraction = 1f;
+        /// <summary>True keeps the LOW side of the plane (already-printed layers building
+        /// up from the bed); false keeps the high side.</summary>
+        public volatile bool  FusionCutKeepLow  = true;
+        public volatile int   FusionCutHighlightColour = 0xFF3020;
+        /// <summary>How thick a band around the plane counts as "the cut face" for the
+        /// highlight colour, in mm.</summary>
+        public volatile float FusionCutHighlightBandMm = 0.5f;
+
+        /// <summary>The probe cursor's position, in Fusion's OWN millimetres — the same
+        /// frame every body's bounding box is already in, so "nearest body" is a plain
+        /// distance comparison with no placement/camera math involved.</summary>
+        public volatile float FusionCursorX, FusionCursorY, FusionCursorZ;
+
+        /// <summary>0 = assembled; each whole unit pushes every body an additional
+        /// assembly-diagonal's worth further from the assembly's own centre, along that
+        /// body's own direction from it — a fraction of the WHOLE assembly's size rather
+        /// than an absolute mm value, for the same reason FusionCutFraction is a fraction:
+        /// one number means the same thing on a tiny bracket and a full enclosure.</summary>
+        public volatile float FusionExplodeAmount = 0f;
 
         // -- HUD text anchor, as FRACTIONS of the live display extents ---------
         //
@@ -166,9 +312,14 @@ namespace EDes
         /// rotation axes, one for the button zoom. Deliberately not per-axis: the puck
         /// should feel isotropic, so X/Y/Z must not be trimmable against each other.
         /// Units are world-units (or radians) per second at full deflection.</summary>
-        public volatile float NavPanRate  = 9.0f;
-        public volatile float NavRotRate  = 3.0f;
-        public volatile float NavZoomRate = 2.0f;
+        /// <summary>Gentler than the SDK template's reference values (9 / 3 / 2): a
+        /// sustained full deflection at the old NavRotRate spun the scene about 172
+        /// degrees a second, which read as "way too sensitive" for anything needing
+        /// precision. Still live-adjustable in the settings panel and by the
+        /// calibration button below — this is a starting point, not a hard number.</summary>
+        public volatile float NavPanRate  = 4.0f;
+        public volatile float NavRotRate  = 1.2f;
+        public volatile float NavZoomRate = 1.0f;
 
         /// <summary>The raw count the puck reports at FULL deflection, for the three
         /// TRANSLATION axes and the three ROTATION axes respectively.
@@ -321,10 +472,14 @@ namespace EDes
             lock (_resistorLock) Resistors.Remove(key);
         }
 
-        /// <summary>Serialize under the same lock the mutators take. Used by Save.</summary>
+        /// <summary>Serialize under the same locks the mutators take — both of them, since
+        /// this one JsonSerializer.Serialize(this, ...) call walks Resistors AND the two
+        /// FusionBody dictionaries together. Used by Save.</summary>
         internal string SerializeLocked(JsonSerializerOptions opts)
         {
-            lock (_resistorLock) return JsonSerializer.Serialize(this, opts);
+            lock (_resistorLock)
+            lock (_fusionBodyLock)
+                return JsonSerializer.Serialize(this, opts);
         }
         public volatile float  FlowSpeed  = 1.0f;
         public volatile bool   FlowPaused = false;

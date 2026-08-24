@@ -64,14 +64,82 @@ def ask(cmd, port, tolerance=0.4, timeout=10.0):
 
 
 def decode(buf):
+    """One frame: header, plus its vertices (3 floats each) and triangle
+    indices (3 uint32 each) — a real indexed mesh, not a flattened soup."""
     if len(buf) < 8 or buf[:4] != b"EDS1":
         raise ValueError("not a frame: %r" % buf[:16])
     (hlen,) = struct.unpack("<I", buf[4:8])
     header = json.loads(buf[8 : 8 + hlen].decode("utf-8"))
     payload = buf[8 + hlen :]
-    n = len(payload) // 4
-    floats = list(struct.unpack("<%df" % n, payload[: n * 4])) if n else []
-    return header, floats
+
+    total_verts = sum(b["vertices"] for b in header.get("bodies", []))
+    total_tris = sum(b["triangles"] for b in header.get("bodies", []))
+    vbytes = total_verts * 3 * 4
+    ibytes = total_tris * 3 * 4
+
+    verts = list(struct.unpack("<%df" % (total_verts * 3), payload[:vbytes])) if total_verts else []
+    idx = (
+        list(struct.unpack("<%dI" % (total_tris * 3), payload[vbytes : vbytes + ibytes]))
+        if total_tris else []
+    )
+    return header, verts, idx
+
+
+def decode_one(buf, start):
+    """One frame beginning at byte `start`. Unlike decode(), the payload
+    length is taken from the header's own vertex/triangle counts rather than
+    "the rest of the buffer" — needed here because more frames may follow
+    this one. Returns (header, vertices, indices, bytes_consumed)."""
+    if len(buf) - start < 8 or buf[start : start + 4] != b"EDS1":
+        raise ValueError("not a frame at %d: %r" % (start, buf[start : start + 16]))
+    (hlen,) = struct.unpack("<I", buf[start + 4 : start + 8])
+    header = json.loads(buf[start + 8 : start + 8 + hlen].decode("utf-8"))
+    total_verts = sum(b["vertices"] for b in header.get("bodies", []))
+    total_tris = sum(b["triangles"] for b in header.get("bodies", []))
+    payload_start = start + 8 + hlen
+    vbytes = total_verts * 3 * 4
+    ibytes = total_tris * 3 * 4
+
+    verts = (
+        list(struct.unpack("<%df" % (total_verts * 3),
+                           buf[payload_start : payload_start + vbytes]))
+        if total_verts else []
+    )
+    idx = (
+        list(struct.unpack("<%dI" % (total_tris * 3),
+                           buf[payload_start + vbytes : payload_start + vbytes + ibytes]))
+        if total_tris else []
+    )
+    return header, verts, idx, (payload_start + vbytes + ibytes) - start
+
+
+def decode_stream(buf):
+    """A streamed 'geometry' reply — one frame per body plus a zero-body
+    terminator carrying ok/dropped/note — flattened into the same
+    (header, vertices, indices) shape a single merged frame would have had.
+    Each frame's OWN indices are only valid against that frame's own vertex
+    slice, so they are rebased into the merged vertex array as it grows —
+    the same rebasing build_frame does when several bodies share one frame,
+    just done here on the READ side across several frames instead."""
+    bodies, verts, idx, terminator = [], [], [], None
+    pos = 0
+    while pos < len(buf):
+        header, f_verts, f_idx, consumed = decode_one(buf, pos)
+        pos += consumed
+        if not header.get("bodies"):
+            terminator = header
+            continue
+        b = dict(header["bodies"][0])
+        vbase = len(verts) // 3
+        b["vertexOffset"] = vbase
+        b["triangleOffset"] = len(idx) // 3
+        verts.extend(f_verts)
+        idx.extend(i + vbase for i in f_idx)
+        bodies.append(b)
+
+    merged = dict(terminator) if terminator is not None else {}
+    merged["bodies"] = bodies
+    return merged, verts, idx
 
 
 def build_document():
@@ -122,7 +190,7 @@ def main():
 
     print()
     print("=== ping proves the round trip ===")
-    header, _ = decode(ask("ping", port))
+    header, _, _ = decode(ask("ping", port))
     # The document name can only be read on the main thread, so getting it back
     # proves the marshalling, not merely that the socket is open.
     ok("ping returns the document name from the main thread (%s)"
@@ -132,7 +200,22 @@ def main():
 
     print()
     print("=== geometry ===")
-    header, floats = decode(ask("geometry", port))
+    raw = ask("geometry", port)
+
+    # This is the property the streaming rewrite exists for: prove the wire
+    # actually carries ONE FRAME PER BODY (plus a terminator), not one frame
+    # holding all five — decode_stream tolerates either shape, so only
+    # counting frame boundaries directly on the raw bytes catches a
+    # regression back to a single combined frame.
+    frame_count, pos = 0, 0
+    while pos < len(raw):
+        _, _, _, consumed = decode_one(raw, pos)
+        pos += consumed
+        frame_count += 1
+    ok("five bodies arrive as SIX frames — one each plus a terminator (%d)"
+       % frame_count, frame_count == 6)
+
+    header, verts, idx = decode_stream(raw)
     ok("ok is true (%s)" % header.get("ok"), header.get("ok") is True)
     ok("the unit is declared mm (%s)" % header.get("unit"), header.get("unit") == "mm")
 
@@ -167,22 +250,34 @@ def main():
     print("=== units, the conversion that matters ===")
     # Each stub body is a box of `size_cm` centimetres. The 2 cm cube must arrive
     # as 20 mm. This is the assertion that catches a missing x10.
+    def body_xs(b):
+        voff = b["vertexOffset"] * 3
+        return verts[voff : voff + b["vertices"] * 3 : 3]
+
     cube = find("Shown:1/Cube")
-    off = cube["offset"] * 9
-    xs = floats[off : off + cube["triangles"] * 9 : 3]
+    xs = body_xs(cube)
     ok("a 2 cm body arrives spanning 20 mm (max %.2f)" % max(xs),
        abs(max(xs) - 20.0) < 1e-4)
 
     root = find("RootBox")
-    roff = root["offset"] * 9
-    rxs = floats[roff : roff + root["triangles"] * 9 : 3]
+    rxs = body_xs(root)
     ok("a 1 cm body arrives spanning 10 mm (max %.2f)" % max(rxs),
        abs(max(rxs) - 10.0) < 1e-4)
 
     # Offsets must address each body's own slice; sharing one would draw the same
     # geometry twice and nothing would look obviously wrong.
-    ok("each body's offset addresses its own triangles",
+    ok("each body's vertex offset addresses its own vertices",
        abs(max(xs) - max(rxs)) > 1.0)
+
+    # And the indices for one body must only ever reference ITS OWN vertex
+    # slice -- reusing another body's vertex numbers would draw the wrong
+    # shape while still parsing perfectly.
+    cube_tri_start = cube["triangleOffset"] * 3
+    cube_tri_end = cube_tri_start + cube["triangles"] * 3
+    cube_vertex_end = cube["vertexOffset"] + cube["vertices"]
+    ok("a body's triangle indices stay inside its own vertex slice",
+       all(cube["vertexOffset"] <= i < cube_vertex_end
+           for i in idx[cube_tri_start:cube_tri_end]))
 
     print()
     print("=== the revision token tracks changes ===")
@@ -201,14 +296,14 @@ def main():
 
     print()
     print("=== failure paths are explained, not silent ===")
-    header, _ = decode(ask("nonsense", port))
+    header, _, _ = decode(ask("nonsense", port))
     ok("an unknown command returns ok:false with a reason (%s)"
        % header.get("note", "")[:40], header.get("ok") is False
        and len(header.get("note", "")) > 0)
 
     # A body whose tessellation fails must lose that body, not the whole fetch.
     app.activeProduct.rootComponent.bRepBodies[0].fail = True
-    header, _ = decode(ask("geometry", port))
+    header, _, _ = decode_stream(ask("geometry", port))
     ok("one un-tessellatable body does not lose the rest (%d bodies)"
        % len(header["bodies"]), header.get("ok") and len(header["bodies"]) == 4)
     ok("and it is reported (%s)" % header.get("note", "")[:44],
@@ -217,7 +312,7 @@ def main():
 
     # No Design at all — the user is in a different workspace.
     saved, app.activeProduct = app.activeProduct, None
-    header, _ = decode(ask("geometry", port))
+    header, _, _ = decode_stream(ask("geometry", port))
     ok("no active Design is explained (%s)" % header.get("note", "")[:40],
        header.get("ok") is False and "Design" in header.get("note", ""))
     app.activeProduct = saved
@@ -228,7 +323,7 @@ def main():
     # explanation rather than hanging or closing silently.
     adsk._dispatcher.busy.set()
     t0 = time.time()
-    header, _ = decode(ask("geometry", port, timeout=20.0))
+    header, _, _ = decode_stream(ask("geometry", port, timeout=20.0))
     took = time.time() - t0
     adsk._dispatcher.busy.clear()
 
@@ -240,7 +335,7 @@ def main():
        FusionBridge.IDLE_TIMEOUT_S - 0.5 <= took <= FusionBridge.IDLE_TIMEOUT_S + 4.0)
 
     # And it recovers: the very next request must work.
-    header, _ = decode(ask("geometry", port))
+    header, _, _ = decode_stream(ask("geometry", port))
     ok("the next request after a busy period succeeds", header.get("ok") is True)
 
     print()
@@ -256,12 +351,12 @@ def main():
             break
         chunks.append(b)
     s.close()
-    header, floats = decode(b"".join(chunks))
+    header, _, idx = decode_stream(b"".join(chunks))
 
     total = sum(b["triangles"] for b in header["bodies"])
     ok("the cap is honoured (%d <= 20)" % total, total <= 20)
-    ok("the payload matches the header (%d)" % (len(floats) // 9),
-       len(floats) // 9 == total)
+    ok("the payload matches the header (%d)" % (len(idx) // 3),
+       len(idx) // 3 == total)
     ok("and the drop is reported (%d)" % header.get("dropped", 0),
        header.get("dropped", 0) > 0)
 

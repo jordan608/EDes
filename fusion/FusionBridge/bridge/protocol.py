@@ -164,39 +164,73 @@ def revision_token(entries):
     return h.hexdigest()[:16]
 
 
-def build_frame(bodies, document="", revision="", dropped=0, note="", ok=True):
+def build_frame(bodies, document="", revision="", dropped=0, note="", ok=True,
+                body_index=None, body_count=None):
     """Assemble a response frame.
 
-        magic       4 bytes   b"EDS1"
-        headerLen   uint32    little-endian
-        header      JSON
-        payload     float32[] little-endian, 9 per triangle, MILLIMETRES
+        magic         4 bytes   b"EDS1"
+        headerLen     uint32    little-endian
+        header        JSON
+        payload       vertices, THEN indices — see below
 
-    bodies: list of dicts with keys path, name, visible, tris (a flat sequence of
-    floats, 9 per triangle, already in mm).
+    bodies: list of dicts with keys path, name, visible, vertices (a flat
+    sequence of floats, 3 per vertex, already in MILLIMETRES) and indices (a
+    flat sequence of ints, 3 per triangle — a REAL indexed mesh, not a
+    triangle soup: two triangles sharing an edge share the same two vertex
+    numbers, which is what lets a cutting plane walk that shared edge to
+    build a closed cut contour instead of hoping two independently-computed
+    intersection points land on the same float. See CadPlacement.cs's header
+    for why this replaced the flat soup format.
 
-    Offsets are computed here rather than supplied, because an offset that
+    Multiple bodies concatenate into ONE shared vertex payload and ONE shared
+    index payload, each body's indices already offset (GLOBAL, not
+    body-local) to point into the shared vertex array directly — a reader
+    never needs to re-base them. In practice the streaming send (see
+    FusionBridge.py) only ever puts 0 or 1 body in a frame; the general case
+    is kept here because it costs nothing and a hand-built test frame with
+    several bodies is a convenient fixture.
+
+    vertexOffset/triangleOffset are computed here rather than supplied, for
+    the same reason the old soup format's `offset` was: a value that
     disagrees with the payload is the one error in this format that produces
     plausible-looking wrong geometry instead of a parse failure.
+
+    body_index / body_count: present only when ONE geometry response is being
+    sent as a SEQUENCE of single-body frames rather than one frame holding
+    every body (see FusionBridge.py's streaming send). Purely a progress hint
+    for the receiving end — every frame remains independently parseable on its
+    own, so an old client that has never heard of these two fields still reads
+    everything else correctly; they are just extra keys it does not look at.
     """
     header_bodies = []
-    payload = []
-    offset = 0
+    vertex_payload = []
+    index_payload = []
+    voffset = 0
+    toffset = 0
 
     for b in bodies:
-        tris = b.get("tris") or []
-        n = len(tris) // 9
+        verts = b.get("vertices") or []
+        vcount = len(verts) // 3
+        raw_idx = b.get("indices") or []
+        tcount = len(raw_idx) // 3
+
         header_bodies.append(
             {
                 "path": str(b.get("path", "")),
                 "name": str(b.get("name", "")),
                 "visible": bool(b.get("visible", True)),
-                "triangles": n,
-                "offset": offset,
+                "vertices": vcount,
+                "triangles": tcount,
+                "vertexOffset": voffset,
+                "triangleOffset": toffset,
             }
         )
-        payload.extend(tris[: n * 9])
-        offset += n
+        vertex_payload.extend(verts[: vcount * 3])
+        # Shift to GLOBAL indices so the reader never has to re-base them —
+        # this body's own vertex 0 is voffset in the shared vertex array.
+        index_payload.extend(idx + voffset for idx in raw_idx[: tcount * 3])
+        voffset += vcount
+        toffset += tcount
 
     header = {
         "ok": bool(ok),
@@ -207,14 +241,20 @@ def build_frame(bodies, document="", revision="", dropped=0, note="", ok=True):
         "dropped": int(dropped),
         "note": str(note),
     }
+    if body_index is not None:
+        header["bodyIndex"] = int(body_index)
+    if body_count is not None:
+        header["bodyCount"] = int(body_count)
 
     hb = json.dumps(header, separators=(",", ":")).encode("utf-8")
     out = bytearray()
     out += MAGIC
     out += struct.pack("<I", len(hb))
     out += hb
-    if payload:
-        out += struct.pack("<%df" % len(payload), *payload)
+    if vertex_payload:
+        out += struct.pack("<%df" % len(vertex_payload), *vertex_payload)
+    if index_payload:
+        out += struct.pack("<%dI" % len(index_payload), *index_payload)
     return bytes(out)
 
 
@@ -228,30 +268,27 @@ def error_frame(note):
     return build_frame([], note=note, ok=False)
 
 
-def expand_triangles(node_coords_cm, node_indices):
-    """Indexed mesh in centimetres to a flat triangle soup in millimetres.
+def convert_vertices_mm(node_coords_cm):
+    """Fusion's node coordinate array, centimetres to millimetres. Every vertex
+    is sent exactly once — the whole reason this replaced the old triangle-soup
+    format, which repeated a shared vertex once per triangle that touched it."""
+    return [cm_to_mm(v) for v in node_coords_cm]
 
-    Nine floats per triangle rather than indices-plus-vertices. That is three
-    times the bytes for a closed mesh, and worth it: the receiving end already
-    reads triangle soup from STL files, so sharing that path means one
-    implementation of normal recomputation and face grouping rather than two.
-    Bandwidth is not the constraint here — Fusion's tessellation is.
 
-    Indices that fall outside the coordinate array are skipped rather than
-    trusted; a malformed mesh should lose a triangle, not crash the add-in on the
-    main thread.
+def valid_triangle_indices(node_indices, vertex_count):
+    """Fusion's flat triangle-index list, with any triangle referencing an
+    out-of-range vertex dropped — a malformed mesh should lose a triangle, not
+    crash the add-in on the main thread, or (worse, for an INDEXED format)
+    hand the reader an index it cannot safely look up.
+
+    Unlike the old expand_triangles, this never touches vertex data: indices
+    stay indices, so two triangles sharing an edge still share the same two
+    numbers on the wire, which is the property a cutting plane needs to walk
+    the cut as a closed loop instead of matching duplicated float positions.
     """
     out = []
-    n_nodes = len(node_coords_cm) // 3
-
     for i in range(0, len(node_indices) - 2, 3):
         a, b, c = node_indices[i], node_indices[i + 1], node_indices[i + 2]
-        if not (0 <= a < n_nodes and 0 <= b < n_nodes and 0 <= c < n_nodes):
-            continue
-        for idx in (a, b, c):
-            j = idx * 3
-            out.append(cm_to_mm(node_coords_cm[j]))
-            out.append(cm_to_mm(node_coords_cm[j + 1]))
-            out.append(cm_to_mm(node_coords_cm[j + 2]))
-
+        if 0 <= a < vertex_count and 0 <= b < vertex_count and 0 <= c < vertex_count:
+            out.append(a); out.append(b); out.append(c)
     return out

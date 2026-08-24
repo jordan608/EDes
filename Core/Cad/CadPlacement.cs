@@ -27,6 +27,18 @@
 //  a scale and a fixed offset and nothing else. An auto-fit would move the model
 //  every time a component was added, which is the opposite of what "Fusion is
 //  authoritative" means.
+//
+//  Map() folds the Origin in and is what most callers (tests included) want: a
+// self-contained "Fusion mm -> intended display position" with no camera
+//  involved. The render path (CadSceneRenderer) does NOT use it directly, though
+//  -- it needs MapLinear() + Anchor() kept separate, applied on either side of
+//  SceneCamera.Transform, for exactly the reason SceneCamera's own Pan was moved
+//  after its rotation basis: an offset folded in BEFORE a rotation gets rotated
+//  right along with everything else, so the assembly's own anchor point (the
+//  floor, centred) would swing through an arc around the DISPLAY's origin every
+//  time the scene rotated, instead of the assembly spinning in place on its own
+//  floor spot. Anchor() is that offset, added back AFTER the camera transform,
+//  so it is a fixed point in the volume no rotation or pan can move.
 // ═══════════════════════════════════════════════════════════════════════════
 
 using System;
@@ -53,11 +65,24 @@ namespace EDes.Cad
             OriginZ = zHalf,          // the FLOOR: +Z is down on this display
         };
 
-        /// <summary>One Fusion point (mm, Z up) to display space (units, -Z up).</summary>
+        /// <summary>One Fusion point (mm, Z up) to display space (units, -Z up), Origin
+        /// included. Self-contained on purpose — see the header for why the render path
+        /// uses MapLinear()+Anchor() instead of this.</summary>
         public point3d Map(float xMm, float yMm, float zMm) => new point3d(
             xMm * Scale + OriginX,
             yMm * Scale + OriginY,
             -zMm * Scale + OriginZ);
+
+        /// <summary>The scale-and-flip half of Map(), with NO Origin — this is what may
+        /// safely pass through SceneCamera.Transform's rotation, because it carries nothing
+        /// that a rotation would need to leave fixed.</summary>
+        public point3d MapLinear(float xMm, float yMm, float zMm) => new point3d(
+            xMm * Scale, yMm * Scale, -zMm * Scale);
+
+        /// <summary>The Origin half of Map(), applied AFTER the camera transform so it is a
+        /// fixed point in display space — the assembly's floor spot — that no rotation or
+        /// pan can drag around the display's own origin instead.</summary>
+        public point3d Anchor(point3d p) => new point3d(p.x + OriginX, p.y + OriginY, p.z + OriginZ);
 
         /// <summary>A scale that would fit the given extent across the usable width, for the
         /// one-shot "Fit once" button.

@@ -196,5 +196,9 @@ Console.WriteLine("=== STEP ===");
 failures += PcbParserTests.StepChecks.Run();
 
 Console.WriteLine();
+Console.WriteLine("=== scene camera (pan/zoom/rotate) ===");
+failures += PcbParserTests.CameraChecks.Run();
+
+Console.WriteLine();
 Console.WriteLine(failures == 0 ? "ALL CHECKS PASSED" : $"{failures} CHECK(S) FAILED");
 return failures == 0 ? 0 : 1;

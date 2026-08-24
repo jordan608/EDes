@@ -37,12 +37,15 @@ INDICES = [
 
 
 def main():
-    soup = protocol.expand_triangles([float(c) for c in COORDS_CM], INDICES)
+    verts = protocol.convert_vertices_mm([float(c) for c in COORDS_CM])
+    idx = protocol.valid_triangle_indices(INDICES, len(verts) // 3)
 
     frame = protocol.build_frame(
         [
-            {"path": "Root:1/Cube:1",   "name": "Cube",   "visible": True,  "tris": soup},
-            {"path": "Root:1/Hidden:1", "name": "Hidden", "visible": False, "tris": soup},
+            {"path": "Root:1/Cube:1",   "name": "Cube",   "visible": True,
+             "vertices": verts, "indices": idx},
+            {"path": "Root:1/Hidden:1", "name": "Hidden", "visible": False,
+             "vertices": verts, "indices": idx},
         ],
         document="GoldenCube",
         revision="gold01",
@@ -52,7 +55,7 @@ def main():
 
     out = os.path.join(os.path.dirname(os.path.realpath(__file__)), "golden_frame.bin")
     io.open(out, "wb").write(frame)
-    print("wrote %s — %d bytes, %d triangles" % (out, len(frame), len(soup) // 9 * 2))
+    print("wrote %s — %d bytes, %d triangles" % (out, len(frame), len(idx) // 3 * 2))
 
 
 if __name__ == "__main__":

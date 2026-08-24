@@ -253,6 +253,29 @@ namespace EDes.UI
             p.Children.Add(box);
         }
 
+        // ── AddChoice — labeled dropdown over a fixed set of options ──────────
+        public void AddChoice(StackPanel p, string label, string[] options, int selectedIndex,
+                              Action<int> onChange)
+        {
+            var combo = new ComboBox
+            {
+                ItemsSource     = options,
+                SelectedIndex   = Math.Clamp(selectedIndex, 0, Math.Max(0, options.Length - 1)),
+                FontSize        = 10,
+                Margin          = new Thickness(10, 0, 10, 2),
+                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
+            };
+            combo.SelectionChanged += (_, _) =>
+            {
+                if (combo.SelectedIndex < 0) return;
+                onChange(combo.SelectedIndex);
+                _onChanged();
+            };
+
+            p.Children.Add(new TextBlock { Text = label, FontSize = 11, Margin = new Thickness(10, 4, 10, 0) });
+            p.Children.Add(combo);
+        }
+
         // ── AddLiveInfo — dim text that refreshes itself ──────────────────────
         // For readouts the game thread owns (board stats, scope status): the panel is
         // built once, so a static AddInfo would show whatever was true at build time.

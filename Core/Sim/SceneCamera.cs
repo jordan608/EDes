@@ -7,8 +7,16 @@
 //  for free: nothing except the single Transform() call site per draw needs
 //  to know a camera exists.
 //
-//  Order is pan → scale → yaw → pitch → roll (the SDK template's reference
-//  order, kept so this app feels like every other VLED app to fly around).
+//  Order is scale → rotate → pan, with pan applied LAST, in display space.
+//
+//  It used to be pan → scale → rotate (the SDK template's reference order),
+//  but that adds Pan to the point BEFORE the basis rotates it — which means
+//  a pan is rotated right along with everything else about the display's
+//  fixed origin. Panned geometry then swings through a wide arc around that
+//  origin instead of spinning in place wherever it was moved to, which is
+//  the opposite of "rotate about the scene's own axis" (see RotateLocal).
+//  Applying Pan after the basis makes it a pure screen-space slide that
+//  cannot affect, or be affected by, the rotation pivot.
 //
 //  Axis convention used throughout this app:
 //      -Z = up          (so "raise it" means SUBTRACT from z)
@@ -74,17 +82,21 @@ namespace EDes.Sim
             _wx = 0; _wy = 0; _wz = 1;
         }
 
-        /// <summary>World → display space. Call once per point, right before drawing.</summary>
+        /// <summary>World → display space. Call once per point, right before drawing.
+        ///
+        /// Pan is applied LAST, after the rotation basis — see the header note. Still
+        /// scaled by Zoom, same as before the reorder, so zooming in also zooms in on
+        /// wherever the scene has been panned to, rather than pan staying a fixed
+        /// display-space distance regardless of zoom.</summary>
         public point3d Transform(float x, float y, float z)
         {
             if (!HORIZONTAL_IS_X) { (x, y) = (y, x); }
 
-            x += PanX; y += PanY; z += PanZ;
             x *= Zoom; y *= Zoom; z *= Zoom;
 
-            return new point3d(_ux * x + _vx * y + _wx * z,
-                               _uy * x + _vy * y + _wy * z,
-                               _uz * x + _vz * y + _wz * z);
+            return new point3d(_ux * x + _vx * y + _wx * z + PanX * Zoom,
+                               _uy * x + _vy * y + _wy * z + PanY * Zoom,
+                               _uz * x + _vz * y + _wz * z + PanZ * Zoom);
         }
 
         public point3d Transform(point3d p) => Transform(p.x, p.y, p.z);
@@ -237,15 +249,21 @@ namespace EDes.Sim
         /// its transpose — no matrix inversion and no drift.</summary>
         public point3d InverseTransform(float dx, float dy, float dz)
         {
+            // Undo pan FIRST now that Transform applies it last — subtracting it here,
+            // before the rotation transpose, mirrors Transform's new order exactly.
+            dx -= PanX * Zoom;
+            dy -= PanY * Zoom;
+            dz -= PanZ * Zoom;
+
             // Undo the rotation with the transpose (rows become the dot products).
             float x = _ux * dx + _uy * dy + _uz * dz;
             float y = _vx * dx + _vy * dy + _vz * dz;
             float z = _wx * dx + _wy * dy + _wz * dz;
 
             float iz = Zoom > 1e-6f ? 1f / Zoom : 1f;
-            x = x * iz - PanX;
-            y = y * iz - PanY;
-            z = z * iz - PanZ;
+            x *= iz;
+            y *= iz;
+            z *= iz;
 
             // Mirrors Transform's swap so this stays a true inverse if HORIZONTAL_IS_X is
             // ever flipped. Unreachable while the const is true, hence the suppression —

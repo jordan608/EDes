@@ -96,7 +96,21 @@ namespace EDes
         private readonly CadSceneRenderer  _cadScene  = new();
         private volatile CadSolid[]        _cadSolids = Array.Empty<CadSolid>();
         private volatile string            _cadStatus = "not connected";
+        /// <summary>0..1 while a fetch is in flight, -1 otherwise. Written from the game
+        /// thread inside the (blocking) socket read, read from the UI thread's status
+        /// timer — same volatile cross-thread pattern as <see cref="_cadStatus"/>.</summary>
+        private volatile float             _cadFetchProgress = -1f;
+        /// <summary>Result of the last STL/CSV export button click, shown in the panel.
+        /// Written from the UI thread (both export buttons run on click, not the game
+        /// thread — they only read _cadSolids, never touch the SDK), read by the same
+        /// thread's live-info timer, so no cross-thread concern beyond the volatile the
+        /// compiler would want anyway for a field read from a timer callback.</summary>
+        private volatile string            _cadExportStatus = "";
         private string                     _cadRevision = "";
+        /// <summary>The Fusion document name, shown at the top of the volume in Cad mode.
+        /// Separate from _cadStatus (which also carries notes and message text) so the HUD
+        /// headline does not need to re-parse a status string built for the settings panel.</summary>
+        private volatile string            _cadDocument = "";
         private float                      _cadPollAccum;
         private int                        _cadTriangles;
 
@@ -217,23 +231,44 @@ namespace EDes
         private void FetchFusion()
         {
             _s.FusionFetchRequested = false;
+            _cadFetchProgress = 0f;
+            _fusion.TimeoutMs = (int)(Math.Max(5f, _s.FusionTimeoutSeconds) * 1000f);
+
+            // The OLD assembly is kept on screen until the first NEW body actually arrives —
+            // a failed fetch (nothing ever received) must leave it fully intact, per the
+            // comment below. Only once streaming genuinely starts does it make sense to clear
+            // the display and fill it back in body by body.
+            bool cleared = false;
 
             var r = _fusion.Fetch(_s.FusionHost, _s.FusionPort,
-                                  _s.FusionToleranceMm, _s.FusionMaxTriangles);
+                                  _s.FusionToleranceMm, _s.FusionMaxTriangles,
+                                  p => _cadFetchProgress = p,
+                                  solid =>
+                                  {
+                                      if (!cleared) { _cadSolids = Array.Empty<CadSolid>(); cleared = true; }
+                                      var next = new CadSolid[_cadSolids.Length + 1];
+                                      Array.Copy(_cadSolids, next, _cadSolids.Length);
+                                      next[^1] = solid;
+                                      _cadSolids = next;      // atomic reference swap (invariant 2)
+                                  });
+
+            _cadFetchProgress = -1f;
+            _cadRevision  = r.Revision;
+            _cadTriangles = r.Triangles;
 
             if (!r.Ok)
             {
-                // The previous geometry is deliberately KEPT. A failed poll in the middle of
-                // a modelling session should not blank the display -- the last good model is
-                // more useful than nothing, and the status line says it is stale.
+                // A TOTAL failure (nothing ever arrived) never touched _cadSolids above, so
+                // the previous geometry is still there — a failed poll mid-session should not
+                // blank the display. A PARTIAL failure already streamed some bodies in before
+                // breaking; those stay up rather than being reverted, since the operator has
+                // already seen them appear (r.Partial says so in the message below).
                 _cadStatus = "FAILED: " + r.Message;
                 App.Log("[EDesApp] Fusion fetch failed: " + r.Message);
                 return;
             }
 
-            _cadSolids    = r.Solids.ToArray();
-            _cadRevision  = r.Revision;
-            _cadTriangles = r.Triangles;
+            _cadDocument = r.Document;
 
             var sb = new StringBuilder();
             sb.Append(r.Document.Length > 0 ? r.Document : "(unnamed document)").Append('\n');
@@ -243,6 +278,13 @@ namespace EDes
 
             App.Log($"[EDesApp] Fusion: {r.Solids.Count} body(s), "
                   + $"{r.Triangles:N0} tri, {r.Millis} ms");
+
+            // The per-body appearance list in the settings panel has one row set per body,
+            // which only a rebuild can grow or shrink -- same reason a preset switch
+            // rebuilds the resistor boxes. Once at the end, not per streamed body: rebuilding
+            // the panel on every onBody callback would thrash the UI while a big assembly is
+            // still arriving.
+            RequestPanelRebuild();
         }
 
         /// <summary>Poll the cheap revision token and fetch only when it moves.
@@ -518,19 +560,30 @@ namespace EDes
 
                 // Both buttons together switch mode, on the RISING edge only — held down,
                 // a level test would flip modes every frame for as long as they were held.
+                // Which mode it switches depends on which tab is open: PCB's probe stages
+                // (signal/component) mean nothing in the Fusion tab, so CAD gets its own
+                // cycle (normal / cutting plane / cursor) on the SAME chord instead.
                 bool bothNow  = (raw.Buttons & 0x3) == 0x3;
                 bool bothPrev = (_prevNavButtons & 0x3) == 0x3;
-                if (bothNow && !bothPrev) ToggleInspect();
+                if (bothNow && !bothPrev)
+                {
+                    if ((EDesMode)_s.Mode == EDesMode.Cad) ToggleCadInteraction();
+                    else                                   ToggleInspect();
+                }
                 _prevNavButtons = raw.Buttons;
 
                 ApplyCameraLocks();
 
+                bool cadNavMode = (EDesMode)_s.Mode == EDesMode.Cad
+                                && _s.FusionInteractionMode != (int)FusionInteraction.Normal;
+
                 // Zoom is on the individual buttons, and both-at-once already cancels
                 // there, so the mode switch cannot also zoom.
                 _cam.ApplyNav(_navLive, _lastDt, _s.NavPanRate, _s.NavRotRate, _s.NavZoomRate,
-                              allowPan: !_s.InspectMode);
+                              allowPan: !_s.InspectMode && !cadNavMode);
 
                 if (_s.InspectMode) DriveProbe(_navLive, _lastDt);
+                else if (cadNavMode) DriveCadInteraction(_navLive, _lastDt);
             }
         }
 
@@ -586,11 +639,38 @@ namespace EDes
             return k.StartsWith("comp:", StringComparison.Ordinal) ? k.Substring(5) : "";
         }
 
+        /// <summary>The selected body's own name, or "" if nothing is picked or the pick is
+        /// stale (a re-fetch replaced the body list under it) -- same "a stale key simply
+        /// finds nothing" handling the legend already uses.</summary>
+        private string PickedFusionBodyName()
+        {
+            string k = _s.PickedKey;
+            if (!k.StartsWith("fusionbody:", StringComparison.Ordinal)) return "";
+            string path = k.Substring(11);
+            foreach (var s in _cadSolids)
+                if (s.AssemblyPath == path) return s.Name.Length > 0 ? s.Name : "(unnamed body)";
+            return "";
+        }
+
         private void RebuildPickList(float dt)
         {
             _picksAge += dt;
             if (_picksAge < 0.5f) return;
             _picksAge = 0f;
+
+            if ((EDesMode)_s.Mode == EDesMode.Cad)
+            {
+                var solidsNow = _cadSolids;
+                var bodyRows = new List<PickRow>(solidsNow.Length);
+                foreach (var solid in solidsNow)
+                    bodyRows.Add(new PickRow("Bodies",
+                                             solid.Name.Length > 0 ? solid.Name : "(unnamed body)",
+                                             solid.Visible ? "" : "hidden in Fusion",
+                                             "fusionbody:" + solid.AssemblyPath,
+                                             BodyColour(solid)));
+                _picks = bodyRows.ToArray();
+                return;
+            }
 
             if ((EDesMode)_s.Mode != EDesMode.Pcb || !_board.HasGeometry)
             {
@@ -708,6 +788,146 @@ namespace EDes
             z = Math.Clamp(z, -_zHalf * 0.94f, _zHalf * 0.94f);
 
             _s.InspectX = x; _s.InspectY = y; _s.InspectZ = z;
+        }
+
+        /// <summary>The assembly's own bounding box, in Fusion mm, across every body that
+        /// HAS one (a body with no geometry reports MaxX<=MinX and is skipped). Shared by
+        /// the cutting plane, the cursor probe's range and speed, and entering cursor mode —
+        /// so the four never compute "how big is this assembly" differently.</summary>
+        private static bool AssemblyBounds(IReadOnlyList<CadSolid> solids,
+                                           out float minX, out float minY, out float minZ,
+                                           out float maxX, out float maxY, out float maxZ)
+        {
+            minX = minY = minZ = float.MaxValue;
+            maxX = maxY = maxZ = float.MinValue;
+            foreach (var s in solids)
+            {
+                if (s.MaxX <= s.MinX) continue;
+                minX = MathF.Min(minX, s.MinX); minY = MathF.Min(minY, s.MinY); minZ = MathF.Min(minZ, s.MinZ);
+                maxX = MathF.Max(maxX, s.MaxX); maxY = MathF.Max(maxY, s.MaxY); maxZ = MathF.Max(maxZ, s.MaxZ);
+            }
+            return maxX > minX;
+        }
+
+        /// <summary>Advance the Fusion CAD both-buttons cycle: normal orbiting -> cutting
+        /// plane -> cursor probe -> normal. Same RISING-EDGE gesture as ToggleInspect, just
+        /// with its own three stages because the PCB probe's signal/component split means
+        /// nothing here.</summary>
+        private void ToggleCadInteraction()
+        {
+            _s.FusionInteractionMode = (_s.FusionInteractionMode + 1) % 3;
+            var mode = (FusionInteraction)_s.FusionInteractionMode;
+
+            // Entering cut control is also how the cut turns ON -- a control the operator
+            // cannot see the effect of while adjusting it would be worse than no control.
+            if (mode == FusionInteraction.CuttingPlane) _s.FusionCutEnabled = true;
+
+            if (mode == FusionInteraction.CursorProbe
+                && AssemblyBounds(_cadSolids, out float minX, out float minY, out float minZ,
+                                              out float maxX, out float maxY, out float maxZ))
+            {
+                // Start at the assembly's own centre, not wherever the cursor was left --
+                // the assembly can easily have changed (a re-fetch, a different document)
+                // since the cursor was last driven.
+                _s.FusionCursorX = (minX + maxX) * 0.5f;
+                _s.FusionCursorY = (minY + maxY) * 0.5f;
+                _s.FusionCursorZ = (minZ + maxZ) * 0.5f;
+            }
+
+            App.Log($"[EDesApp] Fusion interaction -> {mode}");
+        }
+
+        /// <summary>Drive whichever Fusion CAD interaction is active with the SpaceNav's
+        /// translation axes -- the same axes that pan the scene in Normal mode, which is
+        /// exactly why allowPan is turned off for both of these (see ApplyNavigator).</summary>
+        private void DriveCadInteraction(in NavState nav, float dt)
+        {
+            var mode = (FusionInteraction)_s.FusionInteractionMode;
+            var solids = _cadSolids;
+            bool hasBounds = AssemblyBounds(solids, out float minX, out float minY, out float minZ,
+                                                    out float maxX, out float maxY, out float maxZ);
+
+            if (mode == FusionInteraction.CuttingPlane)
+            {
+                // One axis is enough to slide a plane: "lift" (Dz) is the most natural single
+                // gesture for "raise the build height" that the slice-buildup tool is for.
+                const float rate = 0.6f;   // full deflection sweeps 0..1 in about 1.7s
+                _s.FusionCutFraction = Math.Clamp(_s.FusionCutFraction + nav.Dz * rate * dt,
+                                                  0f, 1f);
+            }
+            else if (mode == FusionInteraction.CursorProbe && hasBounds)
+            {
+                float diag = MathF.Sqrt((maxX - minX) * (maxX - minX)
+                                        + (maxY - minY) * (maxY - minY)
+                                        + (maxZ - minZ) * (maxZ - minZ));
+                // Crosses the whole assembly in about 2s at full deflection, whatever the
+                // assembly's own scale -- a fixed mm/s rate would feel instant on a tiny
+                // part and glacial on a large one.
+                float rate = diag * 0.5f * dt;
+                float pad  = diag * 0.1f;   // let the cursor wander a little past the edges
+
+                _s.FusionCursorX = Math.Clamp(_s.FusionCursorX + nav.Dx * rate, minX - pad, maxX + pad);
+                _s.FusionCursorY = Math.Clamp(_s.FusionCursorY + nav.Dy * rate, minY - pad, maxY + pad);
+                _s.FusionCursorZ = Math.Clamp(_s.FusionCursorZ + nav.Dz * rate, minZ - pad, maxZ + pad);
+
+                int idx = CadProbe.NearestBody(solids, _s.FusionCursorX, _s.FusionCursorY,
+                                               _s.FusionCursorZ);
+                _s.PickedKey = idx >= 0 ? "fusionbody:" + solids[idx].AssemblyPath : "";
+            }
+        }
+
+        /// <summary>How far, and which way, one body moves for the exploded view — radially
+        /// outward from the ASSEMBLY's own centre, scaled by its own diagonal so "1.0" means
+        /// the same thing regardless of the assembly's real size. A body sitting exactly at
+        /// the assembly's centre has no direction to radiate along and does not move.</summary>
+        private (float, float, float) BodyExplode(CadSolid solid)
+        {
+            float amount = _s.FusionExplodeAmount;
+            if (amount <= 0f || solid.MaxX <= solid.MinX) return (0f, 0f, 0f);
+
+            var solids = _cadSolids;
+            if (!AssemblyBounds(solids, out float minX, out float minY, out float minZ,
+                                        out float maxX, out float maxY, out float maxZ))
+                return (0f, 0f, 0f);
+
+            float cx = (minX + maxX) * 0.5f, cy = (minY + maxY) * 0.5f, cz = (minZ + maxZ) * 0.5f;
+            float bx = (solid.MinX + solid.MaxX) * 0.5f;
+            float by = (solid.MinY + solid.MaxY) * 0.5f;
+            float bz = (solid.MinZ + solid.MaxZ) * 0.5f;
+
+            float dx = bx - cx, dy = by - cy, dz = bz - cz;
+            float len = MathF.Sqrt(dx * dx + dy * dy + dz * dz);
+            if (len < 1e-6f) return (0f, 0f, 0f);
+
+            float diag = MathF.Sqrt((maxX - minX) * (maxX - minX) + (maxY - minY) * (maxY - minY)
+                                    + (maxZ - minZ) * (maxZ - minZ));
+            float push = amount * diag / len;
+            return (dx * push, dy * push, dz * push);
+        }
+
+        /// <summary>The cutting plane built from settings, or CutPlane.Off — computed fresh
+        /// every Draw() call rather than cached, since the assembly's bounding box (which
+        /// the fraction is relative to) can change on any re-fetch.</summary>
+        private CutPlane FusionCut(IReadOnlyList<CadSolid> solids)
+        {
+            if (!_s.FusionCutEnabled
+                || !AssemblyBounds(solids, out float minX, out float minY, out float minZ,
+                                          out float maxX, out float maxY, out float maxZ))
+                return CutPlane.Off;
+
+            float nx = 0f, ny = 0f, nz = 0f, lo, hi;
+            switch (Math.Clamp(_s.FusionCutAxis, 0, 2))
+            {
+                case 0: nx = 1f; lo = minX; hi = maxX; break;
+                case 1: ny = 1f; lo = minY; hi = maxY; break;
+                default: nz = 1f; lo = minZ; hi = maxZ; break;
+            }
+            float d = lo + Math.Clamp(_s.FusionCutFraction, 0f, 1f) * (hi - lo);
+
+            // FusionCutKeepLow keeps the side BELOW d along the normal; CutPlane's
+            // KeepPositiveSide means "keep dot(N,P) >= d", the HIGH side -- the opposite.
+            return new CutPlane(nx, ny, nz, d, keepPositiveSide: !_s.FusionCutKeepLow,
+                                _s.FusionCutHighlightColour, _s.FusionCutHighlightBandMm);
         }
 
         /// <summary>Left edge of the HUD plane, for text.
@@ -1355,6 +1575,30 @@ namespace EDes
         {
             var solids = _cadSolids;
 
+            // The assembly's name, and whichever body is picked beneath it, ALWAYS shown --
+            // unlike the BODIES/TRI readout below, this is identity, not detail, and stays
+            // up even with labels off or a body picked, since it does not compete with the
+            // probe overlay for space the way a full stats line would.
+            if (_cadDocument.Length > 0)
+                HudCentred(_topText.Row(), _textSize, Palette.Text, _cadDocument.ToUpperInvariant());
+
+            string pickedBody = PickedFusionBodyName();
+            if (pickedBody.Length > 0)
+                HudCentred(_topText.Row(), _textSize, Palette.TextHilite,
+                           pickedBody.ToUpperInvariant());
+
+            // The both-buttons chord changes what the puck's translate axes DO, silently
+            // from the operator's point of view unless something in the volume says so --
+            // this is that something.
+            var interaction = (FusionInteraction)_s.FusionInteractionMode;
+            if (interaction == FusionInteraction.CuttingPlane)
+                HudCentred(_topText.Row(), _textSize, Palette.Warning,
+                           $"CUTTING PLANE - {_s.FusionCutFraction * 100f:0}% ("
+                         + "PUCK LIFT TO MOVE, BOTH BUTTONS TO EXIT)");
+            else if (interaction == FusionInteraction.CursorProbe)
+                HudCentred(_topText.Row(), _textSize, Palette.Warning,
+                           "CURSOR PROBE - PUCK MOVES IT, BOTH BUTTONS TO EXIT");
+
             if (solids.Length == 0)
             {
                 HudCentred(_topText.Row(), _textSize, Palette.Warning,
@@ -1362,15 +1606,13 @@ namespace EDes
                 return;
             }
 
-            var light = CadLight.ForSolids(solids, _s.PcbCadLighting, _s.PcbCadAmbient,
-                                           _s.PcbCadPointLight,
-                                           _s.PcbCadLightX, _s.PcbCadLightY, _s.PcbCadLightZ,
-                                           _s.PcbCadLightFx, _s.PcbCadLightFy, _s.PcbCadLightFz,
-                                           _s.PcbCadLightRange);
-
-            _cadScene.Draw(_batch, _cam, solids, FusionPlacement(), light,
+            _cadScene.Draw(_batch, _cam, solids, FusionPlacement(), FusionLights(solids),
                            _radius, _zHalf, _s.FusionDensity, _s.FusionBrightness,
-                           _s.FusionGhost ? _ => CadDrawMode.Ghost : null);
+                           BodyDrawMode, BodyColour,
+                           selfShadow: _s.FusionSelfShadow,
+                           castShadowsOnOthers: _s.FusionCastShadows,
+                           cut: FusionCut(solids),
+                           explodeOf: BodyExplode);
 
             if (!_s.ShowLabels || ProbeHasSelection) return;
 
@@ -1388,6 +1630,194 @@ namespace EDes
                            (_cadScene.ClippedFraction * 100f).ToString("0") +
                            "% OUTSIDE THE VOLUME - CHECK ORIGIN AND SCALE");
         }
+
+        /// <summary>One body's render mode: its own override if the operator set one,
+        /// otherwise the old global behaviour (FusionGhost, or full "lit" density) -- unless
+        /// isolate is on and something ELSE is picked, in which case every body but the
+        /// picked one goes Hidden regardless of its own setting. The picked body's own mode
+        /// is never touched here, so isolating a Wireframe body still shows it as wireframe.</summary>
+        private CadDrawMode BodyDrawMode(CadSolid solid)
+        {
+            if (_s.FusionIsolatePicked)
+            {
+                string picked = _s.PickedKey;
+                if (picked.StartsWith("fusionbody:", StringComparison.Ordinal)
+                    && solid.AssemblyPath != picked.Substring(11))
+                    return CadDrawMode.Hidden;
+            }
+
+            if (_s.TryGetFusionBodyMode(solid.AssemblyPath, out int m))
+                return (CadDrawMode)m;
+            return _s.FusionGhost ? CadDrawMode.Ghost : CadDrawMode.Solid;
+        }
+
+        /// <summary>One body's colour: its own override if set, otherwise whatever the
+        /// solid already carries (0x9FC5E8 for every Fusion body, since Fusion sends no
+        /// appearance data over the wire).</summary>
+        private int BodyColour(CadSolid solid)
+            => _s.TryGetFusionBodyColour(solid.AssemblyPath, out int c) ? c : solid.Colour;
+
+        /// <summary>The whole Fusion CAD light rig: Light 1 is the EXISTING single light
+        /// (shared with the PCB tab's own STEP overlay, positioned as a fraction of the
+        /// assembly's bounding box); Lights 2-4 are the new, Fusion-only, freely movable
+        /// ones, in absolute Fusion millimetres. _s.PcbCadLighting is still the one master
+        /// switch — off there means every slot goes dark, not just Light 1, since "Lit" is
+        /// naturally a property of the whole rig rather than something each light should
+        /// have to agree with the others about.</summary>
+        private CadLight[] FusionLights(IReadOnlyList<CadSolid> solids)
+        {
+            var light1 = CadLight.ForSolids(solids, _s.PcbCadLighting, _s.PcbCadAmbient,
+                                            _s.PcbCadPointLight,
+                                            _s.PcbCadLightX, _s.PcbCadLightY, _s.PcbCadLightZ,
+                                            _s.PcbCadLightFx, _s.PcbCadLightFy, _s.PcbCadLightFz,
+                                            _s.PcbCadLightRange);
+
+            bool on = _s.PcbCadLighting;
+            return new[]
+            {
+                light1,
+                on && _s.FusionLight2On
+                    ? CadLight.AtPoint(_s.FusionLight2X, _s.FusionLight2Y, _s.FusionLight2Z,
+                                       _s.FusionLight2Range, _s.PcbCadAmbient)
+                    : CadLight.Off(_s.PcbCadAmbient),
+                on && _s.FusionLight3On
+                    ? CadLight.AtPoint(_s.FusionLight3X, _s.FusionLight3Y, _s.FusionLight3Z,
+                                       _s.FusionLight3Range, _s.PcbCadAmbient)
+                    : CadLight.Off(_s.PcbCadAmbient),
+                on && _s.FusionLight4On
+                    ? CadLight.AtPoint(_s.FusionLight4X, _s.FusionLight4Y, _s.FusionLight4Z,
+                                       _s.FusionLight4Range, _s.PcbCadAmbient)
+                    : CadLight.Off(_s.PcbCadAmbient),
+            };
+        }
+
+        /// <summary>A body counts as "shown" for export purposes exactly when it would be
+        /// drawn: Fusion's own visibility AND not locally overridden to Hidden. Independent
+        /// of Flat/Wireframe/Ghost, which are display choices, not "is this part here".</summary>
+        private bool BodyIsShown(CadSolid solid)
+            => solid.Visible && BodyDrawMode(solid) != CadDrawMode.Hidden;
+
+        private static string ExportPath(string extension)
+        {
+            string dir = System.IO.Path.Combine(AppContext.BaseDirectory, "exports");
+            System.IO.Directory.CreateDirectory(dir);
+            return System.IO.Path.Combine(dir,
+                $"fusion_export_{DateTime.Now:yyyyMMdd_HHmmss}.{extension}");
+        }
+
+        /// <summary>Every currently-shown body's triangles, in Fusion's OWN millimetres and
+        /// Z-up axes -- not this display's flipped/scaled ones -- so the file re-imports at
+        /// true scale and orientation in whatever tool opens it next.</summary>
+        private void ExportFusionStl()
+        {
+            var solids = _cadSolids;
+            var shown = new List<CadSolid>();
+            foreach (var s in solids) if (BodyIsShown(s)) shown.Add(s);
+
+            if (shown.Count == 0)
+            {
+                _cadExportStatus = "nothing to export -- no shown bodies";
+                return;
+            }
+
+            try
+            {
+                string path = ExportPath("stl");
+                int triangles = 0;
+                using (var w = new System.IO.StreamWriter(path, false, Encoding.ASCII))
+                {
+                    w.WriteLine("solid EDesFusionExport");
+                    foreach (var solid in shown)
+                        foreach (var face in solid.Faces)
+                            for (int t = 0; t < face.TriCount; t++)
+                            {
+                                int i = t * 3;
+                                float nx = face.NX, ny = face.NY, nz = face.NZ;
+                                if (!face.HasNormalSet)
+                                    CrossNormal(face, i, out nx, out ny, out nz);
+
+                                w.WriteLine(FormattableString.Invariant(
+                                    $"facet normal {nx:G7} {ny:G7} {nz:G7}"));
+                                w.WriteLine("  outer loop");
+                                for (int k = 0; k < 3; k++)
+                                    w.WriteLine(FormattableString.Invariant(
+                                        $"    vertex {face.X[i + k]:G7} {face.Y[i + k]:G7} {face.Z[i + k]:G7}"));
+                                w.WriteLine("  endloop");
+                                w.WriteLine("endfacet");
+                                triangles++;
+                            }
+                    w.WriteLine("endsolid EDesFusionExport");
+                }
+
+                _cadExportStatus = $"wrote {shown.Count} body(s), {triangles:N0} triangle(s) "
+                                  + $"to {path}";
+                App.Log("[EDesApp] STL export: " + _cadExportStatus);
+            }
+            catch (Exception ex)
+            {
+                _cadExportStatus = "STL export failed: " + ex.Message;
+                App.Log("[EDesApp] " + _cadExportStatus);
+            }
+        }
+
+        private static void CrossNormal(CadFace face, int i, out float nx, out float ny, out float nz)
+        {
+            float abx = face.X[i + 1] - face.X[i], aby = face.Y[i + 1] - face.Y[i], abz = face.Z[i + 1] - face.Z[i];
+            float acx = face.X[i + 2] - face.X[i], acy = face.Y[i + 2] - face.Y[i], acz = face.Z[i + 2] - face.Z[i];
+            nx = aby * acz - abz * acy;
+            ny = abz * acx - abx * acz;
+            nz = abx * acy - aby * acx;
+            float len = MathF.Sqrt(nx * nx + ny * ny + nz * nz);
+            if (len > 1e-9f) { nx /= len; ny /= len; nz /= len; } else { nx = 0; ny = 0; nz = 1; }
+        }
+
+        /// <summary>One row per body currently loaded (shown or not, unlike the STL export —
+        /// a parts list is useful precisely because it can show what is hidden), with name,
+        /// identity, colour, visibility, render mode, and its bounding box in Fusion mm.</summary>
+        private void ExportFusionCsv()
+        {
+            var solids = _cadSolids;
+            if (solids.Length == 0)
+            {
+                _cadExportStatus = "nothing to export -- no bodies loaded";
+                return;
+            }
+
+            try
+            {
+                string path = ExportPath("csv");
+                using (var w = new System.IO.StreamWriter(path, false, Encoding.UTF8))
+                {
+                    w.WriteLine("Name,AssemblyPath,ColourHex,VisibleInFusion,RenderMode," +
+                                "Triangles,MinX_mm,MinY_mm,MinZ_mm,MaxX_mm,MaxY_mm,MaxZ_mm");
+                    foreach (var s in solids)
+                    {
+                        int tris = 0;
+                        foreach (var f in s.Faces) tris += f.TriCount;
+                        var ic = System.Globalization.CultureInfo.InvariantCulture;
+                        string line = $"{CsvField(s.Name)},{CsvField(s.AssemblyPath)}," +
+                            $"{BodyColour(s):X6},{s.Visible},{BodyDrawMode(s)},{tris}," +
+                            $"{s.MinX.ToString("F3", ic)},{s.MinY.ToString("F3", ic)}," +
+                            $"{s.MinZ.ToString("F3", ic)},{s.MaxX.ToString("F3", ic)}," +
+                            $"{s.MaxY.ToString("F3", ic)},{s.MaxZ.ToString("F3", ic)}";
+                        w.WriteLine(line);
+                    }
+                }
+
+                _cadExportStatus = $"wrote {solids.Length} body(s) to {path}";
+                App.Log("[EDesApp] CSV export: " + _cadExportStatus);
+            }
+            catch (Exception ex)
+            {
+                _cadExportStatus = "CSV export failed: " + ex.Message;
+                App.Log("[EDesApp] " + _cadExportStatus);
+            }
+        }
+
+        private static string CsvField(string s)
+            => s.Contains(',') || s.Contains('"')
+               ? "\"" + s.Replace("\"", "\"\"") + "\""
+               : s;
 
         // ── Shared HUD ────────────────────────────────────────────────────────
         /// <summary>The axis triad the SpaceNavigator is currently driving.
@@ -1571,6 +2001,23 @@ namespace EDes
                                            !_s.PcbMeshes, key: "mesh", canToggle: true));
             }
 
+            if ((EDesMode)_s.Mode == EDesMode.Cad)
+            {
+                var solids = _cadSolids;
+                foreach (var solid in solids)
+                {
+                    // "fusion:" namespaces the key against "layer:"/"vias"/"cad"/"mesh"
+                    // above -- both lists share one legend, one write-back switch.
+                    string key = "fusion:" + solid.AssemblyPath;
+                    string label = solid.Name.Length > 0 ? solid.Name : "(unnamed body)";
+                    if (!solid.Visible) label += "  [hidden in Fusion]";
+
+                    rows.Add(new LegendRow(label, BodyColour(solid),
+                                           hidden: BodyDrawMode(solid) == CadDrawMode.Hidden,
+                                           key: key, canToggle: true, canRecolour: true));
+                }
+            }
+
             _legend = rows.ToArray();
         }
 
@@ -1585,6 +2032,17 @@ namespace EDes
             if (key == "vias") { _s.PcbVias   = visible; SaveLayerPrefs(); return; }
             if (key == "cad")  { _s.PcbCad    = visible; SaveLayerPrefs(); return; }
             if (key == "mesh") { _s.PcbMeshes = visible; SaveLayerPrefs(); return; }
+
+            if (key.StartsWith("fusion:"))
+            {
+                // Unchecking sets the override to Hidden; checking sets it back to Solid
+                // ("Lit") -- the per-body settings-panel dropdown is where Flat/Wireframe
+                // get chosen, and re-checking here is a fresh start, not a memory of
+                // whichever of those was picked before this body was last hidden.
+                _s.SetFusionBodyMode(key.Substring(7),
+                                     (int)(visible ? CadDrawMode.Solid : CadDrawMode.Hidden));
+                return;
+            }
 
             var layer = FindLayer(key);
             if (layer == null) return;
@@ -1615,6 +2073,12 @@ namespace EDes
 
         public void SetLegendColour(string key, int colour)
         {
+            if (key.StartsWith("fusion:"))
+            {
+                _s.SetFusionBodyColour(key.Substring(7), colour & 0xFFFFFF);
+                return;
+            }
+
             var layer = FindLayer(key);
             if (layer == null) return;
             layer.ColourOverride = colour & 0xFFFFFF;
@@ -1854,13 +2318,25 @@ namespace EDes
                             "geometry itself would re-tessellate the assembly several times a " +
                             "second and make Fusion unusable while connected.");
 
-            ui.AddLiveInfo(sec, () => _cadStatus, 0.5);
+            ui.AddLiveInfo(sec, () =>
+                _cadFetchProgress >= 0f && _cadFetchProgress < 1f
+                    ? $"receiving model... {_cadFetchProgress * 100f:0}%"
+                    : _cadStatus,
+                0.2);
 
             ui.AddHeader(sec, "Detail and cost");
             ui.AddNumber(sec, "Tessellation tolerance (mm)", _s.FusionToleranceMm,
                          v => _s.FusionToleranceMm = (float)v, "F3");
             ui.AddNumber(sec, "Triangle cap", _s.FusionMaxTriangles,
                          v => _s.FusionMaxTriangles = (int)v, "F0");
+            ui.AddNumber(sec, "Socket timeout per body (s)", _s.FusionTimeoutSeconds,
+                         v => _s.FusionTimeoutSeconds = (float)v, "F0");
+            ui.AddInfo(sec, "The timeout applies to the SLOWEST single body, not the whole " +
+                            "assembly — each body streams as its own frame, so a fetch that " +
+                            "used to abort partway through a large assembly (losing every " +
+                            "body already received) was almost always this timing out on one " +
+                            "unusually complex part, not the fetch actually failing. Raise " +
+                            "this before coarsening the tolerance just to dodge it.");
             ui.AddNumber(sec, "Surface fill density", _s.FusionDensity,
                          v => _s.FusionDensity = (float)v, "F2");
             ui.AddNumber(sec, "Brightness", _s.FusionBrightness,
@@ -1901,8 +2377,19 @@ namespace EDes
                 }
                 if (maxX <= minX) return;
 
-                _s.FusionScale = CadPlacement.FitScale(maxX - minX, maxY - minY, maxZ,
-                                                       _radius, _zHalf);
+                float scale = CadPlacement.FitScale(maxX - minX, maxY - minY, maxZ,
+                                                    _radius, _zHalf);
+                _s.FusionScale = scale;
+
+                // Fitting the SCALE alone is not enough to land the assembly inside the
+                // cylinder: Fusion's own origin can sit anywhere relative to the model's
+                // bounding box (an off-centre part, an assembly built away from 0,0), so a
+                // correctly SCALED model can still clip one side. Centring X/Y here is the
+                // rest of "fits the display" — Z stays exactly where the app always puts
+                // it (the floor), which is a deliberate convention, not something to fit.
+                float cx = (minX + maxX) * 0.5f, cy = (minY + maxY) * 0.5f;
+                _s.FusionOriginX = -cx * scale;
+                _s.FusionOriginY = -cy * scale;
             });
 
             ui.AddInfo(sec, "Origin Z is a fraction of the display's half-height, so it means " +
@@ -1910,9 +2397,12 @@ namespace EDes
                             "and Fusion's +Z maps to display -Z, so the assembly stands on the " +
                             "floor and grows upward. -1 would put the origin on the ceiling " +
                             "and clip everything above it.\n\n" +
-                            "Fit once computes a scale and then stops being involved. A live " +
-                            "fit would rescale the model every time a component was added, " +
-                            "which is exactly the control over placement that Fusion holds.");
+                            "Fit once computes a scale AND centres X/Y on the assembly's own " +
+                            "bounding box, then stops being involved — it does not touch " +
+                            "Origin Z, which stays anchored to the floor by design. A live " +
+                            "fit would re-fit the model every time a component was added or " +
+                            "moved, which is exactly the control over placement that Fusion " +
+                            "holds.");
 
             ui.AddLiveInfo(sec, () =>
             {
@@ -1934,12 +2424,206 @@ namespace EDes
                 if (_cadScene.ClippedFraction > 0.001f)
                     s2 += $"\n{_cadScene.ClippedFraction * 100f:0.#}% of samples fall OUTSIDE "
                         + "the volume — check the origin and scale above";
+
+                if (_cadScene.DensityScale < 0.999f)
+                    s2 += $"\ncoarsened to {_cadScene.DensityScale * 100f:0}% density to fit "
+                        + "the voxel budget — every face is scaled down EVENLY, so raise the "
+                        + "voxel budget or coarsen the tolerance for full density everywhere";
                 return s2;
             }, 0.4);
 
             ui.AddInfo(sec, "Component visibility is Fusion's. Hidden bodies are still " +
                             "fetched and still counted, so hiding something in Fusion costs " +
                             "no re-tessellation and the list does not lose rows.");
+
+            ui.AddHeader(sec, "Extra lights and shadows");
+            ui.AddInfo(sec, "The first light, and the master 'CAD lighting' switch and " +
+                            "ambient level, are on the PCB tab's own lighting section -- " +
+                            "shared with its STEP-model overlay. Turning that master switch " +
+                            "off darkens every light here too, not only the first one. " +
+                            "These three extra lights are Fusion-only and move freely, in " +
+                            "Fusion millimetres, rather than as fractions of the assembly " +
+                            "the way the first one does.");
+
+            ui.AddToggle(sec, "Bodies can shadow themselves", _s.FusionSelfShadow,
+                         v => _s.FusionSelfShadow = v);
+            ui.AddToggle(sec, "Bodies cast shadows on OTHER bodies", _s.FusionCastShadows,
+                         v => _s.FusionCastShadows = v);
+            ui.AddInfo(sec, "Both use a coarse, approximate occlusion test, not a precise " +
+                            "one -- fine detail can be missed, and very occasionally a body " +
+                            "reads as lit when a different body is actually in the way. " +
+                            "Free when both are off; each one adds roughly one extra pass " +
+                            "over the whole assembly per enabled point light.");
+
+            AddFusionLight(ui, sec, "Light 2",
+                          () => _s.FusionLight2On, v => _s.FusionLight2On = v,
+                          () => _s.FusionLight2X,  v => _s.FusionLight2X  = v,
+                          () => _s.FusionLight2Y,  v => _s.FusionLight2Y  = v,
+                          () => _s.FusionLight2Z,  v => _s.FusionLight2Z  = v,
+                          () => _s.FusionLight2Range, v => _s.FusionLight2Range = v);
+            AddFusionLight(ui, sec, "Light 3",
+                          () => _s.FusionLight3On, v => _s.FusionLight3On = v,
+                          () => _s.FusionLight3X,  v => _s.FusionLight3X  = v,
+                          () => _s.FusionLight3Y,  v => _s.FusionLight3Y  = v,
+                          () => _s.FusionLight3Z,  v => _s.FusionLight3Z  = v,
+                          () => _s.FusionLight3Range, v => _s.FusionLight3Range = v);
+            AddFusionLight(ui, sec, "Light 4",
+                          () => _s.FusionLight4On, v => _s.FusionLight4On = v,
+                          () => _s.FusionLight4X,  v => _s.FusionLight4X  = v,
+                          () => _s.FusionLight4Y,  v => _s.FusionLight4Y  = v,
+                          () => _s.FusionLight4Z,  v => _s.FusionLight4Z  = v,
+                          () => _s.FusionLight4Range, v => _s.FusionLight4Range = v);
+
+            ui.AddHeader(sec, "Cutting plane (slice buildup)");
+            ui.AddInfo(sec, "Pressing BOTH SpaceNav buttons together cycles the puck between " +
+                            "normal orbiting, controlling this plane (puck lift moves it), " +
+                            "and the cursor probe below -- or use the controls here directly. " +
+                            "The plane is fixed to the ASSEMBLY's own axes, not the display's, " +
+                            "so rotating the view never changes what is cut away.");
+            ui.AddToggle(sec, "Cutting plane on", _s.FusionCutEnabled,
+                         v => _s.FusionCutEnabled = v);
+            ui.AddChoice(sec, "Axis", new[] { "X", "Y", "Z (typical print direction)" },
+                         Math.Clamp(_s.FusionCutAxis, 0, 2), v => _s.FusionCutAxis = v);
+            ui.AddSlider(sec, "Position", 0.0, 1.0, _s.FusionCutFraction,
+                         v => _s.FusionCutFraction = (float)v, "F2");
+            ui.AddToggle(sec, "Keep the LOW side (already-printed layers)",
+                         _s.FusionCutKeepLow, v => _s.FusionCutKeepLow = v);
+            ui.AddRgb(sec, () => _s.FusionCutHighlightColour,
+                     c => _s.FusionCutHighlightColour = c);
+            ui.AddNumber(sec, "Cut-face highlight band (mm)", _s.FusionCutHighlightBandMm,
+                         v => _s.FusionCutHighlightBandMm = (float)v, "F2");
+            ui.AddInfo(sec, "Position is a FRACTION of the assembly's own extent on that " +
+                            "axis, so 0.5 means the halfway point on any size of part. The " +
+                            "highlight band colours triangles near the cut a distinct colour, " +
+                            "so the cut face itself reads as a face -- not just as a place " +
+                            "where the model happens to stop.");
+
+            ui.AddHeader(sec, "Cursor probe");
+            ui.AddInfo(sec, "The second both-buttons stage: the puck moves a 3D point " +
+                            "through the assembly, and whichever body it is nearest to (or " +
+                            "inside) is auto-picked -- the same pick the legend and the " +
+                            "'Isolate picked body' toggle above use.");
+            ui.AddLiveInfo(sec, () =>
+            {
+                var mode = (FusionInteraction)_s.FusionInteractionMode;
+                if (mode != FusionInteraction.CursorProbe) return "not active";
+                string body = PickedFusionBodyName();
+                return $"cursor at ({_s.FusionCursorX:0.#}, {_s.FusionCursorY:0.#}, "
+                     + $"{_s.FusionCursorZ:0.#}) mm -- nearest: "
+                     + (body.Length > 0 ? body : "(none)");
+            }, 0.2);
+
+            ui.AddHeader(sec, "Explode view");
+            ui.AddSlider(sec, "Explode amount", 0.0, 2.0, _s.FusionExplodeAmount,
+                         v => _s.FusionExplodeAmount = (float)v, "F2");
+            ui.AddInfo(sec, "Pushes each body radially away from the assembly's own centre, " +
+                            "scaled to the assembly's own size -- 0 is fully assembled. A " +
+                            "body sitting exactly at the centre has no direction to move in " +
+                            "and stays put.");
+
+            ui.AddHeader(sec, "Measure");
+            ui.AddLiveInfo(sec, () =>
+            {
+                string path = _s.PickedKey.StartsWith("fusionbody:", StringComparison.Ordinal)
+                            ? _s.PickedKey.Substring(11) : "";
+                if (path.Length == 0) return "pick a body to see its size";
+                foreach (var s in _cadSolids)
+                    if (s.AssemblyPath == path)
+                        return $"{PickedFusionBodyName()}: "
+                             + $"{s.MaxX - s.MinX:0.###} x {s.MaxY - s.MinY:0.###} x "
+                             + $"{s.MaxZ - s.MinZ:0.###} mm (W x D x H)";
+                return "pick a body to see its size";
+            }, 0.3);
+
+            ui.AddHeader(sec, "Export");
+            ui.AddButton(sec, "Export visible geometry as STL", () => ExportFusionStl());
+            ui.AddButton(sec, "Export body list as CSV", () => ExportFusionCsv());
+            ui.AddLiveInfo(sec, () => _cadExportStatus, 0.5);
+            ui.AddInfo(sec, "STL uses each body's RAW Fusion millimetres, Z up -- the same " +
+                            "frame Fusion itself works in, not this display's flipped/scaled " +
+                            "one -- so the file re-imports at true scale anywhere. Only bodies " +
+                            "currently shown (Fusion-visible AND not locally hidden) are " +
+                            "included in either export.");
+
+            ui.AddHeader(sec, "Per-body appearance");
+            ui.AddInfo(sec, "Colour and visibility are also in the legend, bottom-right of " +
+                            "the preview -- this list is the only place Flat / Wireframe " +
+                            "live, since those are more than the legend's single checkbox " +
+                            "can offer. Rebuilt whenever the body count changes, so it always " +
+                            "matches whatever the last fetch actually returned.");
+
+            ui.AddToggle(sec, "Isolate picked body (hide everything else)",
+                         _s.FusionIsolatePicked, v => _s.FusionIsolatePicked = v);
+            ui.AddInfo(sec, "Pick a body from the 'Bodies' group in the pick list beside the " +
+                            "preview, then turn this on. The selected body's own name shows " +
+                            "at the top of the volume, beneath the assembly name.");
+
+            ui.AddButton(sec, "Give every body its own colour", () =>
+            {
+                var solidsNow = _cadSolids;
+                // The golden angle, not an even 360/N split: N is not known in advance
+                // (another fetch can add or drop bodies), and a fixed fraction of a full
+                // turn keeps consecutive hues far apart whatever N turns out to be, so
+                // two neighbouring bodies are never accidentally near-identical colours.
+                const float goldenAngle = 137.508f;
+                for (int i = 0; i < solidsNow.Length; i++)
+                    _s.SetFusionBodyColour(solidsNow[i].AssemblyPath,
+                                           ColorHsv.HsvToRgb(i * goldenAngle, 0.85f, 1f));
+                RequestPanelRebuild();
+            });
+
+            var bodies = _cadSolids;
+            foreach (var solid in bodies)
+            {
+                ui.AddHeader(sec, solid.Name.Length > 0 ? solid.Name : "(unnamed body)");
+
+                ui.AddChoice(sec, "Render as",
+                             new[] { "Lit (shaded)", "Flat", "Wireframe", "Hidden" },
+                             ModeChoiceIndex(BodyDrawMode(solid)),
+                             choice => _s.SetFusionBodyMode(solid.AssemblyPath,
+                                                            (int)ModeFromChoiceIndex(choice)));
+
+                ui.AddRgb(sec, () => BodyColour(solid),
+                         c => _s.SetFusionBodyColour(solid.AssemblyPath, c & 0xFFFFFF));
+            }
+        }
+
+        /// <summary>The per-body picker offers exactly four states — Ghost is a GLOBAL
+        /// toggle, not one of them, so it maps to the same slot as Lit here rather than
+        /// getting a fifth choice nobody asked for.</summary>
+        private static int ModeChoiceIndex(CadDrawMode mode) => mode switch
+        {
+            CadDrawMode.Flat      => 1,
+            CadDrawMode.Wireframe => 2,
+            CadDrawMode.Hidden    => 3,
+            _                     => 0,
+        };
+
+        private static CadDrawMode ModeFromChoiceIndex(int choice) => choice switch
+        {
+            1 => CadDrawMode.Flat,
+            2 => CadDrawMode.Wireframe,
+            3 => CadDrawMode.Hidden,
+            _ => CadDrawMode.Solid,
+        };
+
+        /// <summary>One movable point light's controls: on/off plus X/Y/Z/range in Fusion
+        /// millimetres. A tiny helper rather than three copy-pasted blocks, since lights
+        /// 2/3/4 are otherwise identical apart from which settings field each control
+        /// reads and writes.</summary>
+        private void AddFusionLight(PanelBuilder ui, StackPanel sec, string label,
+                                    Func<bool> getOn, Action<bool> setOn,
+                                    Func<float> getX, Action<float> setX,
+                                    Func<float> getY, Action<float> setY,
+                                    Func<float> getZ, Action<float> setZ,
+                                    Func<float> getRange, Action<float> setRange)
+        {
+            ui.AddToggle(sec, label, getOn(), setOn);
+            ui.AddNumber(sec, label + " X (mm)", getX(), v => setX((float)v), "F1");
+            ui.AddNumber(sec, label + " Y (mm)", getY(), v => setY((float)v), "F1");
+            ui.AddNumber(sec, label + " Z (mm)", getZ(), v => setZ((float)v), "F1");
+            ui.AddNumber(sec, label + " falloff (mm, 0 = none)", getRange(),
+                         v => setRange((float)v), "F1");
         }
 
         private void BuildScopeSection(PanelBuilder ui, StackPanel stack, List<Expander> group)
