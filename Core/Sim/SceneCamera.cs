@@ -27,6 +27,18 @@ using Voxon;
 
 namespace EDes.Sim
 {
+    /// <summary>Which puck axis drives which scene axis. Four orderings rather than a
+    /// free permutation: these are the ones that correspond to a physical way of holding
+    /// the puck, and the remaining two orderings of three axes are mirror images that the
+    /// invert switch already covers.</summary>
+    public enum NavAxisMap
+    {
+        Standard = 0,   // slide->L/R,  fore/aft->depth, lift->vertical
+        SwapXY   = 1,   // slide and fore/aft exchanged
+        SwapYZ   = 2,   // fore/aft and lift exchanged
+        SwapXZ   = 3,   // slide and lift exchanged
+    }
+
     public sealed class SceneCamera
     {
         /// <summary>Set false to swap the layout's horizontal and depth axes
@@ -77,6 +89,23 @@ namespace EDes.Sim
 
         public point3d Transform(point3d p) => Transform(p.x, p.y, p.z);
 
+        /// <summary>Rotate a DIRECTION into display space: the basis only, with no pan and
+        /// no zoom.
+        ///
+        /// Separate from Transform because a direction is not a position. Running (1,0,0)
+        /// through Transform gives a point displaced by the pan and scaled by the zoom,
+        /// so an indicator built that way would fly off with the board and shrink as you
+        /// pulled back -- which is exactly what it must not do. The output is unit length
+        /// for a unit input, because the basis is orthonormal.</summary>
+        public point3d Direction(float x, float y, float z)
+        {
+            if (!HORIZONTAL_IS_X) { (x, y) = (y, x); }
+
+            return new point3d(_ux * x + _vx * y + _wx * z,
+                               _uy * x + _vy * y + _wy * z,
+                               _uz * x + _vz * y + _wz * z);
+        }
+
         /// <summary>False to rotate about the DISPLAY's fixed axes instead of the scene's
         /// own. Local is the default because it is what "turn the board over" means when
         /// the board is already tilted; global is easier to reason about when lining an
@@ -101,6 +130,41 @@ namespace EDes.Sim
         /// inversions would let someone end up with a mixed frame that is wrong in a way
         /// no single mental model explains.</summary>
         public bool InvertTranslation;
+
+        /// <summary>Which puck axis drives which scene axis.
+        ///
+        /// A permutation, not a set of per-axis pickers. Which raw axis is which is
+        /// EMPIRICAL on this hardware -- the SDK's own NAV_Y_AXIS_DIRECTION /
+        /// NAV_Z_AXIS_DIRECTION names claim Y is depth and Z is lift, and on this puck they
+        /// are the other way round -- so rather than assert one binding is correct, the
+        /// four orderings that anyone actually wants are selectable and the operator picks
+        /// the one that matches their hand. The triad drawn in the volume shows which one
+        /// is live, so it is a choice you can see rather than one you have to remember.</summary>
+        public NavAxisMap AxisMap = NavAxisMap.Standard;
+
+        /// <summary>Apply the current mapping to a conditioned puck reading.</summary>
+        private void MapAxes(float dx, float dy, float dz,
+                             out float sx, out float sy, out float sz)
+        {
+            switch (AxisMap)
+            {
+                case NavAxisMap.SwapXY: sx = dy; sy = dx; sz = dz; break;
+                case NavAxisMap.SwapYZ: sx = dx; sy = dz; sz = dy; break;
+                case NavAxisMap.SwapXZ: sx = dz; sy = dy; sz = dx; break;
+                default:                sx = dx; sy = dy; sz = dz; break;
+            }
+        }
+
+        /// <summary>The axis labels the current mapping produces, for the readout and the
+        /// triad. Named by the PUCK gesture, because that is the end the operator's hand
+        /// is on -- "which way do I push to move it up" is the actual question.</summary>
+        public (string X, string Y, string Z) AxisLabels => AxisMap switch
+        {
+            NavAxisMap.SwapXY => ("FORE/AFT", "SLIDE L/R", "LIFT"),
+            NavAxisMap.SwapYZ => ("SLIDE L/R", "LIFT", "FORE/AFT"),
+            NavAxisMap.SwapXZ => ("LIFT", "FORE/AFT", "SLIDE L/R"),
+            _                 => ("SLIDE L/R", "FORE/AFT", "LIFT"),
+        };
 
         /// <summary>Rotate by three small angles, about whichever frame LocalAxes selects.
         ///
@@ -274,18 +338,22 @@ namespace EDes.Sim
             if (allowPan)
             {
                 float inv = InvertTranslation ? -1f : 1f;
-                PanX += nav.Dx * panRate * dt * inv;   // slide left / right → scene L/R
-                PanY += nav.Dy * panRate * dt * inv;   // push fore / aft    → scene depth
-                PanZ += nav.Dz * panRate * dt * inv;   // lift up / down     → scene vertical
+                MapAxes(nav.Dx, nav.Dy, nav.Dz, out float tx, out float ty, out float tz);
+                PanX += tx * panRate * dt * inv;
+                PanY += ty * panRate * dt * inv;
+                PanZ += tz * panRate * dt * inv;
             }
 
             // All three rotations share rotRate, so the puck feels isotropic in rotation
             // exactly as translation does above. The Y term is negated: this axis reports
             // the opposite sense to the other two, so without it tilting left rolled the
             // scene right.
-            Rotate( nav.Ay * rotRate * dt,   // tilt forward / back → X
-                   -nav.Ax * rotRate * dt,   // tilt left / right   → Y
-                    nav.Az * rotRate * dt);  // twist left / right  → Z
+            //
+            // The SAME permutation applies here, so translation and rotation cannot end up
+            // referring to different axes -- a mapping that moved the board in depth while
+            // rotating it about the vertical would be worse than any single fixed binding.
+            MapAxes(nav.Ay, -nav.Ax, nav.Az, out float rx, out float ry, out float rz);
+            Rotate(rx * rotRate * dt, ry * rotRate * dt, rz * rotRate * dt);
 
             // Zoom is on the two puck buttons. It used to be a gesture on the lift
             // axis, which fought the pan already bound to that same axis — pushing

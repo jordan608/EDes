@@ -151,6 +151,17 @@ namespace EDes
         /// switch rather than a default someone has to live with.</summary>
         public volatile bool  NavInvertTranslation = false;
 
+        /// <summary>Which puck axis drives which scene axis (see NavAxisMap). Selectable
+        /// because the correct binding is a property of the hardware and the hand holding
+        /// it, not something this code can know -- the SDK's own axis NAMES are wrong on
+        /// this puck.</summary>
+        public volatile int   NavAxisMap = 0;
+
+        /// <summary>Draw the axis triad the SpaceNavigator is driving, in the volume. On by
+        /// default while there is a mapping to choose: a mapping you cannot see is one you
+        /// have to discover by pushing the puck and watching what happens.</summary>
+        public volatile bool  ShowNavAxes = true;
+
         /// <summary>Lock rotation about an individual axis during normal camera mode.
         /// The axes are whichever frame NavLocalAxes selects, so a lock always means the
         /// axis it is named after. Inspection mode locks all three regardless.</summary>

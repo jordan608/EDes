@@ -418,6 +418,7 @@ namespace EDes
             _cam.LockRotZ = _s.LockRotZ;
 
             _cam.InvertTranslation = _s.NavInvertTranslation;
+            _cam.AxisMap           = (NavAxisMap)Math.Clamp(_s.NavAxisMap, 0, 3);
         }
 
         // ── Pick list ─────────────────────────────────────────────────────────
@@ -755,6 +756,7 @@ namespace EDes
             // at a fixed position and landing back on top of row one.
             DrawStatusHeader();
             if (_s.ShowHudPanel && !ProbeHasSelection) DrawHudPanel();
+            if (_s.ShowNavAxes && _nav.Present) DrawNavAxes();
 
             switch ((EDesMode)_s.Mode)
             {
@@ -1170,6 +1172,73 @@ namespace EDes
         }
 
         // ── Shared HUD ────────────────────────────────────────────────────────
+        /// <summary>The axis triad the SpaceNavigator is currently driving.
+        ///
+        /// Drawn in the volume rather than on the 2D window because the question it answers
+        /// -- "which way do I push to move it up" -- is asked while looking AT the display
+        /// with a hand on the puck. Reading the answer off the laptop screen means looking
+        /// away at the exact moment you are trying to correlate a gesture with a motion.
+        ///
+        /// Sized in DISPLAY units and anchored to the volume, so it neither shrinks when
+        /// you zoom out nor drifts when you pan -- it is a legend for the controls, not
+        /// part of the scene. But its DIRECTIONS come from the camera when the nav is in
+        /// local-axis mode, because that is the honest answer there: the axes the puck
+        /// drives really do turn with the scene. In global mode they are the display's own
+        /// axes and stay put. Watching the triad swing as you rotate is exactly what makes
+        /// the local/global distinction legible.
+        private void DrawNavAxes()
+        {
+            // Bottom-left, away from the text band at the top and the board in the middle.
+            float len = MathF.Min(_radius, _zHalf) * 0.42f;
+            var origin = new point3d(-_radius * 0.62f, _planeY, _zHalf * 0.55f);
+
+            // Local mode: show the axes as they are actually oriented. Global mode: the
+            // display's own axes. Unit vectors either way -- direction only, never the
+            // camera's zoom or pan, or the triad would fly off with the board.
+            point3d ax, ay, az;
+            if (_cam.LocalAxes)
+            {
+                ax = _cam.Direction(1f, 0f, 0f);
+                ay = _cam.Direction(0f, 1f, 0f);
+                az = _cam.Direction(0f, 0f, 1f);
+            }
+            else
+            {
+                ax = new point3d(1f, 0f, 0f);
+                ay = new point3d(0f, 1f, 0f);
+                az = new point3d(0f, 0f, 1f);
+            }
+
+            var labels = _cam.AxisLabels;
+            float tip = _batch.Spacing * 2.5f;
+
+            DrawAxisArm(origin, ax, len, tip, Palette.Red,   labels.X);
+            DrawAxisArm(origin, ay, len, tip, Palette.Green, labels.Y);
+            DrawAxisArm(origin, az, len, tip, Palette.Blue,  labels.Z);
+
+            // A white pip at the origin, so the three arms read as one object rather than
+            // three unrelated lines that happen to meet.
+            _batch.Blob(origin, _batch.Spacing * 1.5f, Palette.White);
+        }
+
+        /// <summary>One arm of the triad: a shaft, a ball at the tip to show which end is
+        /// positive, and a label. The ball matters -- on a display you can walk around,
+        /// an unmarked line has no direction at all.</summary>
+        private void DrawAxisArm(point3d o, point3d dir, float len, float tip,
+                                 int col, string label)
+        {
+            var end = new point3d(o.x + dir.x * len, o.y + dir.y * len, o.z + dir.z * len);
+            _batch.Line(o, end, col);
+            _batch.Blob(end, tip, col);
+
+            // Label just past the tip, small, and NOT camera-transformed -- it shares the
+            // HUD plane so it stays readable while the scene turns.
+            float size = _textSize * 0.55f;
+            var at = new point3d(end.x + dir.x * tip * 2f, _planeY,
+                                 end.z + dir.z * tip * 2f);
+            _hud.Text(at, size, col, label);
+        }
+
         /// <summary>The voxel budget readout, and nothing else. The mode title it used to
         /// print as well is now DrawStatusHeader's single line -- printing it twice, once
         /// here and once there, is what put cyan text through the yellow header.
@@ -1993,6 +2062,35 @@ namespace EDes
                 return "locked: " + (_s.LockRotX ? "X " : "") + (_s.LockRotY ? "Y " : "")
                                   + (_s.LockRotZ ? "Z" : "");
             }, 0.3);
+
+            ui.AddHeader(sec, "Which puck axis drives which");
+            ui.AddButton(sec, "Cycle axis mapping", () =>
+                         _s.NavAxisMap = (_s.NavAxisMap + 1) % 4);
+            ui.AddLiveInfo(sec, () =>
+            {
+                var l = _cam.AxisLabels;
+                string name = ((NavAxisMap)Math.Clamp(_s.NavAxisMap, 0, 3)) switch
+                {
+                    NavAxisMap.SwapXY => "SWAP SLIDE / FORE-AFT",
+                    NavAxisMap.SwapYZ => "SWAP FORE-AFT / LIFT",
+                    NavAxisMap.SwapXZ => "SWAP SLIDE / LIFT",
+                    _                 => "STANDARD",
+                };
+                return $"{name}\n  scene X (red)   <- {l.X}"
+                     + $"\n  scene Y (green) <- {l.Y}"
+                     + $"\n  scene Z (blue)  <- {l.Z}";
+            }, 0.4);
+            ui.AddToggle(sec, "Show the axis triad in the volume", _s.ShowNavAxes,
+                         v => _s.ShowNavAxes = v);
+            ui.AddInfo(sec, "The correct binding is a property of the hardware and the hand " +
+                            "holding it, not something this code can know -- the SDK's own " +
+                            "axis NAMES are wrong on this puck, which is why these are " +
+                            "selectable rather than fixed. The triad in the volume shows " +
+                            "which mapping is live: red X, green Y, blue Z, with a ball on " +
+                            "the positive end. In LOCAL mode it turns with the scene, " +
+                            "because the axes the puck drives really do; in GLOBAL mode it " +
+                            "stays put. Watching it swing as you rotate is the clearest way " +
+                            "to see what local vs global actually means.");
 
             ui.AddToggle(sec, "Invert all XYZ translation (not rotation)",
                          _s.NavInvertTranslation, v => _s.NavInvertTranslation = v);
