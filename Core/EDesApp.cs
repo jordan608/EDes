@@ -36,6 +36,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using Avalonia.Controls;
+using EDes.Cad;
 using EDes.Pcb;
 using EDes.Sim;
 using EDes.UI;
@@ -86,6 +87,19 @@ namespace EDes
         // the puck — so on many machines LedWin's copy simply never updated. Whichever
         // path reports motion drives the camera; both are shown in the diagnostics.
         private readonly SchematicRenderer _sch = new();
+
+        // ── Fusion bridge ─────────────────────────────────────────────────────
+        // The solids are published as ONE reference swap after a fetch, so the UI thread
+        // reading them for the panel can never see a half-built list. Same discipline as
+        // _sheets and for the same reason.
+        private readonly FusionClient      _fusion    = new();
+        private readonly CadSceneRenderer  _cadScene  = new();
+        private volatile CadSolid[]        _cadSolids = Array.Empty<CadSolid>();
+        private volatile string            _cadStatus = "not connected";
+        private string                     _cadRevision = "";
+        private float                      _cadPollAccum;
+        private int                        _cadTriangles;
+
 
         /// <summary>Immutable snapshot of the imported schematic sheets.
         ///
@@ -162,6 +176,8 @@ namespace EDes
             TrackViewMotion();
 
             if (_s.PcbImportRequested) ImportBoard();
+            if (_s.FusionFetchRequested) FetchFusion();
+            PollFusion(dt);
 
             if (!_s.FlowPaused) _anim += dt * MathF.Max(0f, _s.FlowSpeed);
 
@@ -194,6 +210,71 @@ namespace EDes
             VoxelFont.Thickness = Math.Clamp(_s.TextWeight, 0.5f, 3f);
             _hud.Font = (HudFont)Math.Clamp(_s.FontIndex, 0, 2);
         }
+
+        /// <summary>Fetch from the add-in. GAME thread only -- the UI sets a flag, exactly
+        /// as it does for the PCB import, because a socket read must never sit on the UI
+        /// thread where it would freeze the window.</summary>
+        private void FetchFusion()
+        {
+            _s.FusionFetchRequested = false;
+
+            var r = _fusion.Fetch(_s.FusionHost, _s.FusionPort,
+                                  _s.FusionToleranceMm, _s.FusionMaxTriangles);
+
+            if (!r.Ok)
+            {
+                // The previous geometry is deliberately KEPT. A failed poll in the middle of
+                // a modelling session should not blank the display -- the last good model is
+                // more useful than nothing, and the status line says it is stale.
+                _cadStatus = "FAILED: " + r.Message;
+                App.Log("[EDesApp] Fusion fetch failed: " + r.Message);
+                return;
+            }
+
+            _cadSolids    = r.Solids.ToArray();
+            _cadRevision  = r.Revision;
+            _cadTriangles = r.Triangles;
+
+            var sb = new StringBuilder();
+            sb.Append(r.Document.Length > 0 ? r.Document : "(unnamed document)").Append('\n');
+            sb.Append(r.Message);
+            foreach (string n in r.Notes) sb.Append("\n- ").Append(n);
+            _cadStatus = sb.ToString();
+
+            App.Log($"[EDesApp] Fusion: {r.Solids.Count} body(s), "
+                  + $"{r.Triangles:N0} tri, {r.Millis} ms");
+        }
+
+        /// <summary>Poll the cheap revision token and fetch only when it moves.
+        ///
+        /// Polling geometry directly would re-tessellate the whole assembly several times a
+        /// second, which would make Fusion unusable while it was connected. The token is a
+        /// dictionary read on the add-in's side.</summary>
+        private void PollFusion(float dt)
+        {
+            if (!_s.FusionAutoRefresh || (EDesMode)_s.Mode != EDesMode.Cad) return;
+
+            _cadPollAccum += dt;
+            if (_cadPollAccum < MathF.Max(0.1f, _s.FusionPollSeconds)) return;
+            _cadPollAccum = 0f;
+
+            string rev = _fusion.FetchRevision(_s.FusionHost, _s.FusionPort, out string err);
+            if (err.Length > 0) { _cadStatus = "poll failed: " + err; return; }
+
+            if (rev.Length > 0 && rev != _cadRevision) FetchFusion();
+        }
+
+        /// <summary>The live placement, from the settings and this frame's bounds.
+        ///
+        /// OriginZ is a FRACTION of zHalf, so +1 is the floor on any display size. See
+        /// EDesSettings for why the floor and not the ceiling.</summary>
+        private CadPlacement FusionPlacement() => new CadPlacement
+        {
+            Scale   = MathF.Max(1e-5f, _s.FusionScale),
+            OriginX = _s.FusionOriginX,
+            OriginY = _s.FusionOriginY,
+            OriginZ = Math.Clamp(_s.FusionOriginZFrac, -1f, 1f) * _zHalf,
+        };
 
         private void ImportBoard()
         {
@@ -238,7 +319,7 @@ namespace EDes
         private void HandleKeys(float dt)
         {
             if (Down(VX_KEYS.KB_Tab))
-                _s.Mode = (_s.Mode + 1) % 3;
+                _s.Mode = (_s.Mode + 1) % Modes.Count;
 
             if (Down(VX_KEYS.KB_V)) _s.ShowNavDiag  = !_s.ShowNavDiag;
             if (Down(VX_KEYS.KB_L)) _s.ShowLabels   = !_s.ShowLabels;
@@ -836,6 +917,7 @@ namespace EDes
                 case EDesMode.Education: DrawEducation(); break;
                 case EDesMode.Scope:     DrawScopeMode(); break;
                 case EDesMode.Pcb:       DrawPcbMode();   break;
+                case EDesMode.Cad:       DrawCadMode();   break;
             }
 
             // Probe and its readout come BEFORE the HUD panel: when the probe is what you
@@ -1268,6 +1350,45 @@ namespace EDes
                     "  Y " + _s.PcbCursorY.ToString("0.00") + " MM");
         }
 
+        // ── Mode: Fusion CAD ──────────────────────────────────────────────────
+        private void DrawCadMode()
+        {
+            var solids = _cadSolids;
+
+            if (solids.Length == 0)
+            {
+                HudCentred(_topText.Row(), _textSize, Palette.Warning,
+                           "NO FUSION GEOMETRY - PRESS FETCH IN THE FUSION CAD TAB");
+                return;
+            }
+
+            var light = CadLight.ForSolids(solids, _s.PcbCadLighting, _s.PcbCadAmbient,
+                                           _s.PcbCadPointLight,
+                                           _s.PcbCadLightX, _s.PcbCadLightY, _s.PcbCadLightZ,
+                                           _s.PcbCadLightFx, _s.PcbCadLightFy, _s.PcbCadLightFz,
+                                           _s.PcbCadLightRange);
+
+            _cadScene.Draw(_batch, _cam, solids, FusionPlacement(), light,
+                           _radius, _zHalf, _s.FusionDensity, _s.FusionBrightness,
+                           _s.FusionGhost ? _ => CadDrawMode.Ghost : null);
+
+            if (!_s.ShowLabels || ProbeHasSelection) return;
+
+            ref TextStack f = ref _topText;
+            HudCentred(f.Row(), _textSize, Palette.Text,
+                       _cadScene.SolidsDrawn + " BODIES   "
+                       + _cadScene.TrianglesDrawn.ToString("N0") + " TRI");
+
+            // Clipping is called out IN THE VOLUME, not only in the panel. Geometry outside
+            // the cylinder is simply not drawn, and the first version of this bridge anchored
+            // the assembly to the ceiling where a normal upward model is almost entirely
+            // clipped -- which looks like a broken import rather than a wrong origin.
+            if (_cadScene.ClippedFraction > 0.01f)
+                HudCentred(f.Row(), _textSize, Palette.Warning,
+                           (_cadScene.ClippedFraction * 100f).ToString("0") +
+                           "% OUTSIDE THE VOLUME - CHECK ORIGIN AND SCALE");
+        }
+
         // ── Shared HUD ────────────────────────────────────────────────────────
         /// <summary>The axis triad the SpaceNavigator is currently driving.
         ///
@@ -1562,7 +1683,8 @@ namespace EDes
 
         /// <summary>The mode headers the shell draws across the top of the window.
         /// Order must match EDesMode.</summary>
-        public IReadOnlyList<string> Modes { get; } = new[] { "Education", "Oscilloscope", "PCB" };
+        public IReadOnlyList<string> Modes { get; } =
+            new[] { "Education", "Oscilloscope", "PCB", "Fusion CAD" };
 
         /// <summary>Which header is lit. The shell writes this on a click and then
         /// rebuilds the panel below, so the setting is the single source of truth for
@@ -1586,6 +1708,7 @@ namespace EDes
                 case EDesMode.Education: BuildCircuitSection(ui, stack, group); break;
                 case EDesMode.Scope:     BuildScopeSection(ui, stack, group);   break;
                 case EDesMode.Pcb:       BuildPcbSection(ui, stack, group);     break;
+                case EDesMode.Cad:       BuildFusionSection(ui, stack, group);  break;
             }
 
             BuildRenderSection(ui, stack, group);
@@ -1704,6 +1827,119 @@ namespace EDes
 
                 return sb.ToString();
             }, 0.3);
+        }
+
+        private void BuildFusionSection(PanelBuilder ui, StackPanel stack, List<Expander> group)
+        {
+            var sec = ui.AddSection(stack, "Fusion 360 bridge", group);
+            ui.AddInfo(sec, "Streams a whole Fusion assembly into the volume. Fusion decides " +
+                            "where every component sits and whether it shows -- this end only " +
+                            "scales and anchors it. See docs/FUSION_BRIDGE.md.");
+
+            ui.AddTextBox(sec, "Add-in host", _s.FusionHost,
+                          v => _s.FusionHost = v.Trim());
+            ui.AddNumber(sec, "Port", _s.FusionPort, v => _s.FusionPort = (int)v, "F0");
+            ui.AddInfo(sec, "Defaults to 127.0.0.1. If Fusion runs on another PC, put its " +
+                            "address here AND allow the add-in to listen beyond localhost -- " +
+                            "that socket has no authentication, so it is a deliberate choice " +
+                            "for a network you trust, not a default.");
+
+            ui.AddButton(sec, "Fetch now", () => _s.FusionFetchRequested = true);
+            ui.AddToggle(sec, "Follow changes automatically", _s.FusionAutoRefresh,
+                         v => _s.FusionAutoRefresh = v);
+            ui.AddNumber(sec, "Poll interval (s)", _s.FusionPollSeconds,
+                         v => _s.FusionPollSeconds = (float)v, "F2");
+            ui.AddInfo(sec, "Following polls a cheap revision token, not the geometry, and " +
+                            "re-fetches only when the model actually changes. Polling the " +
+                            "geometry itself would re-tessellate the assembly several times a " +
+                            "second and make Fusion unusable while connected.");
+
+            ui.AddLiveInfo(sec, () => _cadStatus, 0.5);
+
+            ui.AddHeader(sec, "Detail and cost");
+            ui.AddNumber(sec, "Tessellation tolerance (mm)", _s.FusionToleranceMm,
+                         v => _s.FusionToleranceMm = (float)v, "F3");
+            ui.AddNumber(sec, "Triangle cap", _s.FusionMaxTriangles,
+                         v => _s.FusionMaxTriangles = (int)v, "F0");
+            ui.AddNumber(sec, "Surface fill density", _s.FusionDensity,
+                         v => _s.FusionDensity = (float)v, "F2");
+            ui.AddNumber(sec, "Brightness", _s.FusionBrightness,
+                         v => _s.FusionBrightness = (float)v, "F2");
+            ui.AddToggle(sec, "Ghost everything (sparse fill)", _s.FusionGhost,
+                         v => _s.FusionGhost = v);
+            ui.AddInfo(sec, "Tolerance is the real lever: a rounded part is millions of " +
+                            "triangles at 0.05 mm and thousands at 0.4 mm, and the two look " +
+                            "identical at this display's resolution. Ghost draws the same " +
+                            "geometry sparsely -- on a seven-colour display fainter has to " +
+                            "mean sparser, so that is what translucent looks like.");
+
+            ui.AddHeader(sec, "Where the assembly sits");
+            ui.AddNumber(sec, "Origin X (display units)", _s.FusionOriginX,
+                         v => _s.FusionOriginX = (float)v, "F2");
+            ui.AddNumber(sec, "Origin Y (display units)", _s.FusionOriginY,
+                         v => _s.FusionOriginY = (float)v, "F2");
+            ui.AddNumber(sec, "Origin Z (-1 ceiling .. +1 floor)", _s.FusionOriginZFrac,
+                         v => _s.FusionOriginZFrac = (float)v, "F2");
+            ui.AddNumber(sec, "Scale (display units per mm)", _s.FusionScale,
+                         v => _s.FusionScale = (float)v, "F4");
+
+            ui.AddButton(sec, "Fit once", () =>
+            {
+                var solids = _cadSolids;
+                if (solids.Length == 0) return;
+
+                float minX = float.MaxValue, minY = float.MaxValue;
+                float maxX = float.MinValue, maxY = float.MinValue, maxZ = float.MinValue;
+                foreach (var s in solids)
+                {
+                    if (s.MaxX <= s.MinX) continue;
+                    if (s.MinX < minX) minX = s.MinX;
+                    if (s.MinY < minY) minY = s.MinY;
+                    if (s.MaxX > maxX) maxX = s.MaxX;
+                    if (s.MaxY > maxY) maxY = s.MaxY;
+                    if (s.MaxZ > maxZ) maxZ = s.MaxZ;
+                }
+                if (maxX <= minX) return;
+
+                _s.FusionScale = CadPlacement.FitScale(maxX - minX, maxY - minY, maxZ,
+                                                       _radius, _zHalf);
+            });
+
+            ui.AddInfo(sec, "Origin Z is a fraction of the display's half-height, so it means " +
+                            "the same on a VX2 and a VX2-XL. +1 is the FLOOR: -Z is up here, " +
+                            "and Fusion's +Z maps to display -Z, so the assembly stands on the " +
+                            "floor and grows upward. -1 would put the origin on the ceiling " +
+                            "and clip everything above it.\n\n" +
+                            "Fit once computes a scale and then stops being involved. A live " +
+                            "fit would rescale the model every time a component was added, " +
+                            "which is exactly the control over placement that Fusion holds.");
+
+            ui.AddLiveInfo(sec, () =>
+            {
+                var solids = _cadSolids;
+                if (solids.Length == 0) return "no geometry fetched yet";
+
+                int vis = 0, tris = 0;
+                foreach (var s in solids)
+                {
+                    if (s.Visible) vis++;
+                    foreach (var fc in s.Faces) tris += fc.TriCount;
+                }
+
+                string s2 = $"{solids.Length} body(s), {vis} shown by Fusion, "
+                          + $"{tris:N0} triangle(s)\n"
+                          + $"drawn: {_cadScene.SolidsDrawn} body(s), "
+                          + $"{_cadScene.TrianglesDrawn:N0} triangle(s)";
+
+                if (_cadScene.ClippedFraction > 0.001f)
+                    s2 += $"\n{_cadScene.ClippedFraction * 100f:0.#}% of samples fall OUTSIDE "
+                        + "the volume — check the origin and scale above";
+                return s2;
+            }, 0.4);
+
+            ui.AddInfo(sec, "Component visibility is Fusion's. Hidden bodies are still " +
+                            "fetched and still counted, so hiding something in Fusion costs " +
+                            "no re-tessellation and the list does not lose rows.");
         }
 
         private void BuildScopeSection(PanelBuilder ui, StackPanel stack, List<Expander> group)

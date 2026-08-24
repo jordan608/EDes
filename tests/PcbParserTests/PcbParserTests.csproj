@@ -37,9 +37,22 @@
     <Compile Include="$(PcbSrc)\CadModel.cs" />
     <Compile Include="$(PcbSrc)\StepParser.cs" />
     <Compile Include="$(PcbSrc)\PcbNets.cs" />
+    <Compile Include="$(PcbSrc)\TriangleGrouping.cs" />
     <Compile Include="$(PcbSrc)\StlMesh.cs" />
     <Compile Include="$(PcbSrc)\StepConverter.cs" />
     <Compile Include="$(PcbSrc)\PdfSchematic.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\VoxonTypes.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\LedWinCS.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\LedHostCS.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\NativeInput.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Input.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Sim\SceneCamera.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Sim\VoxelBatch.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Cad\FusionWire.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Cad\FusionClient.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Cad\CadPlacement.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Cad\CadSceneRenderer.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\Core\Pcb\CadLight.cs" />
     <Compile Include="TestData.cs" />
     <Compile Include="DesignTreeChecks.cs" />
     <Compile Include="RealBoardCheck.cs" />
@@ -51,6 +64,7 @@
     <Compile Include="LightChecks.cs" />
     <Compile Include="CircuitChecks.cs" />
     <Compile Include="SchematicChecks.cs" />
+    <Compile Include="FusionChecks.cs" />
   </ItemGroup>
 
   <ItemGroup>

@@ -618,7 +618,11 @@ namespace EDes.Pcb
             float bright   = opt.CadBrightness > 0f ? opt.CadBrightness : opt.Brightness;
             float brightMul = 1f / MathF.Max(0.05f, bright);
 
-            var light = CadLight.Build(opt, board);
+            var light = CadLight.ForBoard(board, opt.CadLighting, opt.CadAmbient,
+                                         opt.CadPointLight,
+                                         opt.CadLightX, opt.CadLightY, opt.CadLightZ,
+                                         opt.CadLightFx, opt.CadLightFy, opt.CadLightFz,
+                                         opt.CadLightRange);
             if (opt.CadShowLight) DrawLightMarker(batch, cam, light, cx, cy, zBase);
 
             for (int si = 0; si < board.Solids.Count; si++)
@@ -740,97 +744,6 @@ namespace EDes.Pcb
             }
         }
 
-        // ── The light ─────────────────────────────────────────────────────────
-        //
-        // One place that answers "how lit is this point, facing this way", so the edge
-        // pass and the surface pass cannot drift apart. They differ only in whether the
-        // normal's SIGN counts, which is a property of what is being shaded rather than
-        // of the light: an edge is shared by two faces pointing opposite ways so its sign
-        // is meaningless, while a face has one outward normal and the sign is exactly what
-        // makes it turn away.
-        private readonly struct CadLight
-        {
-            public readonly bool  Point;
-            public readonly float X, Y, Z;        // mm in the board frame
-            public readonly float InvRange2;      // 0 = no distance falloff
-            public readonly float Ambient;
-            public readonly bool  On;
-
-            private CadLight(bool on, bool point, float x, float y, float z,
-                             float invRange2, float ambient)
-            {
-                On = on; Point = point; X = x; Y = y; Z = z;
-                InvRange2 = invRange2; Ambient = ambient;
-            }
-
-            public static CadLight Build(in PcbViewOptions opt, PcbBoard board)
-            {
-                float ambient = Math.Clamp(opt.CadAmbient, 0f, 1f);
-                if (!opt.CadLighting) return new CadLight(false, false, 0, 0, 1, 0f, ambient);
-
-                if (!opt.CadPointLight)
-                {
-                    // Normalise once, not per edge. A zero vector would divide by zero and
-                    // blacken the whole model, so it falls back to lighting from above.
-                    float dx = opt.CadLightX, dy = opt.CadLightY, dz = opt.CadLightZ;
-                    float l = MathF.Sqrt(dx * dx + dy * dy + dz * dz);
-                    if (l < 1e-6f) { dx = 0f; dy = 0f; dz = 1f; l = 1f; }
-                    return new CadLight(true, false, dx / l, dy / l, dz / l, 0f, ambient);
-                }
-
-                // Fractions -> millimetres, using the board's own size.
-                float halfW = MathF.Max(0.5f, board.WidthMm  * 0.5f);
-                float halfH = MathF.Max(0.5f, board.HeightMm * 0.5f);
-                float tall  = MathF.Max(1f, TallestSolid(board));
-
-                float px = board.CentreX + opt.CadLightFx * halfW;
-                float py = board.CentreY + opt.CadLightFy * halfH;
-                float pz = opt.CadLightFz * tall;
-
-                // Falloff distance from the board diagonal, so "range 1" means "about one
-                // board away" whatever size the board is.
-                float diag  = MathF.Sqrt(halfW * halfW * 4f + halfH * halfH * 4f);
-                float range = opt.CadLightRange * diag;
-                float inv2  = range > 1e-3f ? 1f / (range * range) : 0f;
-
-                return new CadLight(true, true, px, py, pz, inv2, ambient);
-            }
-
-            /// <summary>Tallest point of any solid, in mm. The board itself carries no Z
-            /// bound -- it is a 2D artwork stack -- so the height that the light's Z
-            /// fraction scales against has to come from the 3D models sitting on it.</summary>
-            private static float TallestSolid(PcbBoard board)
-            {
-                float top = 0f;
-                foreach (var s in board.Solids)
-                    if (s.MaxZ > top && s.MaxZ < 1e6f) top = s.MaxZ;
-                return top;
-            }
-
-            /// <summary>0..1 shade for a surface at (px,py,pz) mm facing (nx,ny,nz).
-            /// twoSided ignores the normal's sign; see the note above.</summary>
-            public float Shade(float nx, float ny, float nz,
-                               float px, float py, float pz, bool twoSided)
-            {
-                if (!On) return Ambient;
-
-                float lx = X, ly = Y, lz = Z, att = 1f;
-                if (Point)
-                {
-                    lx = X - px; ly = Y - py; lz = Z - pz;
-                    float d2 = lx * lx + ly * ly + lz * lz;
-                    if (d2 < 1e-9f) return 1f;                 // sitting inside the lamp
-                    float d = MathF.Sqrt(d2);
-                    lx /= d; ly /= d; lz /= d;
-                    if (InvRange2 > 0f) att = 1f / (1f + d2 * InvRange2);
-                }
-
-                float ndl = nx * lx + ny * ly + nz * lz;
-                ndl = twoSided ? MathF.Abs(ndl) : MathF.Max(0f, ndl);
-                return Ambient + (1f - Ambient) * ndl * att;
-            }
-        }
-
         /// <summary>A small cross where the point light is, so its position can be aimed
         /// by eye instead of by guessing at three numbers.</summary>
         private void DrawLightMarker(VoxelBatch batch, SceneCamera cam, in CadLight light,
@@ -881,7 +794,11 @@ namespace EDes.Pcb
             float bright   = opt.CadBrightness > 0f ? opt.CadBrightness : opt.Brightness;
             float brightMul = 1f / MathF.Max(0.05f, bright);
 
-            var light = CadLight.Build(opt, board);
+            var light = CadLight.ForBoard(board, opt.CadLighting, opt.CadAmbient,
+                                         opt.CadPointLight,
+                                         opt.CadLightX, opt.CadLightY, opt.CadLightZ,
+                                         opt.CadLightFx, opt.CadLightFy, opt.CadLightFz,
+                                         opt.CadLightRange);
             float density = Math.Clamp(opt.CadSurfaceDensity <= 0f ? 0.6f
                                                                   : opt.CadSurfaceDensity,
                                        0.1f, 2f);

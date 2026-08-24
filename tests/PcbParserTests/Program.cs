@@ -172,6 +172,10 @@ Console.WriteLine("=== STL / STEP tessellation ===");
 failures += PcbParserTests.StlChecks.Run();
 
 Console.WriteLine();
+Console.WriteLine("=== Fusion bridge ===");
+failures += PcbParserTests.FusionChecks.Run();
+
+Console.WriteLine();
 Console.WriteLine("=== schematic PDF ===");
 failures += PcbParserTests.SchematicChecks.Run();
 

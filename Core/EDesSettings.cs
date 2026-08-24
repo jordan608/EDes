@@ -16,7 +16,11 @@ using System.Text.Json;
 
 namespace EDes
 {
-    public enum EDesMode { Education = 0, Scope = 1, Pcb = 2 }
+    /// <summary>Cad is its own mode rather than a corner of the PCB viewer on purpose: a
+    /// Fusion assembly has no layers, no drills and no nets, and it must NOT be auto-fitted
+    /// to the cylinder because Fusion owns its position. Folding it into the board viewer
+    /// would have meant threading "none of the above" through every board setting.</summary>
+    public enum EDesMode { Education = 0, Scope = 1, Pcb = 2, Cad = 3 }
 
     /// <summary>The inspection stages the both-buttons gesture cycles through.</summary>
     public enum EDesInspect
@@ -69,6 +73,55 @@ namespace EDes
         public volatile float TextWeight  = 1.0f;
         public volatile bool  ShowLabels  = true;
         public volatile bool  ShowHudPanel = true;  // title / totals / voxel readout
+        // ── Fusion 360 bridge ─────────────────────────────────────────────────
+        //
+        // Localhost by DEFAULT even though Fusion may live on another machine, because the
+        // add-in's socket has no authentication: binding it wider is a decision the operator
+        // makes deliberately, on a network they trust, not something that happens quietly.
+
+        /// <summary>Where the Fusion add-in is listening. A hostname or an IP.</summary>
+        public          string FusionHost = "127.0.0.1";
+        public volatile int    FusionPort = 47800;
+
+        /// <summary>Tessellation tolerance asked of Fusion, in mm. The only real lever on
+        /// cost: a rounded enclosure is millions of triangles at 0.05 and thousands at 0.4,
+        /// and the two look identical at this display's resolution.</summary>
+        public volatile float  FusionToleranceMm = 0.4f;
+
+        /// <summary>Cap sent with the request. The add-in drops whole bodies to honour it
+        /// rather than truncating one mid-surface, and reports what it dropped.</summary>
+        public volatile int    FusionMaxTriangles = 300_000;
+
+        /// <summary>Set by the UI to ask the game thread to fetch. Same one-way request
+        /// pattern as PcbImportRequested — the UI thread must never touch a socket.</summary>
+        public volatile bool   FusionFetchRequested = false;
+
+        /// <summary>Poll the cheap revision token and re-fetch when the model changes.</summary>
+        public volatile bool   FusionAutoRefresh = false;
+        public volatile float  FusionPollSeconds = 0.4f;
+
+        // ── Where the assembly lands ──────────────────────────────────────────
+        //
+        // Origin at (0, 0, +zHalf): the FLOOR, centre. This display is -Z-up, so +zHalf is
+        // the bottom of the volume, and with Fusion's +Z mapped to display -Z the assembly
+        // stands on the floor and grows upward through the full height. Anchoring at -zHalf
+        // instead puts the origin on the CEILING and clips everything above it.
+        //
+        // FusionOriginZ is stored as a FRACTION of zHalf so it means the same thing on a VX2
+        // and a VX2-XL, for the same reason the HUD anchor is a fraction.
+        public volatile float  FusionOriginX = 0f;
+        public volatile float  FusionOriginY = 0f;
+        public volatile float  FusionOriginZFrac = 1f;      // +1 = the floor
+
+        /// <summary>Display units per millimetre. Not auto-fitted: an auto-fit would rescale
+        /// the model every time a component was added, which is exactly the control over
+        /// placement that Fusion is supposed to hold. "Fit once" computes it and stops.</summary>
+        public volatile float  FusionScale = 0.04f;
+
+        public volatile float  FusionDensity    = 0.6f;
+        public volatile float  FusionBrightness = 1.0f;
+        public volatile bool   FusionGhost      = false;
+
         // -- HUD text anchor, as FRACTIONS of the live display extents ---------
         //
         // Fractions rather than world units, because the anchor has to mean the same

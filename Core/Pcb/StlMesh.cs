@@ -48,19 +48,13 @@ namespace EDes.Pcb
                     notes.Add($"{Path.GetFileName(path)}: no triangles in the STL");
                     return null;
                 }
-                return Group(tris);
+                return TriangleGrouping.Group(tris);
             }
             catch (Exception ex)
             {
                 notes.Add($"{Path.GetFileName(path)}: {ex.GetType().Name} — {ex.Message}");
                 return null;
             }
-        }
-
-        private struct Tri
-        {
-            public float AX, AY, AZ, BX, BY, BZ, CX, CY, CZ;
-            public float NX, NY, NZ;
         }
 
         /// <summary>Binary or ASCII? The size test is the reliable one: an ASCII file that
@@ -177,87 +171,9 @@ namespace EDes.Pcb
                  & float.TryParse(parts[^1], NumberStyles.Float, CultureInfo.InvariantCulture, out z);
         }
 
-        /// <summary>Group triangles by direction into CadFaces.
-        ///
-        /// Quantised to about a degree: a tessellated cylinder's facets differ by tiny
-        /// amounts, and exact-match grouping would produce one group per triangle — which
-        /// is the cost this exists to avoid.</summary>
-        private static List<CadFace> Group(List<Tri> tris)
-        {
-            const int BUCKETS = 64;      // per axis, so ~1.4 degrees of direction
-            var groups = new Dictionary<long, List<Tri>>();
-
-            foreach (var t in tris)
-            {
-                if (!FaceNormal(t, out float nx, out float ny, out float nz)) continue;
-
-                long key = ((long)(int)MathF.Round(nx * BUCKETS) << 40)
-                         ^ ((long)(int)MathF.Round(ny * BUCKETS) << 20)
-                         ^  (long)(int)MathF.Round(nz * BUCKETS);
-
-                if (!groups.TryGetValue(key, out var list)) groups[key] = list = new List<Tri>();
-                list.Add(t);
-            }
-
-            var faces = new List<CadFace>(groups.Count);
-            foreach (var kv in groups)
-            {
-                var list = kv.Value;
-                var face = new CadFace
-                {
-                    X = new float[list.Count * 3],
-                    Y = new float[list.Count * 3],
-                    Z = new float[list.Count * 3],
-                    TriCount = list.Count,
-                };
-
-                float sx = 0, sy = 0, sz = 0;
-                for (int i = 0; i < list.Count; i++)
-                {
-                    var t = list[i];
-                    int b = i * 3;
-                    face.X[b] = t.AX; face.Y[b] = t.AY; face.Z[b] = t.AZ;
-                    face.X[b + 1] = t.BX; face.Y[b + 1] = t.BY; face.Z[b + 1] = t.BZ;
-                    face.X[b + 2] = t.CX; face.Y[b + 2] = t.CY; face.Z[b + 2] = t.CZ;
-
-                    FaceNormal(t, out float tnx, out float tny, out float tnz);
-                    sx += tnx; sy += tny; sz += tnz;
-                }
-
-                float len = MathF.Sqrt(sx * sx + sy * sy + sz * sz);
-                if (len > 1e-9f)
-                {
-                    face.NX = sx / len; face.NY = sy / len; face.NZ = sz / len;
-                    face.HasNormalSet = true;
-                }
-                faces.Add(face);
-            }
-            return faces;
-        }
-
-        /// <summary>Normal from the winding, oriented by the stored one when it is usable.
-        /// Degenerate (zero-area) triangles return false and are dropped — they contribute
-        /// nothing to draw and would poison a group's averaged normal with a NaN.</summary>
-        private static bool FaceNormal(in Tri t, out float nx, out float ny, out float nz)
-        {
-            float ux = t.BX - t.AX, uy = t.BY - t.AY, uz = t.BZ - t.AZ;
-            float vx = t.CX - t.AX, vy = t.CY - t.AY, vz = t.CZ - t.AZ;
-
-            nx = uy * vz - uz * vy;
-            ny = uz * vx - ux * vz;
-            nz = ux * vy - uy * vx;
-
-            float len = MathF.Sqrt(nx * nx + ny * ny + nz * nz);
-            if (len < 1e-12f) { nx = ny = nz = 0; return false; }
-            nx /= len; ny /= len; nz /= len;
-
-            // If the file's normal is usable and points the other way, the winding is the
-            // one that is wrong, so flip to match the exporter's intent.
-            float sl = MathF.Sqrt(t.NX * t.NX + t.NY * t.NY + t.NZ * t.NZ);
-            if (sl > 1e-6f && (nx * t.NX + ny * t.NY + nz * t.NZ) / sl < -0.5f)
-            { nx = -nx; ny = -ny; nz = -nz; }
-
-            return true;
-        }
+        // Group() and FaceNormal() moved to TriangleGrouping so the WIRE path (the
+        // Fusion bridge) uses the identical implementation. Two readers of the same
+        // kind of data drifting apart is how one model ends up shaded differently
+        // depending on whether it arrived from disk or over a socket.
     }
 }
