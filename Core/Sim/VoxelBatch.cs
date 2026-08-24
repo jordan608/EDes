@@ -56,6 +56,14 @@ namespace EDes.Sim
 
         /// <summary>Voxels accepted this frame.</summary>
         public int Count   => _n;
+
+        /// <summary>Read-only views of what was accumulated this frame, for measuring what
+        /// a draw call actually produced -- the geometric checks in the harness assert the
+        /// EXTENT of a shape, which cannot be done from a voxel count. Spans rather than the
+        /// arrays themselves so a reader cannot mutate the batch or see past Count.</summary>
+        public ReadOnlySpan<float> Xs => _x.AsSpan(0, _n);
+        public ReadOnlySpan<float> Ys => _y.AsSpan(0, _n);
+        public ReadOnlySpan<float> Zs => _z.AsSpan(0, _n);
         /// <summary>Voxels refused this frame (budget or out of bounds).</summary>
         public int Dropped { get; private set; }
         public bool BudgetHit => _n >= Limit;
@@ -115,6 +123,95 @@ namespace EDes.Sim
         public bool Add(point3d p, int col) => Add(p.x, p.y, p.z, col);
 
         // ── Primitives ────────────────────────────────────────────────────────
+
+        /// <summary>A cylinder about the axis a->b, radius in DISPLAY units.
+        ///
+        /// Display units, and both ends already transformed, which is the point: a radius
+        /// added in scene space before the camera transform gets scaled by the zoom, so the
+        /// shape shrinks as you pull back until its walls fall under one voxel and it
+        /// disappears. Anything that must stay a constant size on the glass -- a via
+        /// barrel, a marker, an axis indicator -- has to be built here instead.
+        ///
+        /// The offsets are perpendicular to the axis AS DRAWN, so the cross-section stays
+        /// circular however the scene is rotated. Wall count follows circumference rather
+        /// than being fixed: a large cylinder gets enough walls to read as round, a small
+        /// one does not spend budget on lines that land on the same voxels.</summary>
+        public void Cylinder(point3d a, point3d b, float r, int col)
+        {
+            float ax = b.x - a.x, ay = b.y - a.y, az = b.z - a.z;
+
+            // The axis itself is always drawn, whatever the radius or the budget. For a via
+            // this line IS the connection; the walls are only decoration.
+            Line(a, b, col);
+            if (r <= Spacing * 1.5f) return;
+
+            Perpendicular(ax, ay, az, out float ux, out float uy, out float uz,
+                                      out float vx, out float vy, out float vz);
+
+            int walls = Math.Clamp((int)MathF.Ceiling(2f * MathF.PI * r / Spacing), 4, 24);
+            for (int k = 0; k < walls; k++)
+            {
+                float ang = k * 2f * MathF.PI / walls;
+                float c = MathF.Cos(ang) * r, s = MathF.Sin(ang) * r;
+                float ox = ux * c + vx * s, oy = uy * c + vy * s, oz = uz * c + vz * s;
+                Line(new point3d(a.x + ox, a.y + oy, a.z + oz),
+                     new point3d(b.x + ox, b.y + oy, b.z + oz), col);
+                if (BudgetHit) return;
+            }
+
+            // Caps, so it reads as a tube with ends rather than a bundle of parallel lines.
+            RingAbout(a, ax, ay, az, r, col);
+            RingAbout(b, ax, ay, az, r, col);
+        }
+
+        /// <summary>A circle of DISPLAY radius r centred at p, in the plane perpendicular
+        /// to the axis (ax,ay,az). Zoom-invariant, for the same reason Cylinder is.</summary>
+        public void RingAbout(point3d p, float ax, float ay, float az, float r, int col)
+        {
+            Perpendicular(ax, ay, az, out float ux, out float uy, out float uz,
+                                      out float vx, out float vy, out float vz);
+
+            int n = Math.Clamp((int)MathF.Ceiling(2f * MathF.PI * r / Spacing), 6, 48);
+            for (int k = 0; k < n; k++)
+            {
+                float ang = k * 2f * MathF.PI / n;
+                float c = MathF.Cos(ang) * r, s = MathF.Sin(ang) * r;
+                Add(p.x + ux * c + vx * s,
+                    p.y + uy * c + vy * s,
+                    p.z + uz * c + vz * s, col);
+                if (BudgetHit) return;
+            }
+        }
+
+        /// <summary>Two unit vectors perpendicular to the axis and to each other.
+        ///
+        /// The seed is chosen AWAY from the axis direction. Crossing with a parallel vector
+        /// gives zero and then a NaN basis, which on a display shows up as a shape that
+        /// vanishes at exactly one viewing angle -- the kind of bug that looks like a
+        /// hardware glitch.</summary>
+        public static void Perpendicular(float ax, float ay, float az,
+                                         out float ux, out float uy, out float uz,
+                                         out float vx, out float vy, out float vz)
+        {
+            float len = MathF.Sqrt(ax * ax + ay * ay + az * az);
+            if (len < 1e-9f) { ax = 0f; ay = 0f; az = 1f; len = 1f; }
+            ax /= len; ay /= len; az /= len;
+
+            float sx = MathF.Abs(az) < 0.9f ? 0f : 1f;
+            float sy = 0f;
+            float sz = MathF.Abs(az) < 0.9f ? 1f : 0f;
+
+            ux = ay * sz - az * sy;
+            uy = az * sx - ax * sz;
+            uz = ax * sy - ay * sx;
+            float ul = MathF.Sqrt(ux * ux + uy * uy + uz * uz);
+            if (ul < 1e-9f) { ux = 1f; uy = 0f; uz = 0f; ul = 1f; }
+            ux /= ul; uy /= ul; uz /= ul;
+
+            vx = ay * uz - az * uy;
+            vy = az * ux - ax * uz;
+            vz = ax * uy - ay * ux;
+        }
 
         /// <summary>Point-sampled line at the frame's spacing (× spacingMul).</summary>
         public void Line(point3d a, point3d b, int col, float spacingMul = 1f)

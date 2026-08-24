@@ -639,9 +639,9 @@ namespace EDes
         private string InspectStageName()
             => ((EDesInspect)_s.InspectStage) switch
             {
-                EDesInspect.Signal    => "INSPECTOR MODE: SIGNALS",
-                EDesInspect.Component => "INSPECTOR MODE: COMPONENTS",
-                _                     => "CAMERA MODE",
+                EDesInspect.Signal    => "INSPECTION: NETS",
+                EDesInspect.Component => "INSPECTION: COMPONENTS",
+                _                     => "NAVIGATION",
             };
 
         /// <summary>True when an inspector is active AND the probe is actually on
@@ -908,8 +908,22 @@ namespace EDes
             // cell, never at _spacing, so the density slider has no bearing on whether a
             // character is legible. What does is how many REAL voxels one cell covers,
             // which is fixed by the hardware.
-            float minSize = pitch / GLYPH_CELL_FRACTION *
-                            MathF.Max(1f, _s.MinTextCellVoxels);
+            // The floor is no longer forced to at least one voxel per cell.
+            //
+            // It was MathF.Max(1f, ...), and one voxel per cell works out at a glyph size
+            // of 0.174 world units -- ABOVE the 0.20 default text size once the 1.6-voxel
+            // default is applied (0.278). So the floor always won, "Text size" did nothing
+            // at all, and the HUD could not be made smaller however it was set. A floor
+            // that silently overrides the setting it is protecting is not a floor, it is a
+            // hard-coded size.
+            //
+            // It still defaults to 1.6 and still says when it is active, but 0 now means 0.
+            // Below about one voxel per cell glyphs genuinely do collapse into blobs -- that
+            // is a real limit of a 5x7 font on this display, not a policy -- so the readout
+            // reports the ratio and the panel says what to expect rather than the code
+            // deciding for the operator.
+            float floorCells = MathF.Max(0f, _s.MinTextCellVoxels);
+            float minSize = pitch / GLYPH_CELL_FRACTION * floorCells;
             float wanted  = _s.TextSize * (radius / 4f);
             _textSize = MathF.Max(minSize, wanted);
             _step     = Hud.LineStep(_textSize);
@@ -1532,9 +1546,16 @@ namespace EDes
             // Toggling this RE-IMPORTS. Tessellation happens at import time, so flipping
             // the flag on its own would change nothing on screen until the next import —
             // which reads as a dead button rather than as a setting that needs applying.
-            ui.AddButton(sec, "STEP mode: wireframe <-> tessellated STL", () =>
+            // A TOGGLE, not a button. As a button the label read the same in both states,
+            // so the only way to tell which mode was active was the line underneath -- a
+            // control that does not show its own state reads as if the feature is missing.
+            ui.AddToggle(sec, "Convert STEP to STL when loading (lighting + shadowing)",
+                         _s.PcbTessellate, v =>
             {
-                _s.PcbTessellate = !_s.PcbTessellate;
+                _s.PcbTessellate = v;
+                // Re-imports, because tessellation happens at IMPORT time. Flipping the
+                // flag alone would change nothing on screen until the next import, which
+                // reads as a dead control rather than a setting that needs applying.
                 if (_s.PcbPath.Length > 0) _s.PcbImportRequested = true;
             });
             ui.AddLiveInfo(sec, () =>
@@ -1836,18 +1857,29 @@ namespace EDes
                          v => _s.MinTextCellVoxels = (float)v, "F1");
             ui.AddLiveInfo(sec, () =>
             {
-                float cell = _textSize * 0.18f / MathF.Max(1e-6f, _spacing);
-                return $"text size {_textSize:0.000} -> {cell:0.0} voxels per glyph cell"
-                     + (_textFloored ? "   (raised to stay legible)" : "");
+                // Against the PHYSICAL pitch, not _spacing: _spacing is divided by the
+                // density slider, so quoting the ratio against it made the same text
+                // report a different legibility at a different density.
+                float pitch = 2f / 64f;
+                float cell  = _textSize * GLYPH_CELL_FRACTION / pitch;
+                float asked = _s.TextSize * (_radius / 4f);
+                return $"glyph size {_textSize:0.000}  ->  {cell:0.0} voxels per cell"
+                     + (_textFloored
+                        ? $"\nFLOOR IS WINNING: you asked for {asked:0.000}, the "
+                        + $"{_s.MinTextCellVoxels:0.0}-voxel floor forces {_textSize:0.000}. "
+                        + "Lower the floor to make the HUD smaller."
+                        : "\n(your Text size is what is being used)");
             }, 0.5);
-            ui.AddInfo(sec, "Glyphs are 5x7 cells, so legibility is set by how many voxels " +
-                            "ONE CELL covers, not by the size in world units — which is why " +
-                            "the floor is in voxels and follows the display and the density. " +
-                            "Below about one voxel per cell adjacent cells share voxels and " +
-                            "the character becomes a blob. A smaller glyph grid would let " +
-                            "text shrink further but 3x5 characters are harder to read than " +
-                            "small 5x7 ones, so the 5x7 Bold font plus this floor is the " +
-                            "better trade on a low-resolution display.");
+            ui.AddInfo(sec, "TO MAKE THE HUD SMALLER: lower the floor first, then Text " +
+                            "size. The floor wins whenever it is higher, and at its 1.6 " +
+                            "default it is higher than the default text size -- so Text " +
+                            "size alone will appear to do nothing.\n\n" +
+                            "Glyphs are 5x7 cells, so legibility is set by how many real " +
+                            "voxels ONE CELL covers. Around 1.0 is the honest limit of this " +
+                            "font: below it adjacent lit cells land on the same voxel and " +
+                            "characters turn into blobs. 0 removes the floor entirely, which " +
+                            "is allowed -- small unreadable text you chose beats large text " +
+                            "you cannot change.");
             ui.AddToggle(sec, "Reduce voxels while moving if slow", _s.AdaptiveBudget,
                          v => _s.AdaptiveBudget = v);
             ui.AddNumber(sec, "Throttle below VPS", _s.AdaptiveLowVps,

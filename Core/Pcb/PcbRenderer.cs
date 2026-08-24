@@ -563,37 +563,32 @@ namespace EDes.Pcb
 
                 float x = Wx(h.X, cx), y = Wy(h.Y, cy);
 
-                // Vias are drawn at a FIXED radius, identical for every via, rather than
-                // at true scale. At true scale they are invisible: a 0.3 mm via on a 35 mm
-                // board works out at 0.027 world units, under the 0.03 voxel spacing, so
-                // the wall and rings were skipped and all that survived was a bare centre
-                // line one voxel wide. A via is a topological feature — you need to see
-                // THAT it is there and what it connects, not how wide it is — so a
-                // legible constant beats a faithful sub-voxel one. True diameters are
-                // still what classify a via and what the readout quotes.
+                // The barrel's two ends in DISPLAY space. Everything below is built around
+                // these, not around board coordinates -- which is the whole fix.
+                point3d pTop = cam.Transform(x, y, zTop);
+                point3d pBot = cam.Transform(x, y, zBot);
+
+                // Radius in DISPLAY voxels, applied AFTER the camera transform.
+                //
+                // It used to be added to the board-space x/y before transforming, so the
+                // camera scaled it: zooming out shrank every via until its wall and rings
+                // fell under one voxel and vanished, leaving a bare centre line, then
+                // nothing. A via is a topological feature -- you need to see THAT it is
+                // there and what it connects, not how wide it is -- so its drawn size is
+                // held constant in display units at every zoom. True diameters still
+                // classify the via and are still what the readout quotes.
                 float r = batch.Spacing * Math.Clamp(opt.ViaDisplayVoxels, 0.5f, 12f);
 
-                // The conductor itself: always drawn, always the full span height.
-                // Everything below is decoration and may be skipped or budget-cut
-                // without ever breaking the connection this line represents.
-                batch.Line(cam.Transform(x, y, zTop), cam.Transform(x, y, zBot), col);
+                batch.Cylinder(pTop, pBot, r, col);
 
+                // A ring where the barrel meets each copper layer it connects -- and only
+                // those. Ringing a layer the via does not reach would draw a connection
+                // that is not there.
                 if (r > batch.Spacing * 1.5f)
-                {
-                    for (int k = 0; k < 4; k++)
-                    {
-                        float a  = k * MathF.PI * 0.5f;
-                        float ox = MathF.Cos(a) * r, oy = MathF.Sin(a) * r;
-                        batch.Line(cam.Transform(x + ox, y + oy, zTop),
-                                   cam.Transform(x + ox, y + oy, zBot), col);
-                    }
-
-                    // A ring where the barrel meets each copper layer it connects — and
-                    // only those. Ringing a layer the via does not reach would draw a
-                    // connection that is not there.
                     for (int i = first - 1; i <= last - 1; i++)
-                        CircleXY(batch, cam, x, y, _copperZ[i], r, col, fill: false);
-                }
+                        batch.RingAbout(cam.Transform(x, y, _copperZ[i]),
+                                        pBot.x - pTop.x, pBot.y - pTop.y, pBot.z - pTop.z,
+                                        r, col);
 
                 if (batch.BudgetHit) return;
             }
