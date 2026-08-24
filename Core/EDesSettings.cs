@@ -231,6 +231,48 @@ namespace EDes
         /// divider leg into a 100-ohm parallel demo. A missing key means "use the
         /// preset's own default", which is what makes new presets need no migration.</summary>
         public Dictionary<string, float> Resistors { get; set; } = new();
+
+        /// <summary>Guards every touch of Resistors, including the save's serialization.
+        ///
+        /// It needs one because a plain Dictionary here crossed threads three ways: the
+        /// GAME thread writes it from the volume's arrow keys (EDesApp.ScaleResistor), the
+        /// UI thread writes it from the typed boxes and the reset button, and Save
+        /// enumerates it. Concurrent inserts during a bucket resize can lose a write,
+        /// throw, or corrupt the chain so a later lookup spins forever -- and enumerating
+        /// during an insert throws inside Save, which is caught, so settings would silently
+        /// stop persisting.
+        ///
+        /// The three fixed volatile float fields this replaced were safe by construction;
+        /// swapping them for a collection quietly gave that up. A lock rather than a
+        /// ConcurrentDictionary because Save has to serialize a CONSISTENT snapshot, which
+        /// a concurrent collection does not offer.
+        ///
+        /// Private, so System.Text.Json does not serialize it even with IncludeFields.</summary>
+        private readonly object _resistorLock = new();
+
+        /// <summary>Store one resistor value. Safe from either thread.</summary>
+        public void SetResistorOhms(string key, float ohms)
+        {
+            lock (_resistorLock) Resistors[key] = ohms;
+        }
+
+        /// <summary>Read one resistor value. Safe from either thread.</summary>
+        public bool TryGetResistorOhms(string key, out float ohms)
+        {
+            lock (_resistorLock) return Resistors.TryGetValue(key, out ohms);
+        }
+
+        /// <summary>Forget one resistor value, so the preset's own default applies.</summary>
+        public void ClearResistorOhms(string key)
+        {
+            lock (_resistorLock) Resistors.Remove(key);
+        }
+
+        /// <summary>Serialize under the same lock the mutators take. Used by Save.</summary>
+        internal string SerializeLocked(JsonSerializerOptions opts)
+        {
+            lock (_resistorLock) return JsonSerializer.Serialize(this, opts);
+        }
         public volatile float  FlowSpeed  = 1.0f;
         public volatile bool   FlowPaused = false;
 
@@ -434,7 +476,9 @@ namespace EDes
             try
             {
                 Directory.CreateDirectory(Dir);
-                File.WriteAllText(PathName, JsonSerializer.Serialize(this, Opts));
+                // Through SerializeLocked, so the Resistors dictionary cannot be
+                // enumerated while the game thread is inserting into it.
+                File.WriteAllText(PathName, SerializeLocked(Opts));
             }
             catch (Exception ex) { App.Log($"[EDesSettings.Save] {ex.Message}"); }
         }

@@ -261,6 +261,72 @@ namespace PcbParserTests
                    seen.Contains(typeof(Diode)));
             }
 
+            // ── The ROOT's readout, which is what the HUD actually shows ──────
+            {
+                // These assertions exist because the original suite checked every
+                // RESISTOR's voltage/current/power and never once read the root's -- and
+                // the root is exactly what CircuitScene.Solve publishes as TotalResistance
+                // / TotalCurrent / TotalPower. The LED preset reported 452,693 W and the
+                // tests were all green.
+                foreach (var p in CircuitPresets.Build())
+                {
+                    p.Root.ApplyVoltage(12.0);
+
+                    double pw = p.Root.Power;
+                    double it = p.Root.Current;
+
+                    // A 12 V bench circuit made of >= 0.1 ohm parts cannot dissipate
+                    // kilowatts. 12V into the 0.1 ohm floor is 1.4 kW, so 2 kW is a
+                    // generous ceiling that still catches a six-order-of-magnitude error.
+                    Ok($"{p.Name}: total power is physically possible ({pw:0.###} W)",
+                       double.IsFinite(pw) && pw >= 0 && pw < 2000);
+
+                    Ok($"{p.Name}: total current is physically possible ({it * 1000:0.##} mA)",
+                       double.IsFinite(it) && it >= 0 && it < 200);
+
+                    // P = V x I at the source, which is the definition the readout claims.
+                    // Checked against the SUPPLY rather than against the root's own
+                    // Voltage -- comparing the root to itself is what let the bug through.
+                    Ok($"{p.Name}: total power equals supply x total current "
+                     + $"({pw:0.####} vs {12.0 * it:0.####})",
+                       Math.Abs(pw - 12.0 * it) < 1e-6 * Math.Max(1.0, pw));
+                }
+            }
+
+            // ── Solving twice must not change the answer ──────────────────────
+            {
+                // The diode used to derive its current from its own previous value, so a
+                // circuit containing one gave a different answer on the second solve than
+                // the first. CircuitScene solves behind a dirty flag, so whichever pass
+                // happened to run last is what stays on the display.
+                foreach (var p in CircuitPresets.Build())
+                {
+                    p.Root.ApplyVoltage(9.0);
+                    double firstP = p.Root.Power, firstI = p.Root.Current;
+                    double firstR = p.Root.Resistance();
+
+                    for (int k = 0; k < 5; k++) p.Root.ApplyVoltage(9.0);
+
+                    Ok($"{p.Name}: the answer is stable across repeated solves "
+                     + $"({firstP:0.#####} then {p.Root.Power:0.#####} W)",
+                       Math.Abs(firstP - p.Root.Power) < 1e-9 * Math.Max(1.0, firstP) &&
+                       Math.Abs(firstI - p.Root.Current) < 1e-12 &&
+                       Math.Abs(firstR - p.Root.Resistance()) < 1e-6 * Math.Max(1.0, firstR));
+                }
+
+                // And it must not depend on what was solved BEFORE it -- a diode that
+                // carried state between circuits would make the first view of a preset
+                // differ from every later one.
+                var a = CircuitPresets.Build().First(x => x.Name.Contains("LED"));
+                a.Root.ApplyVoltage(48.0);          // a very different operating point
+                a.Root.ApplyVoltage(12.0);
+                var b = CircuitPresets.Build().First(x => x.Name.Contains("LED"));
+                b.Root.ApplyVoltage(12.0);
+                Ok($"a fresh circuit and a re-solved one agree "
+                 + $"({b.Root.Power:0.#####} vs {a.Root.Power:0.#####} W)",
+                   Math.Abs(a.Root.Power - b.Root.Power) < 1e-9);
+            }
+
             return _failures;
         }
     }

@@ -89,7 +89,16 @@ namespace EDes.Pcb
                 // Legible where it fits, but capped: a label blown up to fill the volume
                 // stops being a label. And never below the floor -- past that a glyph is a
                 // blob that costs budget to be one.
-                float size = Math.Clamp(mapped, minTextSize, textSize * 1.5f);
+                //
+                // NOT Math.Clamp(mapped, minTextSize, textSize * 1.5f). Math.Clamp throws
+                // ArgumentException when min > max, and the cap CAN fall below the floor:
+                // the floor here is a fixed 0.174 from the voxel pitch, while textSize
+                // follows the HUD's own text setting, whose legibility floor is now allowed
+                // to go to zero. Set the HUD floor to 0 and Text size to 0.05 and the cap
+                // becomes 0.075 -- below 0.174 -- and this line threw on the game thread,
+                // taking out the render loop. Min-of-then-max never throws and keeps the
+                // floor winning, which is the intent either way.
+                float size = MathF.Max(minTextSize, MathF.Min(mapped, textSize * 1.5f));
 
                 // PDF puts the text origin on the BASELINE; Hud.Text takes a TOP-LEFT
                 // anchor and grows downward. Passing the baseline straight through drew

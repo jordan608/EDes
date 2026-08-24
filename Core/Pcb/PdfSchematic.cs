@@ -200,9 +200,14 @@ namespace EDes.Pcb
                     if (raw != null && raw.Length > 0) yield return raw;
                 }
 
-                // Continue past this object's terminator, never from inside its data --
-                // compressed bytes can contain anything, including the keyword.
-                i = scanEnd > 0 ? scanEnd + endTag.Length : end;
+                // Continue past whichever is FURTHER: the found terminator or the end of
+                // the declared length. Taking scanEnd alone resumed the scan inside the
+                // stream's own bytes whenever the compressed payload happened to contain
+                // the literal "endstream" -- compressed data can contain any byte sequence
+                // -- and from there the next object's header could be stepped over,
+                // dropping a page with nothing to say why.
+                int resume = scanEnd > 0 ? Math.Max(scanEnd, end) : end;
+                i = resume + endTag.Length;
             }
         }
 
@@ -220,7 +225,26 @@ namespace EDes.Pcb
             int from = Math.Max(0, streamAt - 512);
             string head = Encoding.Latin1.GetString(d, from, streamAt - from);
 
-            int dict = head.LastIndexOf("<<", StringComparison.Ordinal);
+            // The ENCLOSING dictionary, found by balancing backwards -- not simply the
+            // last "<<".
+            //
+            // LastIndexOf finds a NESTED dictionary when there is one, and truncating to it
+            // cuts off everything before it. For
+            //     << /Length 1234 /Filter /FlateDecode /DecodeParms << /Predictor 12 >> >>
+            // that left "<< /Predictor 12 >> >>", so /FlateDecode was not found, flate came
+            // back false, and the content stream was skipped entirely -- the whole document
+            // then reported "no drawable content", which points at the wrong cause.
+            int depth = 0, dict = -1;
+            for (int b = head.Length - 2; b >= 0; b--)
+            {
+                if (head[b] == '>' && head[b + 1] == '>') { depth++; b--; continue; }
+                if (head[b] == '<' && head[b + 1] == '<')
+                {
+                    depth--;
+                    if (depth <= 0) { dict = b; break; }
+                    b--;
+                }
+            }
             if (dict >= 0) head = head.Substring(dict);
 
             // Absent /Filter means an uncompressed stream, which is not what is wanted here

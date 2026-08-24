@@ -86,6 +86,20 @@ namespace EDes
         // the puck — so on many machines LedWin's copy simply never updated. Whichever
         // path reports motion drives the camera; both are shown in the diagnostics.
         private readonly SchematicRenderer _sch = new();
+
+        /// <summary>Immutable snapshot of the imported schematic sheets.
+        ///
+        /// The UI thread reads this (Count, then the indexer) from the settings tick while
+        /// the GAME thread imports. Reading board.Schematics directly meant reading a
+        /// List&lt;T&gt; mid-AddRange: a grow replaces the backing array before it updates
+        /// _size, so an interleaved reader can see the new count against the old array and
+        /// throw IndexOutOfRangeException. Swapped as a whole reference after the import,
+        /// which is the same discipline Legend and PickList are documented to follow, and
+        /// for the same reason.</summary>
+        private volatile SchematicSheet[] _sheets = Array.Empty<SchematicSheet>();
+
+        /// <summary>The sheets, as a snapshot safe to read from either thread.</summary>
+        private SchematicSheet[] Sheets => _sheets;
         private NavState    _nav;              // last LedWin read
         private vxl_nav_t   _navHost;          // last LedHost vxl_nav_read
         private int         _navHostRc = -999; // its return code (0 = ok on this SDK)
@@ -169,7 +183,7 @@ namespace EDes
             // a new circuit be added without touching persistence.
             var rs = _scene.Active.Resistors;
             for (int i = 0; i < rs.Length; i++)
-                if (_s.Resistors.TryGetValue(ResistorKey(_s.PresetIndex, i), out float v))
+                if (_s.TryGetResistorOhms(ResistorKey(_s.PresetIndex, i), out float v))
                     _scene.SetResistor(i, v);
 
             _scope.Configure((ScopeInput)Math.Clamp(_s.ScopeMode, 0, 3),
@@ -205,6 +219,10 @@ namespace EDes
             // Before anything draws: an import resets every layer to its defaults, so the
             // user's own visibility and colour choices have to be laid back over the top.
             ApplyLayerPrefs();
+
+            // Publish the schematic sheets as ONE reference swap, so the UI thread can
+            // never observe a half-built list. See the note on _sheets.
+            _sheets = _board.Schematics.ToArray();
             sw.Stop();
 
             var sb = new StringBuilder();
@@ -288,7 +306,7 @@ namespace EDes
             if (index < 0 || index >= rs.Length) return;
 
             double v = Math.Clamp(rs[index].R * factor, Resistor.MinOhms, Resistor.MaxOhms);
-            _s.Resistors[ResistorKey(_s.PresetIndex, index)] = (float)v;
+            _s.SetResistorOhms(ResistorKey(_s.PresetIndex, index), (float)v);
             _scene.SetResistor(index, v);
         }
 
@@ -633,10 +651,25 @@ namespace EDes
         }
 
         /// <summary>How far the whole HUD has been shifted sideways from its default
-        /// hard-left anchor. Centred blocks add this so they travel WITH the left-aligned
-        /// ones instead of staying nailed to x = 0 while everything else moves -- one
-        /// anchor setting that only moved half the text would be worse than none.</summary>
+        /// hard-left anchor. Centred blocks follow it so they travel WITH the left-aligned
+        /// ones instead of staying nailed to x = 0 while everything else moves.</summary>
         private float TextShiftX => TextLeftX - LeftEdgeX;
+
+        /// <summary>Draw a centred row that follows the HUD anchor but cannot leave the
+        /// volume.
+        ///
+        /// The shift has to be CLAMPED by the string's own width, which is why this is a
+        /// method and not just an x. Passing the raw shift to TextCentred double-counted
+        /// it: at the documented centre setting (HUD X = 0) the shift is +3.9, so a 3.8-unit
+        /// wide totals row centred there spanned x = 2.0 to 5.8 against a radius of 3.92 --
+        /// almost entirely outside the cylinder, where VoxelBatch drops it. Setting the
+        /// anchor to its own documented middle made the readouts disappear.</summary>
+        private void HudCentred(float z, float size, int col, string text)
+        {
+            float halfW = Hud.Width(text, size) * 0.5f;
+            float room  = MathF.Max(0f, MathF.Abs(LeftEdgeX) - halfW);
+            _hud.TextCentred(Math.Clamp(TextShiftX, -room, room), _planeY, z, size, col, text);
+        }
 
         /// <summary>The leftmost x text can occupy at the HUD plane: the anchor's -1.</summary>
         private float LeftEdgeX
@@ -661,11 +694,11 @@ namespace EDes
             {
                 EDesMode.Education => "EDUCATION  " + _scene.Active.Name.ToUpperInvariant(),
                 EDesMode.Scope     => "OSCILLOSCOPE",
-                _ when _s.ShowSchematic && _board.Schematics.Count > 0
+                _ when _s.ShowSchematic && Sheets.Length > 0
                                    => BoardName() + "   SCHEMATIC "
                                       + (Math.Clamp(_s.SchematicSheet, 0,
-                                             _board.Schematics.Count - 1) + 1)
-                                      + "/" + _board.Schematics.Count,
+                                             Sheets.Length - 1) + 1)
+                                      + "/" + Sheets.Length,
                 _                  => BoardName() + "   " + InspectStageName(),
             };
 
@@ -1063,13 +1096,13 @@ namespace EDes
 
             // Footer: the law this circuit demonstrates, then its solved totals.
             ref TextStack f = ref _topText;
-            _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize, Palette.TextHilite,
+            HudCentred(f.Row(), _textSize, Palette.TextHilite,
                              _scene.Active.Law);
-            _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize, Palette.Text,
+            HudCentred(f.Row(), _textSize, Palette.Text,
                 "RT " + Hud.Eng(_scene.TotalResistance, "R") +
                 "   IT " + Hud.Eng(_scene.TotalCurrent, "A") +
                 "   PT " + Hud.Eng(_scene.TotalPower, "W"));
-            _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize, Palette.TextDim,
+            HudCentred(f.Row(), _textSize, Palette.TextDim,
                 "V " + Hud.Eng(_scene.SourceVolts, "V") + "   =   I X R");
         }
 
@@ -1081,7 +1114,7 @@ namespace EDes
 
             if (!_s.ShowLabels) return;
             ref TextStack f = ref _topText;
-            _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize * 0.85f, Palette.TextDim,
+            HudCentred(f.Row(), _textSize * 0.85f, Palette.TextDim,
                 _scope.Identity.Length > 0 ? _scope.Identity : _scope.Status);
             if (_s.ScopeMeasurements) DrawScopeMeasurements(ref f);
         }
@@ -1191,10 +1224,11 @@ namespace EDes
             // would put two unrelated drawings through the same voxels -- the board is in
             // mm and the sheet is in paper points, so nothing would line up and the result
             // reads as noise.
-            if (_s.ShowSchematic && _board.Schematics.Count > 0)
+            var sheets = Sheets;
+            if (_s.ShowSchematic && sheets.Length > 0)
             {
-                int idx = Math.Clamp(_s.SchematicSheet, 0, _board.Schematics.Count - 1);
-                _sch.Draw(_batch, _hud, _cam, _board.Schematics[idx],
+                int idx = Math.Clamp(_s.SchematicSheet, 0, sheets.Length - 1);
+                _sch.Draw(_batch, _hud, _cam, sheets[idx],
                           _planeY, _radius, _zHalf,
                           _textSize, MinLegibleTextSize(), _s.SchematicText);
                 return;
@@ -1208,17 +1242,17 @@ namespace EDes
 
             if (!_board.HasGeometry)
             {
-                _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize, Palette.Warning,
+                HudCentred(f.Row(), _textSize, Palette.Warning,
                                  "NO BOARD LOADED - SET A PATH IN THE PCB TAB");
                 return;
             }
 
-            _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize, Palette.Text,
+            HudCentred(f.Row(), _textSize, Palette.Text,
                 _board.WidthMm.ToString("0.0") + " X " + _board.HeightMm.ToString("0.0") + " MM   " +
                 _board.CopperLayerCount() + " CU   " + _board.Holes.Count + " HOLES" +
                 (_board.Components.Count > 0 ? "   " + _board.Components.Count + " PARTS" : ""));
 
-            _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize, Palette.TextDim,
+            HudCentred(f.Row(), _textSize, Palette.TextDim,
                 "MIN TRACK " + _board.MinTrackWidth().ToString("0.000") + "MM   " +
                 "MIN DRILL " + _board.MinDrill().ToString("0.000") + "MM");
 
@@ -1229,7 +1263,7 @@ namespace EDes
             // on information that is better presented on screen.
 
             if (_s.PcbCursor)
-                _hud.TextCentred(TextShiftX, _planeY, f.Row(), _textSize, Palette.TextHilite,
+                HudCentred(f.Row(), _textSize, Palette.TextHilite,
                     "CURSOR X " + _s.PcbCursorX.ToString("0.00") +
                     "  Y " + _s.PcbCursorY.ToString("0.00") + " MM");
         }
@@ -1606,7 +1640,7 @@ namespace EDes
                 string name = rs[i].Name;
                 ui.AddNumber(sec, name + " (ohms)", rs[i].R, v =>
                 {
-                    _s.Resistors[ResistorKey(_s.PresetIndex, idx)] = (float)v;
+                    _s.SetResistorOhms(ResistorKey(_s.PresetIndex, idx), (float)v);
                     _scene.SetResistor(idx, v);
                 }, "F1");
             }
@@ -1623,7 +1657,7 @@ namespace EDes
             ui.AddButton(sec, "Reset this circuit to its defaults", () =>
             {
                 for (int i = 0; i < rs.Length; i++)
-                    _s.Resistors.Remove(ResistorKey(_s.PresetIndex, i));
+                    _s.ClearResistorOhms(ResistorKey(_s.PresetIndex, i));
                 _scene.ResetActiveDefaults();
                 RequestPanelRebuild();
             });
@@ -1799,17 +1833,26 @@ namespace EDes
                          v => _s.ShowSchematic = v);
             ui.AddToggle(sec, "Draw the sheet's labels", _s.SchematicText,
                          v => _s.SchematicText = v);
-            ui.AddButton(sec, "Next sheet", () => _s.SchematicSheet++);
+            // WRAPS. It used to increment without bound while every reader clamped, so
+            // after the last sheet the number kept climbing, the clamp pinned the view, and
+            // the button was simply dead -- with the out-of-range value persisted, so the
+            // next session started stuck on the last sheet.
+            ui.AddButton(sec, "Next sheet", () =>
+            {
+                int n = Sheets.Length;
+                _s.SchematicSheet = n > 0 ? (_s.SchematicSheet + 1) % n : 0;
+            });
             ui.AddLiveInfo(sec, () =>
             {
-                if (_board.Schematics.Count == 0)
+                var sheets = Sheets;
+                if (sheets.Length == 0)
                     return "No schematic found. It is read from the PDF PRINT -- the folder "
                          + "needs a 'Schematic Prints' export, which is where Altium puts "
                          + "it. A scanned PDF has no lines in it and cannot be used.";
 
-                int idx = Math.Clamp(_s.SchematicSheet, 0, _board.Schematics.Count - 1);
-                var sh = _board.Schematics[idx];
-                string s = $"sheet {idx + 1} of {_board.Schematics.Count}: {sh.Name}\n"
+                int idx = Math.Clamp(_s.SchematicSheet, 0, sheets.Length - 1);
+                var sh = sheets[idx];
+                string s = $"sheet {idx + 1} of {sheets.Length}: {sh.Name}\n"
                          + $"{sh.Lines.Count} line(s), {sh.Texts.Count} label(s), "
                          + $"{sh.WidthPt:0} x {sh.HeightPt:0} pt";
 

@@ -61,6 +61,33 @@ namespace PcbParserTests
             return path;
         }
 
+
+        /// <summary>Same as WritePdf but with a nested dictionary AFTER /Filter, which
+        /// is what defeated the old "last &lt;&lt; wins" dictionary scan.</summary>
+        private static string WritePdfNestedDict(string content, string dir, string name)
+        {
+            byte[] raw = Encoding.Latin1.GetBytes(content);
+            byte[] deflated;
+            using (var ms = new MemoryStream())
+            {
+                ms.WriteByte(0x78); ms.WriteByte(0x9C);
+                using (var ds = new DeflateStream(ms, CompressionLevel.Optimal, true))
+                    ds.Write(raw, 0, raw.Length);
+                deflated = ms.ToArray();
+            }
+
+            string path = Path.Combine(dir, name);
+            using var fs = File.Create(path);
+            void Ascii(string t) { var b = Encoding.ASCII.GetBytes(t); fs.Write(b, 0, b.Length); }
+
+            Ascii("%PDF-1.4\n1 0 obj\n<< /Length " + deflated.Length
+                + " /Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 5 >>"
+                + " >>\nstream\n");
+            fs.Write(deflated, 0, deflated.Length);
+            Ascii("\nendstream\nendobj\n%%EOF\n");
+            return path;
+        }
+
         private static string Dir()
         {
             string d = Path.Combine(Path.GetTempPath(), "edes_sch_checks");
@@ -221,6 +248,69 @@ namespace PcbParserTests
                    !PdfSchematic.LooksLikeSchematic(@"C:\out\Assembly Drawings\Board.PDF"));
                 Ok("nor a STEP file",
                    !PdfSchematic.LooksLikeSchematic(@"C:\out\ExportSTEP\Board.step"));
+            }
+
+            // ── A nested dictionary must not hide /FlateDecode ────────────────
+            {
+                // The dictionary scan used to take the LAST "<<" in the window before
+                // `stream`, which is the NESTED one when a /DecodeParms is present -- so
+                // /Filter was cut out of view, the stream was judged uncompressed and
+                // skipped, and the whole document came back as "no drawable content".
+                string p = WritePdfNestedDict(Filler(25) + "n 10 20 m 110 220 l S\n",
+                                              dir, "nested.pdf");
+                var sheets = PdfSchematic.Load(p, notes);
+                Ok($"a /DecodeParms nested dict does not hide the filter ({sheets.Count} sheet)",
+                   sheets.Count == 1);
+                Ok("...and the stream's geometry came through",
+                   sheets.Count == 1 && sheets[0].Lines.Any(l => Math.Abs(l.X1 - 10) < 1e-3
+                                                             && Math.Abs(l.X2 - 110) < 1e-3));
+            }
+
+            // -- "endstream" inside the payload must not derail the scan -------
+            {
+                // Compressed bytes can contain any sequence. If the scan resumes at the
+                // first literal "endstream" it finds rather than past the DECLARED length,
+                // it lands inside binary data and can step over the following object,
+                // silently dropping a page.
+                //
+                // Two objects, the first carrying the literal text in its content.
+                string first  = Filler(25) + "n 1 1 m 2 2 l S\n"
+                              + "% endstream endstream endstream\n";
+                string second = Filler(30) + "n 500 500 m 600 600 l S\n";
+
+                string path = Path.Combine(dir, "twoobj.pdf");
+                using (var fs = File.Create(path))
+                {
+                    void Ascii(string t)
+                    { var b = Encoding.ASCII.GetBytes(t); fs.Write(b, 0, b.Length); }
+
+                    Ascii("%PDF-1.4\n");
+                    foreach (string body in new[] { first, second })
+                    {
+                        byte[] raw = Encoding.Latin1.GetBytes(body);
+                        byte[] def;
+                        using (var ms = new MemoryStream())
+                        {
+                            ms.WriteByte(0x78); ms.WriteByte(0x9C);
+                            using (var ds = new DeflateStream(ms, CompressionLevel.Optimal,
+                                                              true))
+                                ds.Write(raw, 0, raw.Length);
+                            def = ms.ToArray();
+                        }
+                        Ascii("1 0 obj\n<< /Length " + def.Length
+                            + " /Filter /FlateDecode >>\nstream\n");
+                        fs.Write(def, 0, def.Length);
+                        Ascii("\nendstream\nendobj\n");
+                    }
+                    Ascii("%%EOF\n");
+                }
+
+                var sheets = PdfSchematic.Load(path, notes);
+                Ok($"both objects are found, not just the first ({sheets.Count} sheets)",
+                   sheets.Count == 2);
+                bool secondFound = sheets.Any(sh => sh.Lines.Any(l =>
+                                        Math.Abs(l.X1 - 500) < 1e-3));
+                Ok("the SECOND object's geometry is present", secondFound);
             }
 
             // ── The real thing ────────────────────────────────────────────────

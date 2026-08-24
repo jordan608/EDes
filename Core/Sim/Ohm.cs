@@ -98,15 +98,26 @@ namespace EDes.Sim
 
         public override double Resistance() => _r;
 
+        /// <summary>Apply a voltage ACROSS the diode.
+        ///
+        /// Deterministic, and deliberately does not invent a current. It used to be
+        ///     Current = v > Vf ? Current : 0.0;
+        /// which reads the field it is assigning, so a forward-biased diode kept whatever
+        /// current the PREVIOUS solve had left in it -- a value from an unrelated circuit,
+        /// or zero on the first solve, with nothing to indicate either.
+        ///
+        /// There is no correct finite answer to give here: an ideal fixed-drop diode with
+        /// more than Vf across it is a short, so the current is set by the rest of the
+        /// circuit and cannot be derived from v alone. That is why a diode belongs in
+        /// SERIES with a resistance -- which is what every preset using one does, and what
+        /// SeriesGroup.ApplyVoltage is built to solve. A bare diode across a source is not
+        /// a solvable circuit in this model, so it reports not-conducting rather than
+        /// guessing: wrong-and-visible beats arbitrary-and-plausible.</summary>
         public override void ApplyVoltage(double v)
         {
             Voltage = Math.Min(v, Vf);
-            // Below the forward drop it does not conduct at all. Above it, the drop is
-            // fixed and the rest of the circuit decides the current -- so the equivalent
-            // resistance is whatever makes that consistent, resolved by the series group
-            // when it re-applies the current below.
-            Current = v > Vf ? Current : 0.0;
-            _r      = Current > 1e-12 ? Voltage / Current : OpenOhms;
+            Current = 0.0;
+            _r      = OpenOhms;
         }
 
         public override void ApplyCurrent(double i)
@@ -132,8 +143,20 @@ namespace EDes.Sim
         public override void ApplyCurrent(double i)
         {
             Current = i;
-            Voltage = i * Resistance();
             foreach (var c in Children) c.ApplyCurrent(i);
+
+            // Summed from the children AFTER applying, not computed as i * Resistance().
+            //
+            // Resistance() asks a Diode for a LINEARISED equivalent, and on the first solve
+            // that is still its open-circuit 1e9 -- so the old line reported the LED
+            // circuit's total as 21,276,605 V and 452 kW, and because CircuitScene.Solve
+            // runs behind a dirty flag the readout kept showing 452 kW until something else
+            // marked the scene dirty. Summing what the children actually resolved to needs
+            // no equivalent resistance and is exact for non-linear elements as well as
+            // linear ones.
+            double v = 0;
+            foreach (var c in Children) v += c.Voltage;
+            Voltage = v;
         }
 
         public override void ApplyVoltage(double v)
@@ -181,12 +204,21 @@ namespace EDes.Sim
         public override void ApplyVoltage(double v)
         {
             Voltage = v;
-            Current = v / Resistance();
             foreach (var c in Children) c.ApplyVoltage(v);
+
+            // Summed from the branches, for the same reason SeriesGroup sums its drops:
+            // asking Resistance() would route through a Diode's linearised equivalent.
+            double i = 0;
+            foreach (var c in Children) i += c.Current;
+            Current = i;
         }
 
         public override void ApplyCurrent(double i)
         {
+            // Resistance() is exact here: a parallel group's conductance is the sum of its
+            // children's, and a Diode reaching this path is documented as unsupported (see
+            // Diode.ApplyVoltage). ApplyVoltage recomputes Current from the branches, so
+            // the value assigned first is only a seed.
             Current = i;
             ApplyVoltage(i * Resistance());
         }
