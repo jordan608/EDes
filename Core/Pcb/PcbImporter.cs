@@ -260,6 +260,27 @@ namespace EDes.Pcb
                     continue;
                 }
 
+                // Before the generic "reports are inventory" branch: a schematic print is
+                // a PDF like the BOM and the DRC report, and only the path distinguishes
+                // them. See PdfSchematic.LooksLikeSchematic.
+                if (PdfSchematic.LooksLikeSchematic(file))
+                {
+                    var sheets = PdfSchematic.Load(file, board.Notes);
+                    if (sheets.Count > 0)
+                    {
+                        board.Schematics.AddRange(sheets);
+                        int lines = 0, texts = 0;
+                        foreach (var sh in sheets) { lines += sh.Lines.Count; texts += sh.Texts.Count; }
+                        Note(file, "schematic", $"{sheets.Count} sheet(s), {lines} line(s), "
+                                                + $"{texts} label(s)", true);
+                    }
+                    else Note(file, "schematic", "no vector content — see the notes", false);
+
+                    AddDocument(board, file, DocKind.Schematic);
+                    docs++;
+                    continue;
+                }
+
                 if (MeshLoader.IsMesh(file))
                 {
                     var cloud = MeshLoader.TryLoad(file, meshPointBudget, board.Notes);

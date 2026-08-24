@@ -309,6 +309,20 @@ namespace EDes
         /// can be filled and lit. StepParser fills planar faces without a kernel, but a
         /// round part is mostly curved faces, so it comes out as a sparse cage with nothing
         /// to light. Off means wireframe-only, which is still perfectly usable.</summary>
+        /// <summary>Show the schematic sheet instead of the board. OFF by default: the
+        /// board is what this mode is for, and a schematic filling the volume on import
+        /// would be a surprise rather than a feature.</summary>
+        public volatile bool   ShowSchematic = false;
+
+        /// <summary>Which sheet, when the print has more than one.</summary>
+        public volatile int    SchematicSheet = 0;
+
+        /// <summary>Draw the sheet's labels. Separate from the toggle above because on a
+        /// zoomed-out sheet most labels are below the legible size and skipped anyway --
+        /// turning them off entirely saves the budget they were spending on the few that
+        /// did qualify.</summary>
+        public volatile bool   SchematicText = true;
+
         public volatile bool   PcbTessellate = true;
 
         /// <summary>Max element size for the tessellator, mm. Smaller is smoother and costs

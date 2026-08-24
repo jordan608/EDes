@@ -310,6 +310,14 @@ namespace EDes.Pcb
         /// <summary>Import warnings/notes — surfaced in the settings panel.</summary>
         public readonly List<string> Notes = new();
 
+        /// <summary>Schematic sheets read from the PDF print, in PDF points.
+        ///
+        /// Not in board mm and deliberately not merged into the board's bounds: a schematic
+        /// is a DRAWING, with no relationship to the board's physical coordinates. Folding
+        /// its extents into the board's would push the fit scale to whatever the paper size
+        /// happened to be and shrink the actual PCB to a speck.</summary>
+        public readonly List<SchematicSheet> Schematics = new();
+
         // ── Bounds in board units (mm) ────────────────────────────────────────
         public float MinX { get; private set; } = float.MaxValue;
         public float MinY { get; private set; } = float.MaxValue;

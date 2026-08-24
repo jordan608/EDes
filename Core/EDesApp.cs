@@ -85,6 +85,7 @@ namespace EDes
         // The engine never called vxl_nav_read, which is the documented way to read
         // the puck — so on many machines LedWin's copy simply never updated. Whichever
         // path reports motion drives the camera; both are shown in the diagnostics.
+        private readonly SchematicRenderer _sch = new();
         private NavState    _nav;              // last LedWin read
         private vxl_nav_t   _navHost;          // last LedHost vxl_nav_read
         private int         _navHostRc = -999; // its return code (0 = ok on this SDK)
@@ -660,6 +661,11 @@ namespace EDes
             {
                 EDesMode.Education => "EDUCATION  " + _scene.Active.Name.ToUpperInvariant(),
                 EDesMode.Scope     => "OSCILLOSCOPE",
+                _ when _s.ShowSchematic && _board.Schematics.Count > 0
+                                   => BoardName() + "   SCHEMATIC "
+                                      + (Math.Clamp(_s.SchematicSheet, 0,
+                                             _board.Schematics.Count - 1) + 1)
+                                      + "/" + _board.Schematics.Count,
                 _                  => BoardName() + "   " + InspectStageName(),
             };
 
@@ -978,6 +984,16 @@ namespace EDes
         private static bool Plausible(float zHalf, float radius)
             => zHalf > 0.1f && zHalf < radius * 0.99f;
 
+        /// <summary>The smallest glyph size still readable on THIS display: one voxel per
+        /// 5x7 cell, from the physical voxel pitch.
+        ///
+        /// Deliberately NOT scaled by the user's MinTextCellVoxels. That setting is a
+        /// preference about the HUD -- it can be taken to 0 to force small text -- whereas
+        /// this answers a different question: is a label on the sheet worth any voxels at
+        /// all. Mixing the two would make lowering the HUD floor silently fill the
+        /// schematic with unreadable blobs.</summary>
+        private float MinLegibleTextSize() => (2f / 64f) / GLYPH_CELL_FRACTION;
+
         /// <summary>Depth of the HUD/scope plane in world units, from HudFracY.</summary>
         private float _planeY = 0.1f;
 
@@ -1170,6 +1186,19 @@ namespace EDes
                 LabelLimit     = _s.PcbLabelLimit,
                 TextSize       = _textSize,
             };
+
+            // The schematic REPLACES the board rather than overlaying it. Both at once
+            // would put two unrelated drawings through the same voxels -- the board is in
+            // mm and the sheet is in paper points, so nothing would line up and the result
+            // reads as noise.
+            if (_s.ShowSchematic && _board.Schematics.Count > 0)
+            {
+                int idx = Math.Clamp(_s.SchematicSheet, 0, _board.Schematics.Count - 1);
+                _sch.Draw(_batch, _hud, _cam, _board.Schematics[idx],
+                          _planeY, _radius, _zHalf,
+                          _textSize, MinLegibleTextSize(), _s.SchematicText);
+                return;
+            }
 
             _pcb.Draw(_batch, _hud, _cam, _board, opt, _radius, _zHalf);
 
@@ -1765,6 +1794,36 @@ namespace EDes
                       + System.IO.Path.GetFileName(tool)
                     : "STEP: TESSELLATED requested, but " + how;
             }, 1.0);
+            ui.AddHeader(sec, "Schematic");
+            ui.AddToggle(sec, "Show the schematic instead of the board", _s.ShowSchematic,
+                         v => _s.ShowSchematic = v);
+            ui.AddToggle(sec, "Draw the sheet's labels", _s.SchematicText,
+                         v => _s.SchematicText = v);
+            ui.AddButton(sec, "Next sheet", () => _s.SchematicSheet++);
+            ui.AddLiveInfo(sec, () =>
+            {
+                if (_board.Schematics.Count == 0)
+                    return "No schematic found. It is read from the PDF PRINT -- the folder "
+                         + "needs a 'Schematic Prints' export, which is where Altium puts "
+                         + "it. A scanned PDF has no lines in it and cannot be used.";
+
+                int idx = Math.Clamp(_s.SchematicSheet, 0, _board.Schematics.Count - 1);
+                var sh = _board.Schematics[idx];
+                string s = $"sheet {idx + 1} of {_board.Schematics.Count}: {sh.Name}\n"
+                         + $"{sh.Lines.Count} line(s), {sh.Texts.Count} label(s), "
+                         + $"{sh.WidthPt:0} x {sh.HeightPt:0} pt";
+
+                if (!_s.ShowSchematic) return s + "\n(not currently shown)";
+
+                s += $"\ndrawn: {_sch.LinesDrawn} lines, {_sch.TextDrawn} labels";
+                if (_sch.TextSkipped > 0)
+                    s += $"\n{_sch.TextSkipped} label(s) TOO SMALL TO READ at this zoom -- "
+                       + "zoom in and they appear. A 5pt label on a 690pt sheet is under a "
+                       + "voxel when the whole sheet is in view; that is the display's "
+                       + "resolution, not a parsing problem.";
+                return s;
+            }, 0.5);
+
             ui.AddButton(sec, "Clear board", () =>
             {
                 _s.PcbPath = "";
